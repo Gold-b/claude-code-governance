@@ -275,10 +275,18 @@ else
     cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.json"
   fi
 
-  node -e "
+  # Pass hooks JSON via stdin to avoid MSYS/Windows path mangling
+  cat "$HOOKS_FILE" | node -e "
     const fs = require('fs');
-    const settingsPath = '${SETTINGS_FILE}'.replace(/\\\\/g, '/');
-    const hooksPath = '${HOOKS_FILE}'.replace(/\\\\/g, '/');
+    const path = require('path');
+
+    // Read hooks template from stdin
+    let input = '';
+    const stdin = fs.readFileSync(0, 'utf8');
+    const hooksTemplate = JSON.parse(stdin);
+
+    // Resolve settings path (handles both Unix and Windows)
+    const settingsPath = path.resolve(process.env.HOME || process.env.USERPROFILE, '.claude', 'settings.json');
 
     // Load or create settings
     let settings = {};
@@ -287,9 +295,6 @@ else
     } catch (e) {
       // File doesn't exist or is invalid — start fresh
     }
-
-    // Load hooks template
-    const hooksTemplate = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
 
     // Merge hooks (replace entire hooks section — our hooks are the source of truth)
     settings.hooks = hooksTemplate.hooks;

@@ -1,0 +1,97 @@
+{
+  "_comment": "Governance hooks to merge into ~/.claude/settings.json — all paths use ~/ for portability",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pre-session.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: pre-session check..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pre-task.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: pre-task check..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/governance-guard.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: checking protected-doc write guard..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pre-write.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: pre-write impact map..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/post-milestone.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: post-milestone update..."
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-full-finish.sh",
+            "timeout": 10,
+            "statusMessage": "Checking for uncommitted changes..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[MEMORY MAINTENANCE] Before ending: (1) Verify MEMORY.md < 200 lines (2) No duplicate/stale memory files (3) Completed projects archived (4) Open-Problems.md updated (5) Old handoffs archived (6) All MEMORY.md + CLAUDE.md references valid.'",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/end-session.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: end-session handoff..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-full-finish.sh",
+            "timeout": 10,
+            "statusMessage": "Checking for uncommitted changes..."
+          }
+        ]
+      }
+    ]
+  },
+  "effortLevel": "max"
+}

@@ -14,9 +14,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT
 gov_disabled && exit 0
 
 # Read the tool input to get target file path
+# Security: cap stdin to 64KB to prevent memory exhaustion
 PAYLOAD=""
 if [ ! -t 0 ]; then
-  PAYLOAD=$(cat 2>/dev/null || true)
+  PAYLOAD=$(head -c 65536 2>/dev/null || true)
 fi
 
 if [ -z "$PAYLOAD" ]; then

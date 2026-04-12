@@ -188,7 +188,7 @@ copy_safe() {
 }
 
 # ── 1. Install hooks ────────────────────────────────────────────────────────
-header "Installing Hooks (11 files)"
+header "Installing Hooks (12 files)"
 
 # Root-level hook
 copy_safe "$BUNDLE_DIR/hooks/check-full-finish.sh" \

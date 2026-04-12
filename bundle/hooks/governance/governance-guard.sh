@@ -30,9 +30,10 @@ gov_disabled && exit 0
 
 # Read the full stdin payload (Claude Code hooks receive JSON via stdin).
 # Use a timeout to avoid hanging on systems where stdin is not a pipe.
+# Security: cap stdin to 64KB to prevent memory exhaustion
 PAYLOAD=""
 if [ ! -t 0 ]; then
-  PAYLOAD=$(cat 2>/dev/null || true)
+  PAYLOAD=$(head -c 65536 2>/dev/null || true)
 fi
 
 if [ -z "$PAYLOAD" ]; then
@@ -59,6 +60,9 @@ if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
+# Security: sanitize file path — strip control chars, cap length, prevent prompt injection
+FILE_PATH=$(printf '%s' "$FILE_PATH" | head -c 512 | tr -d '\n\r' | tr -cd '[:print:]')
+
 # Normalize path separators — we match on substring so both Unix and Windows forms work.
 NORMALIZED=$(printf '%s' "$FILE_PATH" | tr '\\' '/')
 
@@ -71,7 +75,7 @@ PROTECTED_PATTERNS=(
   "docs/context/OPEN-PROBLEMS.md"
   "docs/context/HANDOFF.md"
   "docs/context/MEMORY.md"
-  "memory/MEMORY.md"
+  ".claude/projects/c--GoldB-Agent/memory/MEMORY.md"
 )
 
 IS_PROTECTED=0

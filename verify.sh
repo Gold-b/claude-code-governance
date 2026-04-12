@@ -42,6 +42,7 @@ check "  pre-write.sh"            "[ -f ~/.claude/hooks/governance/pre-write.sh 
 check "  post-milestone.sh"       "[ -f ~/.claude/hooks/governance/post-milestone.sh ]"
 check "  end-session.sh"          "[ -f ~/.claude/hooks/governance/end-session.sh ]"
 check "  commit-task-success.sh"  "[ -f ~/.claude/hooks/governance/commit-task-success.sh ]"
+check "  check-docs-updated.sh"   "[ -f ~/.claude/hooks/governance/check-docs-updated.sh ]"
 check "  check-full-finish.sh"    "[ -f ~/.claude/hooks/check-full-finish.sh ]"
 echo ""
 
@@ -79,6 +80,8 @@ if command -v node &>/dev/null; then
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.UserPromptSubmit ? 0 : 1)\""
   check "  PreToolUse hook registered" \
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.PreToolUse ? 0 : 1)\""
+  check "  TaskCompleted hook registered" \
+    "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.TaskCompleted ? 0 : 1)\""
   check "  Stop hook registered" \
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.Stop ? 0 : 1)\""
 fi

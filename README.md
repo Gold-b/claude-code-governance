@@ -1,14 +1,8 @@
-# Context Governance for Claude Code
+# Context Governance Installer for Claude Code
 
-Portable installer that sets up the full Context Governance architecture at the user level (`~/.claude/`). Prevents context drift, silent regressions, and session-to-session information loss.
+Portable installer that sets up the full Context Governance architecture at the user level (`~/.claude/`).
 
-## One-Line Install from GitHub
-
-```bash
-git clone https://github.com/Gold-b/claude-code-governance.git ~/.claude/governance-installer && bash ~/.claude/governance-installer/install.sh
-```
-
-## Local Install (if already cloned)
+## Quick Install
 
 ```bash
 bash ~/.claude/governance-installer/install.sh

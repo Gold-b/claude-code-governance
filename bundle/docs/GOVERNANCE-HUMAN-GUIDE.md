@@ -8,7 +8,7 @@
 
 ## מה זה ולמה זה קיים
 
-ה-Context Governance הוא מערכת ניהול מידע והקשר שפועלת **אוטומטית** בכל סשן של Claude Code. היא נועדה לפתור 5 בעיות שגורמות לרגרסיות, בלבול, ואיבוד עבודה:
+Context Governance הוא מערכת ניהול מידע והקשר שפועלת **אוטומטית** בכל סשן של Claude Code. היא נועדה לפתור 5 בעיות שגורמות לרגרסיות, בלבול, ואיבוד עבודה:
 
 **בעיה 1 — "מאיפה התחלנו?"**
 בלי governance: כל סשן חדש שואל "מה עשינו בפעם האחרונה?" ומבזבז 10 דקות על re-discovery.
@@ -37,7 +37,7 @@
 ברגע שהמערכת מותקנת, הדברים הבאים קורים **בלי שתבקש**:
 
 **בתחילת כל שיחה:**
-- קלוד קורא את קבצי ההקשר הקריטיים
+- Claude קורא את קבצי ההקשר הקריטיים
 - מציג briefing קצר: "מצב נוכחי / פעולה הבאה / סיכונים"
 - אתה רואה ~3-5 שורות בתחילת התגובה הראשונה
 
@@ -47,21 +47,21 @@
 - אם הסיכון נמוך — עובר שקוף
 
 **אחרי כל milestone:**
-- קובץ PLAN.md מתעדכן ברקע
-- קובץ MEMORY.md מקבל רשומה אם הייתה החלטה חשובה
+- PLAN.md מתעדכן ברקע
+- MEMORY.md מקבל רשומה אם הייתה החלטה חשובה
 - אתה לא צריך לעשות כלום
 
 **בסוף כל שיחה:**
-- קובץ HANDOFF.md נכתב אוטומטית
+- HANDOFF.md נכתב אוטומטית
 - הסשן הבא יקרא אותו ויידע מאיפה להמשיך
 
 ---
 
 ## מה עדיין דורש ממך פעולה ידנית
 
-- סקיל **`/full-finish`** — release pipeline (git push, GitHub release). תמיד ידני.
-- סקיל **`/context-governance full`** — ביקורת עומק. תמיד ידנית (פרט ל-cron שבועי).
-- פעולת **Stop-Report** — כל פעם שיש סתירה, Claude עוצר ושואל. זה פיצ'ר, לא באג.
+- **`/full-finish`** — release pipeline (git push, GitHub release). תמיד ידני.
+- **`/context-governance full`** — ביקורת עומק. תמיד ידנית (פרט ל-cron שבועי).
+- **Stop-Report** — כל פעם שיש סתירה, Claude עוצר ושואל. זה פיצ'ר, לא באג.
 - **פעולות git הרסניות** — push --force, reset --hard. תמיד דורשות אישור.
 
 ---
@@ -107,8 +107,9 @@
 
 ---
 
-## מחזור חיים של  HANDOFF
-ה-HANDOFF הוא ה"פתק" שסשן אחד משאיר לסשן הבא.
+## מחזור חיים של HANDOFF
+
+HANDOFF הוא ה"פתק" שסשן אחד משאיר לסשן הבא.
 
 ```
 [active] ←── סשן נוכחי קורא אותו
@@ -124,34 +125,40 @@
 
 ---
 
-## ה-Verification Gate — מה זה ולמה זה חוסם
+## Verification Gate — מה זה ולמה זה חוסם
 
 לפני שClaude מכריז "סיימתי", הוא חייב להציג **ראיה חיצונית** שהעבודה עובדת:
 - פלט בדיקה (test runner) עם PASS
 - פלט build/lint עם exit code 0
-- ה-docker logs שמראים את ההתנהגות החדשה
-- ה-HTTP probe עם קוד תגובה צפוי
-- ה-screenshot של UI עובד
+- docker logs שמראים את ההתנהגות החדשה
+- HTTP probe עם קוד תגובה צפוי
+- screenshot של UI עובד
 
 "בדקתי בעיניים ונראה לי בסדר" — **לא מתקבל.**
 
 ---
 
 ## מתי להפעיל כלים ידנית
-א. | `/init-governance` | פעם אחת כשמתחילים פרויקט חדש |
-ב. | `/context-governance full` | כשחושדים בסתירות, לפני release גדול, פעם בשבוע |
-ג. | `/bootstrapper` | אם ה-briefing האוטומטי לא מופיע (debug) |
-ד. | `/evidence-debugger` | כשחוקרים באג |
-ה. | `/parallel-session-merge` | כשמדביקים פלט מ-GPT / Claude אחר |
-ו. | `/impact-safe-executor` | לפני עריכת קובץ קריטי (בד"כ אוטומטי) |
+
+| פקודה | מתי |
+|---|---|
+| `/init-governance` | פעם אחת כשמתחילים פרויקט חדש |
+| `/context-governance full` | כשחושדים בסתירות, לפני release גדול, פעם בשבוע |
+| `/bootstrapper` | אם ה-briefing האוטומטי לא מופיע (debug) |
+| `/evidence-debugger` | כשחוקרים באג |
+| `/parallel-session-merge` | כשמדביקים פלט מ-GPT / Claude אחר |
+| `/impact-safe-executor` | לפני עריכת קובץ קריטי (בד"כ אוטומטי) |
 
 ---
 
-## איך לכבות Kill Switch?
+## Kill Switch — איך לכבות
+
 אם משהו משתבש או חוסם אותך:
+
 ```bash
 export GOVERNANCE_HOOKS=0
 ```
+
 זה משבית את כל ה-hooks באופן מיידי. Claude חוזר להתנהגות רגילה. לא צריך לערוך אף קובץ. כדי להפעיל מחדש:
 
 ```bash
@@ -161,6 +168,7 @@ unset GOVERNANCE_HOOKS
 ---
 
 ## איך מוסיפים פרויקט חדש
+
 1. פתח את הפרויקט ב-Claude Code
 2. הקלד `/init-governance`
 3. ענה על 3 שאלות (שם, תיאור, ארכיטקטורה)
@@ -181,7 +189,7 @@ unset GOVERNANCE_HOOKS
 הוא מצא סתירה שלא יכול לפתור לבד. צריך את ההכרעה שלך. זה מונע הזיות.
 
 **"מה קורה אם אני רוצה לעבוד בלי governance?"**
-אפשר להגדיר `export GOVERNANCE_HOOKS=0`. או פשוט אל תריץ `/init-governance` — Claude יעבוד רגיל על פרויקטים שלא מאותחלים.
+`export GOVERNANCE_HOOKS=0`. או פשוט אל תריץ `/init-governance` — Claude יעבוד רגיל על פרויקטים שלא מאותחלים.
 
 **"האם זה עובד על כל פרויקט?"**
 כן. ה-skills גנריים. הם מזהים דינמית את המבנה של כל פרויקט דרך CONTEXT-MANIFEST.md. אין שום hardcoding.
@@ -190,18 +198,20 @@ unset GOVERNANCE_HOOKS
 
 ## קבצים חשובים ברמת המשתמש
 
-א. | `~/.claude/settings.json` | רישום ה-hooks (נטען תמיד) |
-ב. | `~/.claude/hooks/governance/*.sh` | סקריפטי ה-hooks (11 קבצים) |
-ג. | `~/.claude/skills/*/SKILL.md` | הגדרות ה-skills (6 governance + קיימים) |
-ד. | `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` | מדריך לסוכנים (מובנה למכונות) |
-ה. | `~/.claude/docs/GOVERNANCE-HUMAN-GUIDE.md` | **הקובץ הזה** |
-ו. | `~/.claude/logs/governance.log` | לוג פעילות hooks (rolling) |
+| נתיב | תפקיד |
+|---|---|
+| `~/.claude/settings.json` | רישום ה-hooks (נטען תמיד) |
+| `~/.claude/hooks/governance/*.sh` | סקריפטי ה-hooks (11 קבצים) |
+| `~/.claude/skills/*/SKILL.md` | הגדרות ה-skills (6 governance + קיימים) |
+| `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` | מדריך לסוכנים (מובנה למכונות) |
+| `~/.claude/docs/GOVERNANCE-HUMAN-GUIDE.md` | **הקובץ הזה** |
+| `~/.claude/logs/governance.log` | לוג פעילות hooks (rolling) |
 
 ---
 
 **כל שינוי ב-hooks או skills — לעדכן את שני המיקומים:**
-א. `~/.claude/hooks/governance/` (מה שרץ בפועל)
-ב. `<project>/.claude/hooks/governance/` (מה שנשמר ב-git)
+1. `~/.claude/hooks/governance/` (מה שרץ בפועל)
+2. `<project>/.claude/hooks/governance/` (מה שנשמר ב-git)
 
 ---
 

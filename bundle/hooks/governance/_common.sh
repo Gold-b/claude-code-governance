@@ -18,16 +18,26 @@ GOVERNANCE_LOG="${GOVERNANCE_LOG:-$HOME/.claude/logs/governance.log}"
 GOVERNANCE_HOOKS="${GOVERNANCE_HOOKS:-1}"
 GOVERNANCE_SKILLS_DIR="${GOVERNANCE_SKILLS_DIR:-$HOME/.claude/skills}"
 
+# Security: validate log path stays under ~/.claude/ to prevent path injection via env var
+case "$GOVERNANCE_LOG" in
+  "$HOME/.claude/"*) ;; # OK
+  *) GOVERNANCE_LOG="$HOME/.claude/logs/governance.log" ;;
+esac
+
 # Ensure log dir exists. Failure here is non-fatal — we still try to run.
 mkdir -p "$(dirname "$GOVERNANCE_LOG")" 2>/dev/null || true
 
 # gov_log <hook_name> <message>
 # Appends a timestamped line to the governance log. Never throws.
+# Sanitizes message to prevent log injection (strips newlines/control chars).
 gov_log() {
   local hook="$1"
-  local msg="$2"
+  local msg
+  msg=$(printf '%s' "$2" | tr -d '\n\r' | tr -cd '[:print:]')
   local ts
   ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown-time")
+  # Refuse to write if log is a symlink
+  [ -L "$GOVERNANCE_LOG" ] && return 0
   echo "[$ts] [$hook] $msg" >> "$GOVERNANCE_LOG" 2>/dev/null || true
 }
 

@@ -65,6 +65,12 @@
             "command": "~/.claude/hooks/check-full-finish.sh",
             "timeout": 10,
             "statusMessage": "Checking for uncommitted changes..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/check-docs-updated.sh",
+            "timeout": 10,
+            "statusMessage": "Checking documentation coverage..."
           }
         ]
       }

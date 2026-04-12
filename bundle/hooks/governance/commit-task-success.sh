@@ -39,6 +39,15 @@ NOW_EPOCH=$(date +%s)
 NOW_ISO=$(date '+%Y-%m-%dT%H:%M:%S%z')
 EXPIRES_EPOCH=$((NOW_EPOCH + 300))  # 5 minutes
 
+# Security: refuse to write if token file is a symlink (symlink attack prevention)
+if [ -L "$TOKEN_FILE" ]; then
+  echo "ERROR: $TOKEN_FILE is a symlink — refusing to write (possible symlink attack)" >&2
+  exit 2
+fi
+
+# Security: rotate old history files (keep last 30 days)
+find "$HISTORY_DIR" -name "*.json" -mtime +30 -delete 2>/dev/null || true
+
 cat > "$TOKEN_FILE" <<JSON
 {
   "created_at": "$NOW_ISO",

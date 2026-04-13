@@ -4,10 +4,17 @@
 # Master Plan §8 — sourced by all governance hook scripts in this directory.
 #
 # Behavior contract:
-#   * Always fail-soft. Any error → log + return 0. Hooks must NEVER block work.
+#   * Exit code rules (HARD RULE — 2026-04-13 deadlock incident):
+#     - UserPromptSubmit hooks: NEVER exit 2. Exit 2 blocks ALL responses,
+#       creating an unrecoverable deadlock. Use exit 0 + warning instead.
+#     - PreToolUse hooks: exit 2 is OK (blocks one tool, LLM can adapt).
+#       BUT prefer exit 0 + warning unless the action is truly destructive.
+#     - Stop hooks: exit 2 is OK (prevents premature session end).
+#     - Infrastructure errors (log write, path parse) → fail-soft (exit 0).
 #   * Idempotent. Running the same hook twice in a row produces the same result.
 #   * Skill-aware. If the corresponding skill is not yet installed (Phase 5
 #     deferred), the hook logs the skip and exits 0.
+#   * Kill switch: GOVERNANCE_HOOKS=0 disables ALL hooks globally.
 #
 # Environment variables:
 #   GOVERNANCE_HOOKS         (default: 1)   set to "0" to disable all governance hooks globally
@@ -70,4 +77,44 @@ gov_phase_state() {
   else
     echo "phase4-plumbing"
   fi
+}
+
+# gov_notify <title> <message> [skill_name]
+# Shows a topmost popup notification on Windows via PowerShell WPF dialog.
+# The popup stays on screen until the user clicks the dismiss button.
+# Runs ASYNC — returns immediately, does NOT block the hook.
+# Fails silently on non-Windows or if PowerShell unavailable.
+# Automatically detects project name from CWD.
+# Arguments are sanitized to prevent command injection.
+gov_notify() {
+  local title="$1"
+  local message="$2"
+  local skill="${3:-}"
+  local script_path
+  script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/gov-notify.ps1"
+
+  # Only on Windows, only if script exists
+  [ ! -f "$script_path" ] && return 0
+  command -v powershell.exe >/dev/null 2>&1 || return 0
+
+  # Detect project name from CWD or CLAUDE.md
+  local project=""
+  project=$(basename "$(pwd)" 2>/dev/null || echo "")
+
+  # Sanitize inputs — strip quotes and special chars to prevent injection
+  title=$(printf '%s' "$title" | tr -d "'\"\`\$" | head -c 200)
+  message=$(printf '%s' "$message" | tr -d "'\"\`\$" | head -c 500)
+  skill=$(printf '%s' "$skill" | tr -d "'\"\`\$" | head -c 100)
+  project=$(printf '%s' "$project" | tr -d "'\"\`\$" | head -c 100)
+
+  # Build args array
+  local args=(-ExecutionPolicy Bypass -WindowStyle Hidden -File "$script_path")
+  args+=(-Title "$title" -Message "$message")
+  [ -n "$skill" ] && args+=(-Skill "$skill")
+  [ -n "$project" ] && args+=(-Project "$project")
+
+  # Run async — fire and forget (do NOT block the hook)
+  powershell.exe "${args[@]}" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  return 0
 }

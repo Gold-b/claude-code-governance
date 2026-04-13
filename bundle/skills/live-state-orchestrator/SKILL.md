@@ -90,7 +90,18 @@ Lifecycle transitions per `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §6:
 - Never mark consumed if work is not actually absorbed
 - Never leave two handoffs `active` simultaneously
 
-### Step 7 — Output summary
+### Step 7 — Update CONTEXT-MANIFEST.md
+After updating the canonical files above, sync the manifest to match:
+- Update the `verified_on` column for every file that was read or written in Steps 1-6
+- If the HANDOFF pointer changed → update the HANDOFF row (`Points to` column + `verified_on`)
+- If a new file was created (new handoff, new gotcha file) → add a row
+- If a file was archived → update its status to `ARCHIVED` (do NOT delete the row)
+
+### Step 8 — Update active rollout/plan headers
+If any sub-plan in PLAN.md transitioned to RESOLVED → check its plan file header status line and update it.
+Example: if SP-1 was marked RESOLVED in PLAN.md but `CONTEXT-GOVERNANCE-ROLLOUT-PLAN.md` header still says "Phase 2 AWAITING" → fix it.
+
+### Step 9 — Output summary
 ```
 [live-state-orchestrator]
 Updated:
@@ -98,6 +109,7 @@ Updated:
 - MEMORY.md: <added entries or "no change">
 - OPEN-PROBLEMS.md: <added/resolved entries>
 - HANDOFF.md: <lifecycle change or "no change">
+- CONTEXT-MANIFEST.md: <rows updated or "no change">
 
 Next action: <from updated PLAN.md>
 Context delta: <one-line summary of what is now true that wasn't before>

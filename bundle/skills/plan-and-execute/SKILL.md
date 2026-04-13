@@ -1,132 +1,173 @@
 ---
 name: plan-and-execute
-description: "Plan & Execute — spawn CTO/Architect/Coder/QA/PM sub-agents to create or rewrite a comprehensive plan, review it, then implement it fully. Asks 3 intake questions to fill placeholders before running."
-user_invocable: true
+description: Plan & Execute — spawn CTO/Architect/Coder/QA/PM sub-agents to create or rewrite a comprehensive plan, review it, then implement it fully. Asks 3 intake questions to fill placeholders before running.
+user-invocable: true
 ---
 
-# /plan-and-execute — Multi-Agent Planning & Execution Pipeline
+# /plan-and-execute — Multi-Agent Plan & Execute Pipeline
 
-You are the **Planning Orchestrator**. Your job is to gather requirements, create a comprehensive plan using specialized sub-agents, refine it, and then execute it fully.
-
-**Language**: Communicate with the user in their preferred language (detect from conversation context or CLAUDE.md). All code, comments, and technical artifacts in **English**.
-
----
-
-## Phase 0 — Intake Questions (MANDATORY)
-
-Before doing ANY work, ask the user these 3 questions using AskUserQuestion. Wait for answers before proceeding.
-
-### Question 1 — Action Type
-> What type of plan do you need?
-> - Create a new plan from scratch
-> - Rewrite/update an existing plan
-> - Other (describe)
-
-### Question 2 — Topic
-> What is the plan about? (Be specific — feature name, bug description, architecture change, etc.)
-
-### Question 3 — Goal
-> What is the desired end state? What should be true when the plan is fully implemented?
-
-Store answers as `{{ACTION}}`, `{{TOPIC}}`, `{{GOAL}}` for use in agent prompts.
+**Language**: Communicate with the user in **Hebrew**. All code, comments, and technical artifacts in **English**.
 
 ---
 
-## Phase 1 — Context Loading
+## Phase 0 — Intake Questions (MANDATORY FIRST STEP)
 
-### 1.1 Load Project Context (Dynamic Discovery)
+Before doing ANYTHING else, you MUST ask the user 3 questions to fill the placeholders in this skill. Use the `AskUserQuestion` tool with the following 3 questions in a SINGLE call:
 
-Read project context using the governance file hierarchy:
+**Question 1 — Action Type:**
+- Header: "Action"
+- Question: "ליצור תכנית חדשה או לשכתב תכנית קיימת?"
+- Options: "ליצור" (תכנית חדשה מאפס) / "לשכתב" (עדכון/שכתוב של תכנית קיימת)
 
-1. **Project CLAUDE.md** — read from CWD or nearest parent containing CLAUDE.md
-2. **`docs/context/CONTEXT-MANIFEST.md`** — if the project is governed, this is the meta-index
-3. **`Plans/`** directory — existing plans for overlap detection
-4. **`docs/context/OPEN-PROBLEMS.md`** or equivalent — known issues to incorporate
-5. **Auto-memory** — `~/.claude/projects/<project-slug>/memory/` for this project's Claude Code memory
+**Question 2 — Topic:**
+- Header: "Topic"
+- Question: "מהו הנושא המרכזי של התכנית?"
+- Options: Let the user type freely (use 2 example options relevant to the project like "Feature חדש", "ארכיטקטורה", "Bug Fix", "שדרוג מודול" — the user will likely pick "Other" and type their own)
 
-If any file doesn't exist, skip it — not all projects have all layers.
+**Question 3 — Goal:**
+- Header: "Goal"
+- Question: "מהי מטרת התכנית? (מה אנחנו רוצים להשיג?)"
+- Options: Same approach — provide 2 generic examples like "שיפור ביצועים", "הוספת יכולת חדשה", "תיקון בעיה קריטית" — expecting the user to type their own via "Other"
 
-### 1.2 Create Plan Workspace
+Once you receive the 3 answers, substitute them into the placeholders below and proceed to Phase 1.
 
-Create a dedicated folder for this plan:
+---
+
+## Phase 1 — Context Loading & Sub-Agent Orchestration
+
+Execute the following steps IN ORDER:
+
+### 1.1 Load ALL Relevant Context FIRST (before spawning any agent)
+
+Read the following files/directories to load full project context into YOUR context window:
+
+- `MDs/Updated-Important-Facts.md`
+- `CLAUDE.md` (project root)
+- `Plans/` directory — all existing plan files
+- `MDs/` directory — all knowledge files
+- Memory files from `~/.claude/projects/c--GoldB-Agent/memory/`
+- Any schema files, config files, or architecture docs referenced in the above
+
+**You MUST have this context loaded BEFORE spawning sub-agents**, so that when agents arrive, the orchestrator (you) already has full knowledge.
+
+### 1.2 Create Shared Folder
+
+Create a dedicated shared folder for inter-agent communication:
 
 ```
-Plans/Shared-Folder/{topic-slug}_{YYYY-MM-DD_HH-mm}/
-├── PLAN.md          ← Main plan (created by sub-agents)
-├── REVIEW.md        ← Review notes (Phase 2)
-└── EXECUTION-LOG.md ← Progress tracking (Phase 3)
+Plans/Shared-Folder/{plan-topic-slug}_{YYYY-MM-DD_HH-mm}/
 ```
 
-If `Plans/` doesn't exist, create it.
+Create the main plan file inside it: `PLAN.md`
 
-### 1.3 Spawn Sub-Agents (Parallel)
+### 1.3 Spawn Sub-Agents
 
-Launch 5 agents in parallel, each with the project context + intake answers:
+Using the Agent tool, spawn the following specialized sub-agents. Each agent receives the full context you loaded in 1.1 plus a clear role description:
 
-| Agent | Model | Role |
-|-------|-------|------|
-| **CTO** | opus | Strategic decisions, scope, dependencies, risk assessment |
-| **Architect** | opus | Technical design, file structure, API contracts, data flows |
-| **Coder** | sonnet | Implementation plan — exact files, functions, line-level changes |
-| **QA** | sonnet | Test strategy, edge cases, regression risks, verification criteria |
-| **PM** | sonnet | Timeline, milestones, deliverables, acceptance criteria |
+| Role | Responsibility |
+|------|---------------|
+| **CTO** | High-level architecture decisions, technology choices, risk assessment |
+| **Software Architect** | Detailed system design, module boundaries, data flow, API contracts |
+| **Expert Coder** | Implementation feasibility, code structure, patterns, edge cases |
+| **QA Expert** | Test strategy, test cases, E2E scenarios, regression risks |
+| **PM** | Task breakdown, dependencies, milestones, acceptance criteria |
 
-**Each agent prompt MUST include:**
-1. The `{{ACTION}}`, `{{TOPIC}}`, `{{GOAL}}` from intake
-2. Full project context loaded in 1.1 (CLAUDE.md content, conventions, gotchas)
-3. Instruction to output a structured plan section (not code)
+**Each agent must contribute to the plan file** with their domain-specific section.
+
+### 1.4 Build the Plan
+
+The plan document (`PLAN.md`) must include:
+
+1. **Executive Summary** — what we're doing and why
+2. **Architecture & Design** (Architect + CTO)
+3. **Implementation Steps** — numbered, ordered, with file paths (Coder + Architect)
+4. **QA Strategy** — tests, E2E, validation steps embedded IN EVERY implementation step (QA)
+5. **Risk Assessment** — what could go wrong and mitigations (CTO + PM)
+6. **Task Breakdown & Dependencies** (PM)
+7. **Acceptance Criteria** — how we know we're done (PM + QA)
+
+The ACTION is: **{{ACTION}}** (ליצור / לשכתב)
+The TOPIC is: **{{TOPIC}}**
+The GOAL is: **{{GOAL}}**
 
 ---
 
 ## Phase 2 — Plan Review & Enrichment
 
-### 2.1 Merge Agent Outputs
+### 2.1 Second Pass Context Reload
 
-Combine all 5 agent outputs into a single PLAN.md:
+Re-read all MD, Plans, Schemas, and Memory files. Look specifically for:
+- Facts that CONTRADICT anything in the plan
+- Existing implementations that the plan overlaps with
+- Gotchas from CLAUDE.md that apply to the plan's scope
+- Security considerations from the hardening guidelines
 
-```markdown
-# Plan: {{TOPIC}}
-**Goal:** {{GOAL}}
-**Created:** [timestamp]
+### 2.2 Update the Plan
 
-## 1. Strategic Overview (from CTO)
-## 2. Architecture (from Architect)
-## 3. Implementation Plan (from Coder)
-## 4. Test Strategy (from QA)
-## 5. Milestones & Acceptance (from PM)
+For every update, addition, or correction — add a timestamp:
+
+```
+[2026-XX-XX HH:MM] Updated: <description of change>
 ```
 
-### 2.2 Second-Pass Review
+Improvements to apply:
+- Cross-reference with gotchas list (170+ items in CLAUDE.md)
+- Verify no architectural violations
+- Ensure QA + Tests + E2E are embedded in EVERY step
+- Add missing edge cases
+- Strengthen security considerations
+- Validate all file paths and module references exist
 
-Re-read the merged plan and verify:
-- No contradictions between sections
-- Architecture decisions align with implementation plan
-- Test strategy covers all implementation changes
-- Cross-reference with project CLAUDE.md gotchas/conventions (if they exist)
-- No missing dependencies or circular dependencies
+### 2.3 Final Review
 
-### 2.3 User Approval
-
-Present the plan to the user. Wait for approval before Phase 3. Accept modifications.
+Run one final review pass with the QA agent to verify:
+- Every step has a verification method
+- No circular dependencies
+- All acceptance criteria are testable
+- The plan is implementable in sequence
 
 ---
 
 ## Phase 3 — Full Implementation
 
-Execute the plan step by step:
+### 3.1 Execute the Plan
 
-1. Follow the Coder's implementation plan in order
-2. After each milestone, run QA's test strategy for that scope
-3. Track progress in EXECUTION-LOG.md
-4. If a step fails or deviates from plan, stop and re-plan that section
-5. Mark completed milestones in PLAN.md
+Implement ALL steps in the plan, continuously, until completion:
+
+1. Follow the exact order defined in the plan
+2. **Before each code-changing step**, run the `/impact-safe-executor` skill mentally:
+   - Identify files that will be modified and their dependents (impact map)
+   - Verify the step stays within the approved plan scope
+   - If the step would touch files outside the plan's scope → STOP and ask the user
+   - Prefer minimal edits — don't refactor surrounding code
+   - Note: this is a lightweight check, not a full skill invocation. Apply the principles (impact awareness, scope enforcement, minimal edit) inline as you work.
+3. After each step, run the QA checks defined for that step
+4. If a step fails QA — fix before proceeding
+5. Update the plan file with completion timestamps:
+   ```
+   [2026-XX-XX HH:MM] COMPLETED: Step X — <description>
+   ```
+6. Use sub-agents for parallel implementation where steps are independent
+
+### 3.2 Post-Implementation Verification
+
+After ALL steps are complete:
+- Run full QA suite (server-side + client-side)
+- Verify no regressions introduced
+- Confirm all acceptance criteria are met
+- Update plan status to COMPLETED
+
+### 3.3 Mandatory Finish
+
+After successful implementation and verification, invoke `/full-finish` to run the full release pipeline.
 
 ---
 
 ## Rules
 
-- **Dynamic context**: Always read the project's own CLAUDE.md and governance files — never assume paths or conventions
-- **Plan before code**: Phase 3 only starts after user approves the plan
-- **Verify before marking done**: Every milestone needs external evidence (test output, build log, etc.)
-- **Communicate in user's language**: Detect from conversation or CLAUDE.md preferences
-- **Code in English**: All code, comments, variable names, and file paths in English
+- **Source repo is `C:\openclaw-docker\`** — ALL edits there. NEVER edit `C:\GoldB-Agent\` directly.
+- **Every implementation step MUST have QA embedded** — no exceptions.
+- **Timestamps on everything** — plan changes, completions, issues found.
+- **Shared folder is the single source of truth** for inter-agent communication.
+- **thinkingBudget: 0** on ALL LLM calls.
+- **Hebrew for communication, English for code.**

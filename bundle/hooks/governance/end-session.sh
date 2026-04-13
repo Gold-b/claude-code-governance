@@ -134,12 +134,62 @@ fi
 # --- All checks passed ---
 gov_log "end-session" "passed — PLAN v${PLAN_VER:-?} MEMORY v${MEM_VER:-?} HANDOFF v${HANDOFF_POINTS:-?} == version.json v${VJ_VER}"
 
-# Passed checks — still output a gentle reminder for handoff quality
+# --- Auto-push governance changes to GitHub if pending ---
+PUSH_FLAG="$HOME/.claude/logs/.governance-push-pending"
+if [ -f "$PUSH_FLAG" ]; then
+  INSTALLER_REPO="$HOME/.claude/governance-installer"
+  GH_REPO="/c/tmp/claude-code-governance"
+
+  # Clone if not present, or pull if exists
+  if [ ! -d "$GH_REPO/.git" ]; then
+    git clone "https://github.com/Gold-b/claude-code-governance.git" "$GH_REPO" 2>/dev/null
+  fi
+
+  if [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then
+    # Sync installer bundle -> git repo
+    cp -r "$INSTALLER_REPO/bundle/"* "$GH_REPO/bundle/" 2>/dev/null
+    cp "$INSTALLER_REPO/install.sh" "$GH_REPO/install.sh" 2>/dev/null
+    cp "$INSTALLER_REPO/verify.sh" "$GH_REPO/verify.sh" 2>/dev/null
+
+    cd "$GH_REPO"
+    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+      git add -A 2>/dev/null
+      CHANGED_FILES=$(cat "$PUSH_FLAG" | sed 's|.* ||' | xargs -I{} basename {} | sort -u | tr '\n' ', ' | sed 's/,$//')
+      git -c user.name="Gold-b" -c user.email="Gold-b@users.noreply.github.com" \
+        commit -m "Auto-sync governance files: ${CHANGED_FILES:-updated}" 2>/dev/null
+      if git push origin master 2>/dev/null; then
+        gov_log "end-session" "GitHub push SUCCESS — Gold-b/claude-code-governance updated"
+        echo "[GOVERNANCE] GitHub repo Gold-b/claude-code-governance auto-pushed."
+      else
+        gov_log "end-session" "GitHub push FAILED — will retry next session"
+        echo "[GOVERNANCE] WARNING: GitHub push failed. Changes saved locally, will retry." >&2
+      fi
+    else
+      gov_log "end-session" "GitHub repo already in sync — no push needed"
+    fi
+    cd - >/dev/null 2>&1
+  fi
+
+  rm -f "$PUSH_FLAG"
+fi
+
+# Passed structural checks — now enforce handoff CONTENT freshness.
+# The structural check above only verifies the handoff FILE exists.
+# This instruction tells the LLM to verify the CONTENT is complete.
 cat <<ENDMSG
-[GOVERNANCE] Session ending cleanly. Version alignment verified (v${VJ_VER}).
-Before final stop, ensure your handoff at docs/context/HANDOFF.md covers:
-- What was done this session
-- What is still open
-- Exact next action for the next session
+[GOVERNANCE-ENFORCEMENT] Session stop ALLOWED — structural checks passed (v${VJ_VER}).
+
+MANDATORY BEFORE FINAL STOP — verify handoff CONTENT is complete:
+The handoff file MDs/HANDOFF-v${VJ_VER}.md exists, but its content may be stale
+if work was done AFTER it was first written. You MUST verify it covers:
+
+1. ALL completed work this session (not just what was done before the handoff was first created)
+2. ALL plan status changes (SP closures, phase completions)
+3. ALL bug fixes and infrastructure changes
+4. Current open issues and next actions
+5. Git state (last commit hash)
+
+If the handoff is missing any of the above, UPDATE IT NOW before stopping.
+Read the file, compare to what actually happened, and edit if needed.
 ENDMSG
 exit 0

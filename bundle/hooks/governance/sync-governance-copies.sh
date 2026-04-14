@@ -24,21 +24,27 @@ if [ -z "$INPUT" ]; then
   exit 0
 fi
 
-# Extract file_path from JSON (python3 for reliability, fallback to grep)
+# Extract file_path from JSON. Claude Code PostToolUse schema is:
+#   {"tool_input":{"file_path":"..."}, "tool_name":"Edit", "cwd":"..."}
+# Older format had file_path at top-level. Handle both.
 FILE_PATH=""
 if command -v python3 &>/dev/null; then
   FILE_PATH=$(echo "$INPUT" | python3 -c "
 import sys, json
 try:
   d = json.load(sys.stdin)
-  print(d.get('file_path',''))
+  # Try nested (correct for PostToolUse), then top-level, then tool_response
+  p = d.get('tool_input', {}).get('file_path', '') or d.get('file_path', '') or d.get('tool_response', {}).get('filePath', '')
+  print(p)
 except: pass
 " 2>/dev/null)
 fi
+# Fallback: regex catches either nested or top-level file_path
 if [ -z "$FILE_PATH" ]; then
   FILE_PATH=$(echo "$INPUT" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"file_path"[[:space:]]*:[[:space:]]*"//;s/"$//')
 fi
 if [ -z "$FILE_PATH" ]; then
+  gov_log "sync-copies" "no file_path extracted from stdin (len=${#INPUT})"
   exit 0
 fi
 

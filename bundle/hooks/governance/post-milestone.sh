@@ -24,13 +24,29 @@ if [ ! -f "docs/context/CONTEXT-MANIFEST.md" ]; then
 fi
 
 # --- Track changed files (append-only log) ---
+# PostToolUse stdin: {"tool_input":{"file_path":"..."}, "tool_name":"Edit", "cwd":"..."}
+# Older versions had file_path at top-level. Handle both.
 CHANGES_LOG="$HOME/.claude/logs/.gov-session-changes"
-FILE_CHANGED="unknown"
+FILE_CHANGED=""
 if [ ! -t 0 ]; then
   INPUT=$(cat 2>/dev/null || echo "{}")
-  FILE_CHANGED=$(echo "$INPUT" | grep -oP '"file_path"\s*:\s*"([^"]+)"' | head -1 | sed 's/.*"file_path"\s*:\s*"\([^"]*\)".*/\1/' 2>/dev/null || echo "unknown")
+  # Prefer python3 JSON parsing (handles nesting correctly)
+  if command -v python3 &>/dev/null; then
+    FILE_CHANGED=$(echo "$INPUT" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    p = d.get('tool_input', {}).get('file_path', '') or d.get('file_path', '') or d.get('tool_response', {}).get('filePath', '')
+    print(p)
+except: pass
+" 2>/dev/null)
+  fi
+  # Fallback: regex — matches file_path at any nesting depth
+  if [ -z "$FILE_CHANGED" ]; then
+    FILE_CHANGED=$(echo "$INPUT" | grep -oP '"file_path"\s*:\s*"([^"]+)"' | head -1 | sed 's/.*"file_path"\s*:\s*"\([^"]*\)".*/\1/' 2>/dev/null)
+  fi
 fi
-if [ "$FILE_CHANGED" != "unknown" ] && [ -n "$FILE_CHANGED" ]; then
+if [ -n "$FILE_CHANGED" ]; then
   echo "$FILE_CHANGED" >> "$CHANGES_LOG" 2>/dev/null
 fi
 

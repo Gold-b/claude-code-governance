@@ -22,15 +22,34 @@ if [ ! -f "docs/context/CONTEXT-MANIFEST.md" ]; then
   exit 0
 fi
 
-# Read user prompt from stdin
+# Read user prompt from stdin (JSON: {"prompt":"...","session_id":"...","cwd":"...",...})
 if [ -t 0 ]; then
   exit 0
 fi
 
-INPUT=$(cat 2>/dev/null || echo "")
-if [ -z "$INPUT" ]; then
+RAW_INPUT=$(cat 2>/dev/null || echo "")
+if [ -z "$RAW_INPUT" ]; then
   exit 0
 fi
+
+# Extract only the user's typed message from the JSON payload.
+# Without this, metadata (session_id, transcript_path, cwd) inflates the length.
+# Use exit code to distinguish "extraction failed" from "prompt is empty".
+INPUT=$(echo "$RAW_INPUT" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('prompt', ''))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null)
+PY_RC=$?
+# Fallback only if python3 genuinely failed (non-zero exit), not on empty prompt
+if [ "$PY_RC" -ne 0 ]; then
+  INPUT="$RAW_INPUT"
+fi
+# Empty prompt = nothing to analyze, skip
+[ -z "$INPUT" ] && exit 0
 
 INPUT_LEN=${#INPUT}
 

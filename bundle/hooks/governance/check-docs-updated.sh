@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# Source _common.sh for gov_notify (best-effort — don't fail if missing)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR="."
+. "$SCRIPT_DIR/_common.sh" 2>/dev/null || true
+
 # --- Config ---
 SOURCE_REPO="/c/openclaw-docker"
 GOTCHAS="docs/context/GOTCHAS.md"
@@ -44,14 +48,26 @@ if [[ -n "$DOC_CHANGES" ]] || [[ "$RECENT_MEMORY" -gt 0 ]]; then
   exit 0
 fi
 
-# --- Code changed but no docs updated — WARN ---
+# --- Code changed but no docs updated — BLOCK ---
 NUM_FILES=$(echo "$CODE_CHANGES" | wc -l)
-echo "[doc-check] WARNING: $NUM_FILES code file(s) modified but NO documentation updated."
-echo "[doc-check] Changed files: $(echo "$CODE_CHANGES" | tr '\n' ', ' | sed 's/,$//')"
-echo "[doc-check] Before marking this task as done, you MUST:"
-echo "  1. Add new gotchas to docs/context/GOTCHAS.md (if bugs/pitfalls discovered)"
-echo "  2. Save memory files for decisions/lessons learned"
-echo "  3. Update MDs/Open-Problems.md (if issues resolved or discovered)"
-echo "[doc-check] Rule: 'Document at moment of discovery, not after.'"
-echo "[doc-check] To skip (docs-only or trivial change): this is a warning, not a block."
-exit 0
+
+# Show popup notification for missing docs
+gov_notify \
+  "תיעוד חסר" \
+  "${NUM_FILES} קבצי קוד שונו ללא עדכון תיעוד. יש לתעד ממצאים." \
+  "Documentation" 2>/dev/null || true
+
+cat >&2 <<ERRMSG
+[doc-check] BLOCKED: $NUM_FILES code file(s) modified but NO documentation updated.
+Changed files: $(echo "$CODE_CHANGES" | tr '\n' ', ' | sed 's/,$//')
+
+Before this task can complete, you MUST update at least ONE of:
+  1. docs/context/GOTCHAS.md (if bugs/pitfalls discovered)
+  2. Memory files (for decisions/lessons learned)
+  3. MDs/Open-Problems.md (if issues resolved or discovered)
+
+Rule: 'Document at moment of discovery, not after.'
+
+If this is a truly trivial change (typo, formatting), override with GOVERNANCE_HOOKS=0.
+ERRMSG
+exit 2

@@ -49,8 +49,9 @@ if [ ! -f "$PROJECT_ROOT/version.json" ]; then
 fi
 
 # --- Extract current version from version.json ---
+# Strip trailing dots from greedy [0-9.]* match via sed
 VJ_VER=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$PROJECT_ROOT/version.json" 2>/dev/null \
-  | grep -o '[0-9][0-9.]*')
+  | grep -o '[0-9][0-9.]*' | sed 's/\.$//' | head -1)
 if [ -z "$VJ_VER" ]; then
   gov_log "end-session" "could not parse version.json — skip (fail-soft)"
   exit 0
@@ -62,7 +63,7 @@ DIRECTIVES=""
 # --- Check 1: PLAN.md version ---
 if [ -f "$PROJECT_ROOT/Plans/PLAN.md" ]; then
   PLAN_VER=$(grep -o 'Project version:.*v[0-9][0-9.]*' "$PROJECT_ROOT/Plans/PLAN.md" 2>/dev/null \
-    | grep -o '[0-9][0-9.]*' | head -1)
+    | grep -o '[0-9][0-9.]*' | sed 's/\.$//' | head -1)
   if [ -n "$PLAN_VER" ] && [ "$VJ_VER" != "$PLAN_VER" ]; then
     ISSUES="${ISSUES}\n  - Plans/PLAN.md says v${PLAN_VER}, version.json says v${VJ_VER}"
     DIRECTIVES="${DIRECTIVES}\n  (a) Update Plans/PLAN.md: change 'Project version: v${PLAN_VER}' to 'Project version: v${VJ_VER}'. Add milestone log entries for every version between v${PLAN_VER} and v${VJ_VER} (read git log to get details). Update sub-plan statuses if they changed."
@@ -72,7 +73,7 @@ fi
 # --- Check 2: MEMORY.md version ---
 if [ -f "$PROJECT_ROOT/docs/context/MEMORY.md" ]; then
   MEM_VER=$(grep -o 'Project version:.*v[0-9][0-9.]*' "$PROJECT_ROOT/docs/context/MEMORY.md" 2>/dev/null \
-    | grep -o '[0-9][0-9.]*' | head -1)
+    | grep -o '[0-9][0-9.]*' | sed 's/\.$//' | head -1)
   if [ -n "$MEM_VER" ] && [ "$VJ_VER" != "$MEM_VER" ]; then
     ISSUES="${ISSUES}\n  - docs/context/MEMORY.md says v${MEM_VER}, version.json says v${VJ_VER}"
     DIRECTIVES="${DIRECTIVES}\n  (b) Update docs/context/MEMORY.md Active Summary: change version to v${VJ_VER}, update phase status, update active handoff reference, add any new durable decisions or lessons learned from this session."
@@ -82,9 +83,10 @@ fi
 # --- Check 3: Handoff for current version ---
 HANDOFF_EXISTS=0
 if [ -f "$PROJECT_ROOT/docs/context/HANDOFF.md" ]; then
-  # Check if pointer references current version
-  HANDOFF_POINTS=$(grep -o 'HANDOFF-v[0-9][0-9.]*' "$PROJECT_ROOT/docs/context/HANDOFF.md" 2>/dev/null \
-    | grep -o '[0-9][0-9.]*' | head -1)
+  # Extract version from the YAML points_to field specifically, not from Markdown body.
+  # This avoids false matches on older version references in the file text.
+  HANDOFF_POINTS=$(grep '^points_to:' "$PROJECT_ROOT/docs/context/HANDOFF.md" 2>/dev/null \
+    | grep -o 'HANDOFF-v[0-9][0-9.]*' | grep -o '[0-9][0-9.]*' | sed 's/\.$//' | head -1)
   if [ -n "$HANDOFF_POINTS" ] && [ "$VJ_VER" = "$HANDOFF_POINTS" ]; then
     HANDOFF_EXISTS=1
   fi
@@ -102,7 +104,13 @@ fi
 
 # --- Enforce ---
 if [ -n "$ISSUES" ]; then
-  gov_log "end-session" "BLOCKED: governance stale —$(echo -e "$ISSUES" | tr '\n' ' ')"
+  gov_log "end-session" "BLOCKED: governance stale — $(printf '%b' "$ISSUES" | tr '\n' ' ')"
+
+  # Show popup notification for stale governance
+  gov_notify \
+    "שער שמירה" \
+    "קבצי governance לא מעודכנים. יש לעדכן לפני סיום הסשן." \
+    "/live-state-orchestrator"
 
   # stderr → shown as hook error (blocks the stop)
   printf "[end-session] BLOCKED — governance files are stale. Fix before stopping.\n" >&2
@@ -134,6 +142,29 @@ fi
 # --- All checks passed ---
 gov_log "end-session" "passed — PLAN v${PLAN_VER:-?} MEMORY v${MEM_VER:-?} HANDOFF v${HANDOFF_POINTS:-?} == version.json v${VJ_VER}"
 
+# --- Check for unreleased commits (advisory — recommend /full-finish) ---
+# Detect commits after the last version.json bump (the release commit).
+# Tags aren't synced locally, so we find the commit that last changed version.json.
+# Excludes "Build EXE for v*" commits — those ARE part of the release.
+if [ -d "$PROJECT_ROOT/.git" ]; then
+  LAST_VER_COMMIT=$(cd "$PROJECT_ROOT" && git log -1 --format='%H' -- version.json 2>/dev/null)
+  if [ -n "$LAST_VER_COMMIT" ]; then
+    # Count commits since version bump, excluding "Build EXE" release-completion commits
+    UNRELEASED=$(cd "$PROJECT_ROOT" && git log --format='%s' "${LAST_VER_COMMIT}..HEAD" 2>/dev/null \
+      | grep -vcE '^Build EXE for v[0-9]' 2>/dev/null | tr -d ' ')
+    # grep -vc returns 1 when no lines match; normalize empty → 0
+    [ -z "$UNRELEASED" ] && UNRELEASED=0
+    if [ "$UNRELEASED" -gt 0 ]; then
+      gov_log "end-session" "ADVISORY: $UNRELEASED unreleased commits since v${VJ_VER} version bump"
+      gov_notify \
+        "שחרור גרסה" \
+        "${UNRELEASED} קומיטים לא שוחררו מאז v${VJ_VER}. מומלץ להריץ שחרור." \
+        "/full-finish"
+      echo "[GOVERNANCE ADVISORY] $UNRELEASED commits since v${VJ_VER} version bump have not been released. Consider running /full-finish before ending the session."
+    fi
+  fi
+fi
+
 # --- Auto-push governance changes to GitHub if pending ---
 PUSH_FLAG="$HOME/.claude/logs/.governance-push-pending"
 if [ -f "$PUSH_FLAG" ]; then
@@ -146,50 +177,34 @@ if [ -f "$PUSH_FLAG" ]; then
   fi
 
   if [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then
-    # Sync installer bundle -> git repo
+    # Sync installer bundle -> git repo (specific files only, not git add -A)
     cp -r "$INSTALLER_REPO/bundle/"* "$GH_REPO/bundle/" 2>/dev/null
     cp "$INSTALLER_REPO/install.sh" "$GH_REPO/install.sh" 2>/dev/null
     cp "$INSTALLER_REPO/verify.sh" "$GH_REPO/verify.sh" 2>/dev/null
 
-    cd "$GH_REPO"
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-      git add -A 2>/dev/null
-      CHANGED_FILES=$(cat "$PUSH_FLAG" | sed 's|.* ||' | xargs -I{} basename {} | sort -u | tr '\n' ', ' | sed 's/,$//')
-      git -c user.name="Gold-b" -c user.email="Gold-b@users.noreply.github.com" \
-        commit -m "Auto-sync governance files: ${CHANGED_FILES:-updated}" 2>/dev/null
-      if git push origin master 2>/dev/null; then
-        gov_log "end-session" "GitHub push SUCCESS — Gold-b/claude-code-governance updated"
-        echo "[GOVERNANCE] GitHub repo Gold-b/claude-code-governance auto-pushed."
+    # Run git operations in a subshell to avoid changing the main script's CWD
+    (
+      cd "$GH_REPO" || exit 1
+      if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+        # Stage only known tracked files + bundle dir, not everything
+        git add bundle/ install.sh verify.sh 2>/dev/null
+        CHANGED_FILES=$(sed 's|.* ||' < "$PUSH_FLAG" | while IFS= read -r f; do basename "$f" 2>/dev/null; done | sort -u | tr '\n' ', ' | sed 's/,$//')
+        git -c user.name="Gold-b" -c user.email="Gold-b@users.noreply.github.com" \
+          commit -m "Auto-sync governance files: ${CHANGED_FILES:-updated}" 2>/dev/null
+        if git push origin master 2>/dev/null; then
+          gov_log "end-session" "GitHub push SUCCESS — Gold-b/claude-code-governance updated"
+          echo "[GOVERNANCE] GitHub repo Gold-b/claude-code-governance auto-pushed."
+        else
+          gov_log "end-session" "GitHub push FAILED — will retry next session"
+          echo "[GOVERNANCE] WARNING: GitHub push failed. Changes saved locally, will retry." >&2
+        fi
       else
-        gov_log "end-session" "GitHub push FAILED — will retry next session"
-        echo "[GOVERNANCE] WARNING: GitHub push failed. Changes saved locally, will retry." >&2
+        gov_log "end-session" "GitHub repo already in sync — no push needed"
       fi
-    else
-      gov_log "end-session" "GitHub repo already in sync — no push needed"
-    fi
-    cd - >/dev/null 2>&1
+    )
   fi
 
   rm -f "$PUSH_FLAG"
 fi
 
-# Passed structural checks — now enforce handoff CONTENT freshness.
-# The structural check above only verifies the handoff FILE exists.
-# This instruction tells the LLM to verify the CONTENT is complete.
-cat <<ENDMSG
-[GOVERNANCE-ENFORCEMENT] Session stop ALLOWED — structural checks passed (v${VJ_VER}).
-
-MANDATORY BEFORE FINAL STOP — verify handoff CONTENT is complete:
-The handoff file MDs/HANDOFF-v${VJ_VER}.md exists, but its content may be stale
-if work was done AFTER it was first written. You MUST verify it covers:
-
-1. ALL completed work this session (not just what was done before the handoff was first created)
-2. ALL plan status changes (SP closures, phase completions)
-3. ALL bug fixes and infrastructure changes
-4. Current open issues and next actions
-5. Git state (last commit hash)
-
-If the handoff is missing any of the above, UPDATE IT NOW before stopping.
-Read the file, compare to what actually happened, and edit if needed.
-ENDMSG
 exit 0

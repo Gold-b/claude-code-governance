@@ -93,6 +93,9 @@ gov_notify() {
   local script_path
   script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/gov-notify.ps1"
 
+  # Popup kill switch (separate from GOVERNANCE_HOOKS — allows silent smoke tests)
+  [ "${GOV_NOTIFY:-1}" = "0" ] && return 0
+
   # Only on Windows, only if script exists
   [ ! -f "$script_path" ] && return 0
   command -v powershell.exe >/dev/null 2>&1 || return 0
@@ -113,8 +116,10 @@ gov_notify() {
   [ -n "$skill" ] && args+=(-Skill "$skill")
   [ -n "$project" ] && args+=(-Project "$project")
 
-  # Run async — fire and forget (do NOT block the hook)
-  powershell.exe "${args[@]}" </dev/null >/dev/null 2>&1 &
+  # Run async — fire and forget (do NOT block the hook).
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from converting arguments that start
+  # with "/" (e.g., "/full-finish") to Windows paths ("C:/Program Files/Git/full-finish").
+  MSYS_NO_PATHCONV=1 powershell.exe "${args[@]}" </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true
   return 0
 }

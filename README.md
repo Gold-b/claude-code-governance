@@ -40,12 +40,31 @@ bash ~/.claude/governance-installer/install.sh
 - **live-state-orchestrator** — Keeps PLAN/MEMORY/HANDOFF in sync
 - **parallel-session-merge** — Reconciles multi-agent parallel work
 
-### Extended Skills (5, skipped with `--core-only`)
+### Extended Skills (6, skipped with `--core-only`)
 - **plan-and-execute** — Multi-agent planning pipeline
 - **qa-sec** — QA + Security audit suite
 - **multi-agents** — Orchestrated agent teams
 - **full-finish** — Universal post-task release pipeline
+- **pre-close-check** — Parallel-session drift protection before any close/handoff/release (NEW 2026-04-17)
 - **enable-remote-code** — Remote control for Claude Code sessions
+
+### Pre-Close Reality Check (2026-04-17)
+
+The `pre-close-check` skill protects against **parallel-session drift** — the scenario where two Claude sessions run concurrently on the same project and one closes with stale state that overwrites the other's work.
+
+**Triggered automatically before:**
+- `/full-finish` Phase 0 (before any release)
+- `/live-state-orchestrator` HANDOFF writes
+- `/plan-and-execute` Phase 3.3 (governance state update)
+
+**5 checks performed:**
+1. `git log --since="60 minutes ago"` — commits from parallel sessions
+2. Handoff file mtimes vs session start
+3. `version.json` ↔ `CLAUDE.md` ↔ `HANDOFF` pointer consistency
+4. Active handoff count = 1 (dual handoffs = drift)
+5. `CONTEXT-MANIFEST.md` in sync with actual handoff state
+
+If `PARALLEL_SESSION_DETECTED` or `DRIFT_DETECTED` → calling skill halts, asks user how to resolve. Prevents the 2026-04-17 `v1.4.112-b/v1.4.113` incident class of errors.
 
 ### Docs (2 guides in `~/.claude/docs/`)
 - **GOVERNANCE-AGENT-GUIDE.md** — Structured guide for LLM implementation

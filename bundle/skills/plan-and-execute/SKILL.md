@@ -219,7 +219,9 @@ After ALL steps are complete:
 
 ### 3.3 Governance State Update
 
-After successful implementation and verification, invoke `/live-state-orchestrator` to update the governance layer. The orchestrator will handle:
+**MANDATORY FIRST STEP:** Invoke `/pre-close-check` before any governance write. If verdict is not `clean`, STOP and resolve parallel-session drift before proceeding. See `~/.claude/skills/pre-close-check/SKILL.md` for details.
+
+After the pre-close check passes, invoke `/live-state-orchestrator` to update the governance layer. The orchestrator will handle:
 
 1. **`Plans/PLAN.md`** — add milestone log entry with completion date and summary
 2. **`docs/context/OPEN-PROBLEMS.md`** — mark any resolved items, add any new issues discovered

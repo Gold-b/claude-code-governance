@@ -208,7 +208,19 @@ Before marking ANY task as DONE or RESOLVED:
 | `/impact-safe-executor` | Pre-write safety gate with impact map | Before every code edit |
 | `/evidence-debugger` | Root-cause diagnosis with confidence | When investigating bugs |
 | `/parallel-session-merge` | Reconcile multiple session outputs | When importing external session work |
+| `/pre-close-check` | Verify no parallel session drift before close/handoff/release | MANDATORY before `/full-finish`, `/live-state-orchestrator` HANDOFF writes, `/plan-and-execute` Phase 3.3 |
 | `/init-governance` | Scaffold governance structure in new project | Once per project |
+
+### 9.1 Pre-Close Reality Check (2026-04-17)
+
+Added after the v1.4.112-b/v1.4.113 incident where a session closed with a stale handoff while a parallel session had already released a new version. The root cause was trusting in-session state over filesystem reality. The `/pre-close-check` skill now runs BEFORE any canonical-state write, and verifies: (1) git activity in last 60 min, (2) handoff file mtimes, (3) version.json vs CLAUDE.md vs HANDOFF pointer agreement, (4) active handoff count = 1, (5) CONTEXT-MANIFEST sync.
+
+Integration points:
+- `/full-finish` → Phase 0 (before analyze-changes)
+- `/live-state-orchestrator` → before any HANDOFF.md write
+- `/plan-and-execute` → before Phase 3.3 governance state update
+
+If the check returns `PARALLEL_SESSION_DETECTED` or `DRIFT_DETECTED`, the calling skill MUST stop and ask the user how to resolve before proceeding.
 
 ---
 

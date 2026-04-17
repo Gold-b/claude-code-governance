@@ -24,6 +24,21 @@ Before any file operation:
 
 ---
 
+## Pre-Close Reality Check (MANDATORY before any HANDOFF write)
+
+**BEFORE writing a new HANDOFF.md or transitioning a handoff to `consumed`/`archived`, you MUST invoke `/pre-close-check`.**
+
+Rationale: this skill is the bookkeeper for canonical state. If a parallel session has already produced a newer handoff or released a new version, writing over it here would destroy that work. The 2026-04-17 v1.4.112-b/v1.4.113 incident happened exactly because the bookkeeper trusted in-session state over filesystem reality.
+
+Flow:
+1. Call `/pre-close-check` skill
+2. If verdict is NOT `clean` → STOP, report to user, ask how to resolve (merge first? abort? override?)
+3. Only proceed with handoff/state writes after verdict is `clean`
+
+This applies to: new HANDOFF creation, handoff lifecycle transitions, PLAN.md milestone additions that claim release state.
+
+---
+
 ## When to invoke
 
 - **Auto:** `post-milestone.sh` hook — after meaningful tool sequences

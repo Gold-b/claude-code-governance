@@ -1,4 +1,4 @@
-# Context Governance Installer for Claude Code
+# Context Governance Installer for Claude Code by Gold-B.
 
 Portable installer that sets up the full Context Governance architecture at the user level (`~/.claude/`).
 

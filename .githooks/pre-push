@@ -52,9 +52,62 @@ while read -r local_ref local_sha remote_ref remote_sha; do
                "$remote_sha" "$local_sha" 2>/dev/null)"
   fi
 
-  # Scan the blobs as they exist at the pushed tip — that is what lands on the
-  # remote. A path touched mid-range and later deleted has nothing to publish.
+  # PASS 1 — the blobs as they exist at the pushed tip. This is the readable
+  # pass: it reports real file:line coordinates a human can go and fix.
   printf '%s\n' "$FILES" | run_gate "$local_sha" || RC=1
+
+  # PASS 2 — every line ADDED anywhere in the pushed range.
+  #
+  # WHY BOTH (2026-09-01). Pass 1 alone was proven to publish a leak: commit a
+  # real number, then CLEAN it in a second commit, then push both. The tip is
+  # spotless, pass 1 says PASS, the push succeeds — and the first commit is on
+  # the remote carrying the value. `git show <sha>:<file>` on the remote returns
+  # it. The comment that used to sit here read "a path touched mid-range and
+  # later deleted has nothing to publish": true for a DELETION, false for a
+  # FIX, and every leak that gets noticed is fixed rather than deleted.
+  #
+  # This is precisely the case pre-push exists to backstop — a leak that reached
+  # a commit because pre-commit was bypassed with --no-verify, kill-switched, or
+  # never ran (imported or rebased history). Scanning only the endpoints makes
+  # the backstop blind to exactly what got past the first gate.
+  #
+  # The added lines are concatenated into ONE file and scanned as text. Line
+  # numbers there are meaningless, so pass 2 answers "is there a leak in this
+  # range: yes/no" and pass 1 answers "where". A hit in 2 but not 1 means the
+  # value is in an intermediate commit — the message below says so, because
+  # "it is not in my working tree" is the first thing anyone would object.
+  RANGE_PATCH="$(mktemp 2>/dev/null)" || RANGE_PATCH=""
+  RANGE_ADDED="$(mktemp 2>/dev/null)" || RANGE_ADDED=""
+  if [ -z "$RANGE_PATCH" ] || [ -z "$RANGE_ADDED" ]; then
+    g_warn "pre-push: could not create a temp file for the range scan — NOT pushing."
+    g_warn "A gate that cannot run is not a gate that passes."
+    RC=1
+  else
+    if [ "${remote_sha:-$ZERO}" = "$ZERO" ]; then
+      git log -p --no-color --diff-filter=ACMRT "$local_sha" --not --remotes > "$RANGE_PATCH" 2>/dev/null
+    else
+      git log -p --no-color --diff-filter=ACMRT "$remote_sha..$local_sha" > "$RANGE_PATCH" 2>/dev/null
+    fi
+    # Added content only: '+' lines, minus the '+++ b/path' file headers.
+    grep '^+' "$RANGE_PATCH" 2>/dev/null | grep -v '^+++ ' | sed 's/^+//' > "$RANGE_ADDED" 2>/dev/null
+    if [ -s "$RANGE_ADDED" ]; then
+      # NOT run_gate: that helper materialises each path OUT OF GIT at $src
+      # (`git show <sha>:<path>`), so a filesystem temp file stages nothing and
+      # it reports "nothing scannable — allowed". Cost me one silent pass on a
+      # leak that had already reached a bare remote in the test. Call the
+      # scanner directly on the file we built.
+      resolve_scanner || RC=1
+      if [ -n "${SCANNER_SRC:-}" ] && ! "$SCANNER_SRC" "$RANGE_ADDED"; then
+        g_warn "The hit above is in a line ADDED somewhere in the pushed range."
+        g_warn "It may already be fixed in your working tree — that does not matter:"
+        g_warn "the commit that introduced it would still land on the remote and stay"
+        g_warn "readable there forever via 'git show <sha>:<file>'."
+        g_warn "Rewrite the range (rebase/squash/amend) so the value was never committed."
+        RC=1
+      fi
+    fi
+    rm -f "$RANGE_PATCH" "$RANGE_ADDED" 2>/dev/null
+  fi
 done
 
 exit $RC

@@ -174,8 +174,8 @@ Look for `docs/context/CONTEXT-MANIFEST.md` in the project root. If it exists �
 2. **Selective Context Loading** — load only the files relevant to the current task, never everything
 3. **One active HANDOFF** — only one handoff may be `active` at any time
 4. **Verification Gate** — never mark work as DONE without external evidence (test output, build log, docker logs)
-5. **Stop-Report Protocol** — when you detect a contradiction between sources, STOP and ask the user
-6. **Source-of-Truth Hierarchy** — when files disagree: code > version file > PLAN > OPEN-PROBLEMS > HANDOFF > MEMORY > CONVENTIONS > CLAUDE.md
+5. **Stop-Report Protocol** — when you detect a contradiction between sources, STOP and ask the user **only after rule 6 has failed to decide it**. Escalating a question the files already answer wastes the owner's time and teaches the session to ask instead of read.
+6. **Source-of-Truth Hierarchy — rank is the LAST tiebreaker, not the first.** Evidence beats rank; recency beats rank. A dated claim carrying a checkable artifact (commit SHA, tag, test output, a named config file, a live check the owner witnessed) beats an undated status line in a higher-ranked file. Only when evidence and recency both fail to separate two claims does rank decide: code > version file > PLAN > OPEN-PROBLEMS > HANDOFF > MEMORY > CONVENTIONS > CLAUDE.md. **Verify against a primary artifact BEFORE rewriting the loser** — rank-first, plus its old "update the lower-priority source to match" step, once came within one edit of overwriting a correct, dated, owner-verified record with a stale one. And **absence in the repo is not evidence of absence in production**: a deployment-local override can hold the live value, so rank-1 "code" is often silent rather than authoritative. Full procedure: `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §3.
 
 ### Reference docs
 - **For agents (structured):** `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md`

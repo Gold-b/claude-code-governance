@@ -42,6 +42,90 @@ gov_disabled && exit 0
 
 PROJECT_ROOT="$(gov_find_project_root 2>/dev/null)"
 [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="$PWD"
+
+# NOTE (2026-09-01): these run HERE, before every early exit below, on purpose.
+# Placed at the tail they were unreachable: this hook exits early when a session changed
+# only documentation - which is exactly what a governance session does - so the checks
+# added to catch governance drift would never have run on a governance session. A control
+# behind a gate that skips it is the defect this whole file exists to report.
+# ── Universal close-time integrity checks (added 2026-09-01) ────────────────────────────────
+#
+# These do NOT block. They exist because three defects of the same shape were found at the close
+# of one session, none by any control, all by the owner asking "are you sure?" a fourth time.
+# They are deliberately GENERIC: every governed project can grow a legacy-named prompt, let a
+# self-declared count drift from reality, or accumulate dead [[links]]. Nothing project-specific
+# belongs here — that is what made governance-selftest.sh unwireable.
+#
+# THE VERDICT WORD CARRIES THE RESULT. A caveat printed above a "PASS" is read as noise: a PII
+# scanner announced "name list: none" on every run and three review rounds passed the tree anyway
+# (gotcha #348). So when anything below fires, the final line says PASS-WITH-WARNINGS, never PASS.
+_CC_WARN=""
+_cc_warn() { _CC_WARN="${_CC_WARN}
+  [!] $1"; }
+
+# 1. A next-session prompt outside the one canonical path, or under a legacy name.
+#    The Lite staleness check only stat()s docs/context/NEXT-SESSION-PROMPT.md, so a drifted copy
+#    is invisible to it — and a stale one instructs its reader to adopt a dead goal.
+if [ -n "${PROJECT_ROOT:-}" ] && [ -d "$PROJECT_ROOT" ]; then
+  _cc_strays="$(find "$PROJECT_ROOT" -maxdepth 3 -type f \
+      \( -name 'NEXT-SESSION-*.md' -o -name 'NEXT_SESSION_*.md' \) \
+      -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null \
+    | grep -v '/docs/context/NEXT-SESSION-PROMPT\.md$' || true)"
+  if [ -n "$_cc_strays" ]; then
+    _cc_warn "next-session prompt outside the canonical path:$(printf '%s' "$_cc_strays" | sed 's|^|\n        |')
+        Canonical is docs/context/NEXT-SESSION-PROMPT.md, exactly one per project. A drifted or
+        legacy-named copy is invisible to the staleness check and can hand the next session a
+        dead goal. Relocate or delete it deliberately — do not leave two."
+  fi
+
+  # 2. A file that declares its own entry count, where the declaration disagrees with reality.
+  #    Generic: any docs/context/*.md carrying `total_entries:` in frontmatter.
+  for _cc_f in "$PROJECT_ROOT"/docs/context/*.md; do
+    [ -f "$_cc_f" ] || continue
+    _cc_decl="$(grep -m1 -E '^total_entries:[[:space:]]*[0-9]+' "$_cc_f" 2>/dev/null | grep -oE '[0-9]+' || true)"
+    [ -n "$_cc_decl" ] || continue
+    _cc_real="$(grep -cE '^(#{1,6} )?[0-9]+\.' "$_cc_f" 2>/dev/null || echo 0)"
+    if [ "$_cc_decl" != "$_cc_real" ]; then
+      _cc_warn "$(basename "$_cc_f") declares total_entries: $_cc_decl but $_cc_real entries are present.
+        A file that states its own size and is wrong about it teaches every reader to trust a
+        number nobody recomputes."
+    fi
+  done
+fi
+
+# 3. Dead [[wiki-links]] in the agent's own memory for THIS project.
+#    A link to a file that does not exist is a pointer the next session will follow into nothing —
+#    the same defect as a stale prompt, one layer down. Hyphen and underscore spellings both
+#    resolve, because a repair that handled only one spelling reported zero broken while two
+#    remained (gotcha #351).
+_cc_key="$(printf '%s' "${PROJECT_ROOT:-}" | tr 'A-Z' 'a-z' | tr ':\\/' '---' | sed 's|^-*||')"
+_cc_mem="$HOME/.claude/projects/$_cc_key/memory"
+if [ -d "$_cc_mem" ]; then
+  _cc_dead=""
+  for _cc_mf in "$_cc_mem"/*.md; do
+    [ -f "$_cc_mf" ] || continue
+    for _cc_l in $(grep -oE '\[\[[a-z0-9_-]+\]\]' "$_cc_mf" 2>/dev/null | tr -d '[]' | sort -u); do
+      _cc_t="$(printf '%s' "$_cc_l" | tr '-' '_')"
+      [ -f "$_cc_mem/$_cc_t.md" ] || _cc_dead="$_cc_dead $_cc_l"
+    done
+  done
+  if [ -n "$_cc_dead" ]; then
+    _cc_warn "memory has dead [[links]]:$(printf '%s' "$_cc_dead" | tr ' ' '\n' | sed '/^$/d' | sort -u | sed 's|^|\n        |')
+        Either write the memory the link names, or repoint it. A dangling link is a promise the
+        next session cannot collect."
+  fi
+fi
+
+if [ -n "$_CC_WARN" ]; then
+  gov_log "close-completeness" "integrity warnings"
+  printf '[close-completeness] INTEGRITY WARNINGS (these do not block):%b
+' "$_CC_WARN" >&2
+  printf '[close-completeness] These are the three shapes that got past four independent
+' >&2
+  printf '[close-completeness] reviews on 2026-09-01. Silence with GOVERNANCE_HOOKS=0.
+' >&2
+fi
+
 [ -f "$PROJECT_ROOT/docs/context/CONTEXT-MANIFEST.md" ] || { gov_log "close-completeness" "not governed - skip"; exit 0; }
 [ -d "$PROJECT_ROOT/.git" ] || { gov_log "close-completeness" "not a git repo - skip"; exit 0; }
 

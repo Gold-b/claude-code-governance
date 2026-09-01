@@ -151,6 +151,11 @@
             "type": "command",
             "command": "~/.claude/hooks/governance/selftest-advisory-stop.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/close-completeness.sh",
+            "timeout": 30
           }
         ]
       }

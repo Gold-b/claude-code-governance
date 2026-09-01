@@ -1,0 +1,7 @@
+# Git hooks are executed by Git Bash on Windows and by /bin/sh on Linux.
+# `pre-commit` and `pre-push` have no extension, so the repo-root `* text=auto`
+# rule would check them out with CRLF on Windows and every run would die with
+#     /usr/bin/env: 'bash\r': No such file or directory
+# — a gate that is silently unable to start, which is the exact failure mode this
+# directory exists to prevent. Force LF for everything in here, extension or not.
+* text eol=lf

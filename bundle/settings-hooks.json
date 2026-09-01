@@ -66,6 +66,16 @@
             "statusMessage": "Context Governance: pre-write impact map..."
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pii-gate-pretooluse.sh",
+            "timeout": 60
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -136,6 +146,11 @@
             "command": "~/.claude/hooks/check-full-finish.sh",
             "timeout": 10,
             "statusMessage": "Checking for uncommitted changes..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/selftest-advisory-stop.sh",
+            "timeout": 15
           }
         ]
       }

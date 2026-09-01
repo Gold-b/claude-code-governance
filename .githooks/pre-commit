@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ============================================================================
+# pre-commit — refuse a commit whose STAGED content carries real PII.
+#
+# This is the cheap, blocking control at the boundary. It scans only the files
+# in this commit, and it scans the STAGED blob (`git show :path`), not the
+# working tree — so `git add file; edit file` is judged on what git will record.
+#
+# Enable in a fresh clone (one command, from the repo root):
+#     git config core.hooksPath .githooks
+#
+# Kill switches:
+#     GOV_GIT_PII_GATE=0 git commit ...   skip this gate (prints a notice)
+#     git commit --no-verify              skip every hook
+#
+# See .githooks/_pii-gate.sh for the failure policy and tunables.
+# ============================================================================
+set -uo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_pii-gate.sh
+# A temporary assignment prefix (GATE_PHASE=x . file) is discarded the moment the
+# sourced command returns, so every later g_say/run_gate call died on "unbound
+# variable" under set -u. Plain assignment first; export so the scanner sees it too.
+GATE_PHASE="pre-commit"
+export GATE_PHASE
+. "$HOOK_DIR/_pii-gate.sh" || {
+  printf 'pre-commit: [BLOCKED] cannot load %s/_pii-gate.sh\n' "$HOOK_DIR" >&2
+  exit 1
+}
+
+gate_disabled && exit 0
+
+# Added / Copied / Modified / Renamed / Type-changed. Deletions carry no content.
+git diff --cached --name-only --diff-filter=ACMRT | run_gate index
+exit $?

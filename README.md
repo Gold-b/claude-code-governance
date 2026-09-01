@@ -206,6 +206,77 @@ and **ship empty on purpose**: putting real names and project nouns into a track
 re-create the exact leak it exists to prevent. With no list present the structural name rules
 (`NAME_ATTRIB`, `NAME_FIELD`) still run, and the skip is reported rather than hidden.
 
+### Enable the git gates in a fresh clone (one command)
+
+The scanner above is only a gate if something *runs* it. Two git hooks do, and they live in the
+tracked `.githooks/` directory rather than `.git/hooks/` — `.git/hooks/` does not survive a clone,
+so a hook placed only there protects the one machine that already knows about the problem.
+
+```bash
+git config core.hooksPath .githooks      # run once per clone
+```
+
+| Hook | When | What it scans |
+|---|---|---|
+| `.githooks/pre-commit` | every `git commit` | the **staged blobs** (`git show :path`), added/modified only |
+| `.githooks/pre-push` | every `git push` | the files in the pushed range, as they exist at the pushed tip |
+
+Both scan **only the files in that commit or push**, never the tree. Measured on Windows/Git Bash:
+1 file 13.5 s, 3 files 31.9 s, 6 files 13.9 s — process spawn dominates, so a typical commit costs
+**~15-35 s** almost regardless of file count. A tree-wide scan at the commit boundary would be
+turned off within a week, and a control that gets turned off is how controls die. `pre-push` is the
+backstop for anything that reached history some other way: `--no-verify`, a commit made before
+`core.hooksPath` was set, a merge, a cherry-pick, or a rebase that replayed an old blob.
+
+When a hit is found the commit is refused, the offending `file:line`, the rule name and the
+remedy are printed, and nothing is written. Fix the data, not the scanner.
+
+**If `check-no-pii.sh` cannot be found, the hooks BLOCK and name every path they looked for.**
+They fall back from `~/.claude/hooks/governance/check-no-pii.sh` (the installed copy) to
+`bundle/hooks/governance/check-no-pii.sh` (this repo's own copy, so a fresh clone on a machine
+that has never run `install.sh` is still gated), and only then refuse. They never pass silently
+for want of a scanner — that is the failure mode this whole directory exists to prevent.
+
+If the scanner is present but *errors* or times out, the hooks WARN LOUDLY and allow: that is the
+gate itself being broken, not evidence about your content, and a broken gate must not block all
+work. The warning tells you to run the scan by hand before publishing.
+
+**Kill switches** (both loud — the skip is printed, never silent):
+
+```bash
+GOV_GIT_PII_GATE=0 git commit ...   # skip the PII gate only
+git commit --no-verify              # skip every hook (git's own switch)
+```
+
+**Tunables:** `GOV_PII_SCANNER` (explicit scanner path), `GOV_PII_TIMEOUT` (default 300 s for the
+whole scan), `GOV_PII_MAX_FILES` (default 40 — above it you get a "this will take a while"
+warning; the scan is never truncated, because a partial scan reported as a pass is a lie).
+
+### The installer verifies by executing, not by listing
+
+`install.sh` runs `check-no-pii.sh --selftest` against the copy it just installed (~80 s) before it
+stamps the version marker. If the selftest fails, the install is reported as FAILED, the version is
+**not** stamped, the exit code is 1, and the message names the backup directory this run created so
+you can put the previous files back.
+
+This exists because `verify.sh` is an existence check: 18 `[ -f ]` file tests and 5 settings
+lookups. On 2026-08-30 it reported **30 passed** over a tree whose PII scanner had been silently
+neutered — a file that is present and wrong looks exactly like a file that is present and right.
+
+```bash
+bash install.sh                 # verifies by default (~80 s)
+bash install.sh --deep-verify   # also runs governance-selftest.sh (~2 min more)
+bash install.sh --no-verify     # skip it; still exits 0, but is reported UNVERIFIED twice
+```
+
+`--no-verify` deliberately does **not** fail the run. A kill switch that fails the build is a nag,
+not a switch — the gate is the default path being armed, not the impossibility of opting out. What
+it does not get is silence: the summary prints `Verified: NOT CHECKED`.
+
+*Known limit, stated rather than papered over:* the selftest proves the installed scanner **works**.
+It does not prove it is the **newest** one — a stale bundle whose selftest still passes installs and
+verifies clean. Freshness is the version marker's job, not this gate's.
+
 ## Changelog
 
 - **2026-08-25 — the framework can now tell a machine it is out of date, and a next-session

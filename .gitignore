@@ -70,3 +70,11 @@ tmp/
 !*.example
 !*.template
 !*.sample
+
+# --- Appended 2026-09-01 (arming pass) --------------------------------------
+# check-no-pii.sh names FIVE machine-local files in its header; four were already
+# covered above, this one was not. It holds real proper nouns (people, projects,
+# clients) used as a denylist — precisely the content this repo must never carry.
+# Verified with: git check-ignore -v .governance-pii-denylist
+.governance-pii-denylist
+**/.governance-pii-denylist

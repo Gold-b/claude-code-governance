@@ -15,6 +15,12 @@
 #   --dry-run     Show what would be installed without making changes
 #   --no-claude-md  Skip CLAUDE.md installation (keep your existing one)
 #   --uninstall   Remove all governance files (with backup)
+#   --deep-verify Also run governance-selftest.sh after installing (~2 min extra)
+#   --no-verify   Skip the post-install verification. The run still completes and
+#                 still exits 0 -- a kill switch that fails the build is a nag,
+#                 not a switch -- but it is loudly reported as UNVERIFIED both at
+#                 the skip and in the closing summary.
+#                 (env equivalent: GOV_INSTALL_VERIFY=0 / GOV_INSTALL_DEEP_VERIFY=1)
 #
 # What gets installed:
 #   ~/.claude/hooks/                 11 governance hook scripts
@@ -48,6 +54,12 @@ FORCE=0
 DRY_RUN=0
 NO_CLAUDE_MD=0
 UNINSTALL=0
+# Post-install verification. ON by default: an installer whose only evidence is
+# "the files are there" is the failure this framework already shipped once —
+# verify.sh reported 37/37 from `[ -f ]` tests while a --force run had reverted a
+# fix and deleted 6 of 11 test cases. Existence is not execution.
+DO_VERIFY="${GOV_INSTALL_VERIFY:-1}"
+DEEP_VERIFY="${GOV_INSTALL_DEEP_VERIFY:-0}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -56,6 +68,8 @@ for arg in "$@"; do
     --dry-run)      DRY_RUN=1 ;;
     --no-claude-md) NO_CLAUDE_MD=1 ;;
     --uninstall)    UNINSTALL=1 ;;
+    --no-verify)    DO_VERIFY=0 ;;
+    --deep-verify)  DEEP_VERIFY=1 ;;
     --help|-h)
       sed -n '2,/^# ====/{ /^# ====/d; s/^# //; s/^#//; p; }' "$0"
       exit 0
@@ -96,6 +110,12 @@ BUNDLE_VERSION=$( { cat "$BUNDLE_DIR/VERSION" 2>/dev/null || true; } | tr -d '[:
 # Tracks whether every step actually succeeded. The version marker is a CLAIM about what is
 # installed; stamping it after a failed step tells the machine it is current when it is not.
 INSTALL_DEGRADED=0
+# Which step failed matters for the summary line. Before this split, ANY degraded
+# install printed "Settings: NOT registered", which sends the reader to fix a
+# settings.json that is perfectly fine.
+SETTINGS_FAILED=0
+VERIFY_FAILED=0
+VERIFY_SKIPPED=0
 
 # Local read helper — install.sh must work before the framework is installed, so it cannot source
 # _common.sh. Same fail-safe shape: `< missing_file` under `set -euo pipefail` kills the script.
@@ -349,10 +369,10 @@ if [ "$DRY_RUN" = "1" ]; then
   info "[DRY] Would merge hooks into ~/.claude/settings.json"
   # `[ cond ] && VAR=1` leaks status 1 when the condition is false, which is a live hazard as the
   # last statement of a function or a script under `set -e`. An if-block cannot.
-  if [ "$HAS_NODE" = "0" ]; then INSTALL_DEGRADED=1; fi   # a preview must predict the real refusal
+  if [ "$HAS_NODE" = "0" ]; then INSTALL_DEGRADED=1; SETTINGS_FAILED=1; fi   # a preview must predict the real refusal
 elif [ "$HAS_NODE" = "0" ]; then
   warn "Skipped settings.json merge (no Node.js). Manual setup required."
-  INSTALL_DEGRADED=1
+  INSTALL_DEGRADED=1; SETTINGS_FAILED=1
   info "Copy the hooks section from: $BUNDLE_DIR/settings-hooks.json"
 else
   SETTINGS_FILE="$CLAUDE_HOME/settings.json"
@@ -396,12 +416,137 @@ else
     // Write back
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
     console.log('Settings merged successfully');
-  " 2>&1 && success "settings.json hooks merged" || { error "Failed to merge settings.json"; INSTALL_DEGRADED=1; }
+  " 2>&1 && success "settings.json hooks merged" || { error "Failed to merge settings.json"; INSTALL_DEGRADED=1; SETTINGS_FAILED=1; }
 fi
 
 # ── 6. Create log directory ─────────────────────────────────────────────────
 if [ "$DRY_RUN" = "0" ]; then
   mkdir -p "$CLAUDE_HOME/logs/governance-success-history"
+fi
+
+# ── 6.5 Post-install verification — EXECUTE, do not just look ────────────────
+#
+# WHY THIS EXISTS
+#   The framework's admission criterion used to be EXISTENCE. verify.sh reports
+#   "37/37" from 18 `[ -f ]` file tests and 5 settings-truthiness tests, and on
+#   2026-08-30 it was green across a --force run that reverted a fix and deleted
+#   6 of 11 test cases. A file test cannot see a file that is present and wrong.
+#   So this step RUNS the thing that was just installed and reads its verdict.
+#
+# WHAT IT PROVES, AND WHAT IT DOES NOT
+#   check-no-pii.sh --selftest asserts, on the copy now on disk, that every rule
+#   fires on real-shaped values AND that every documented placeholder stays green
+#   — both directions, which is the only shape of proof that catches a scanner
+#   that has quietly stopped scanning.
+#   It does NOT prove the installed version is the NEWEST one: a stale bundle
+#   whose selftest still passes installs and verifies clean. Freshness is the
+#   version marker's job; this step's job is "what is on disk actually works".
+#
+# CADENCE
+#   ~80 s here for the default check; governance-selftest.sh adds ~2 min and is
+#   therefore opt-in (--deep-verify). An install is a rare, deliberate act, so
+#   80 s of proof is affordable in a way that 80 s per session close would not be.
+#
+# FAILURE POLICY
+#   Red -> loud, the backup path is named, INSTALL_DEGRADED=1 so the version is
+#   NOT stamped and the script exits 1. Nothing is deleted or rolled back
+#   automatically: an installer that starts undoing things on a failed check is
+#   a second way to lose files. The operator restores from the backup.
+#
+# KILL SWITCH
+#   --no-verify / GOV_INSTALL_VERIFY=0 skips it — but the run is then marked
+#   UNVERIFIED and still refuses to stamp the version marker, because an install
+#   that was never proven must not be able to claim it is current.
+if [ "$DRY_RUN" = "1" ]; then
+  if [ "$DO_VERIFY" = "1" ]; then
+    info "[DRY] Would verify the install by RUNNING check-no-pii.sh --selftest (~80 s)."
+    # `[ cond ] && cmd` standing alone leaks status 1 under `set -e` (see the note at the
+    # settings.json step). An if-block cannot.
+    if [ "$DEEP_VERIFY" = "1" ]; then info "[DRY] Would also run governance-selftest.sh (~2 min)."; fi
+  else
+    warn "[DRY] Would SKIP verification (--no-verify) and would NOT stamp the version."
+  fi
+elif [ "$DO_VERIFY" = "0" ]; then
+  # A kill switch that still fails the run is not a kill switch, it is a nag. Skipping is a
+  # deliberate human choice: it completes normally, stamps, and exits 0. The gate is the
+  # DEFAULT path being armed, not the impossibility of opting out. What it does NOT get is
+  # silence -- the warning prints here AND as its own line in the closing summary, so "this
+  # machine was never proven" is readable in the transcript instead of inferred from absence.
+  VERIFY_SKIPPED=1
+  warn "Post-install verification SKIPPED (--no-verify / GOV_INSTALL_VERIFY=0)."
+  warn "NOTHING was executed. This install is UNVERIFIED: the files are present, and that is"
+  warn "the exact claim that was green over a broken tree on 2026-08-30. Run it when you can:"
+  warn "    bash $CLAUDE_HOME/hooks/governance/check-no-pii.sh --selftest"
+else
+  header "Verifying the install (executing, not just checking files)"
+
+  VERIFY_TIMEOUT="${GOV_INSTALL_VERIFY_TIMEOUT:-600}"
+  # `timeout` is not universally present (busybox, some minimal images). Missing it
+  # must not turn into a silent hang and must not turn into a silent skip.
+  if command -v timeout >/dev/null 2>&1; then
+    RUN_BOUNDED() { timeout "$VERIFY_TIMEOUT" "$@"; }
+  else
+    warn "coreutils 'timeout' not found — verification will run unbounded."
+    RUN_BOUNDED() { "$@"; }
+  fi
+
+  verify_one() {
+    # $1 = human label, $2 = script path, $3.. = args
+    v_label="$1"; v_script="$2"; shift 2
+    if [ ! -f "$v_script" ]; then
+      error "$v_label: MISSING at $v_script — the install did not put it there."
+      VERIFY_FAILED=1
+      return 0
+    fi
+    info "$v_label: running $v_script $* ..."
+    # Under `set -e` a bare `VAR="$(failing-cmd)"` aborts the script before $? can be read,
+    # so a RED selftest would surface as install.sh dying with no verdict. The && || form
+    # is a condition context and is therefore exempt.
+    v_rc=0
+    v_out="$(RUN_BOUNDED bash "$v_script" "$@" 2>&1)" || v_rc=$?
+    if [ "$v_rc" -eq 0 ]; then
+      success "$v_label: PASS"
+      printf '%s\n' "$v_out" | tail -2
+    elif [ "$v_rc" -eq 124 ]; then
+      error "$v_label: TIMED OUT after ${VERIFY_TIMEOUT}s — treated as RED, not as a pass."
+      error "If this machine is simply slow: GOV_INSTALL_VERIFY_TIMEOUT=1800 bash install.sh"
+      VERIFY_FAILED=1
+    else
+      error "$v_label: FAILED (exit $v_rc)"
+      printf '%s\n' "$v_out" | tail -25
+      VERIFY_FAILED=1
+    fi
+    return 0
+  }
+
+  verify_one "PII scanner selftest" "$CLAUDE_HOME/hooks/governance/check-no-pii.sh" --selftest
+
+  if [ "$DEEP_VERIFY" = "1" ]; then
+    verify_one "Governance selftest" "$CLAUDE_HOME/hooks/governance/governance-selftest.sh"
+  else
+    info "Deep verification skipped (add --deep-verify to also run governance-selftest.sh)."
+  fi
+
+  if [ "$VERIFY_FAILED" = "1" ]; then
+    INSTALL_DEGRADED=1
+    echo ""
+    error "POST-INSTALL VERIFICATION FAILED — the installed framework does not work."
+    error "This install is NOT usable as governance. Do not trust a green file listing over this."
+    if [ -d "$BACKUP_DIR" ] && [ -n "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+      # The backup holds only what this run actually REPLACED (copy_safe backs up on
+      # difference), so it is usually a subset — list it rather than assuming a shape.
+      error "RESTORE FROM THE BACKUP THIS RUN MADE:"
+      error "    $BACKUP_DIR"
+      error "    ls \"$BACKUP_DIR\"            # exactly what this run replaced"
+      error "    cp -r \"$BACKUP_DIR\"/* \"$CLAUDE_HOME\"/   # put every one of them back"
+    else
+      error "This run replaced nothing, so there is no backup to restore — the bundle itself is bad."
+      error "Re-install from a clean clone of the governance repo."
+    fi
+    error "Then re-run and read this section, not the file count."
+  else
+    success "Verification passed — the installed framework proves itself, not just its file list."
+  fi
 fi
 
 # ── 7. Stamp the installed version (GENUINELY LAST — see below) ──────────────
@@ -465,12 +610,22 @@ printf "  ${GREEN}✓${NC} Docs:      %s governance documents in ~/.claude/docs/
 if [ "$NO_CLAUDE_MD" = "0" ]; then
   printf "  ${GREEN}✓${NC} CLAUDE.md: User-level instructions\n"
 fi
-if [ "$INSTALL_DEGRADED" = "1" ]; then
+if [ "$SETTINGS_FAILED" = "1" ]; then
   printf "  ${RED}✗${NC} Settings:  NOT registered — see the error above. The hooks will not run.\n"
 else
   printf "  ${GREEN}✓${NC} Settings:  Hooks registered in settings.json\n"
 fi
 printf "  ${GREEN}✓${NC} Logs:      ~/.claude/logs/ directory ready\n"
+if [ "$VERIFY_FAILED" = "1" ]; then
+  printf "  ${RED}✗${NC} Verified:  NO — the installed framework FAILED its own selftest (see above)
+"
+elif [ "$VERIFY_SKIPPED" = "1" ]; then
+  printf "  ${YELLOW}⚠${NC} Verified:  NOT CHECKED (--no-verify). Files are present; nothing was proven.
+"
+elif [ "$DRY_RUN" = "0" ]; then
+  printf "  ${GREEN}✓${NC} Verified:  selftest executed and passed on the installed copy
+"
+fi
 
 if [ -d "$BACKUP_DIR" ] && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
   printf "\n  ${YELLOW}⚠${NC} Backup of replaced files: %s\n" "$BACKUP_DIR"

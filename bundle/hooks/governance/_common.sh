@@ -739,6 +739,39 @@ gov_prune_sessions() {
   done
 }
 
+# gov_memory_dir <project-root>  -> the Claude Code auto-memory directory for that project, or ""
+#
+# Claude Code keys auto-memory to the session cwd: every non-alphanumeric character of the path
+# becomes '-', CASE PRESERVED, so `C:\dev\example-project` -> `C--dev-example-project` while the
+# same folder opened as `c:\dev\example-project` -> `c--dev-example-project`, and a POSIX
+# `/opt/example-project` -> `-opt-example-project` (leading dash kept). A hook that derives ONE
+# spelling and tests `[ -d ]` on it goes silently inert when the user typed the other one -
+# measured 2026-09-01: a dead-link check lower-cased the drive and stripped the leading dash,
+# looked for a directory that did not exist, and skipped without a word. So this tries every
+# spelling the harness could have produced and returns the first that EXISTS; "" means none does,
+# which the caller must REPORT, never treat as "clean".
+gov_memory_dir() {
+  local root="$1" p base cand
+  [ -n "$root" ] || return 0
+  p="$(printf '%s' "$root" | tr '\\' '/' | sed 's|/*$||')"
+  # msys drive form -> Windows drive form, so /c/x and C:/x key identically
+  case "$p" in /[A-Za-z]/*) p="${p:1:1}:${p:2}" ;; esac
+  base="$(printf '%s' "$p" | sed 's|[^A-Za-z0-9]|-|g')"
+  for cand in \
+      "$base" \
+      "$(printf '%s' "$base" | sed 's|^-*||')" \
+      "$(printf '%s' "$base" | tr 'A-Z' 'a-z')" \
+      "$(printf '%s' "$base" | tr 'A-Z' 'a-z' | sed 's|^-*||')" \
+      "$(printf '%.1s' "$base" | tr 'a-z' 'A-Z')${base:1}" \
+      "$(printf '%.1s' "$base" | tr 'A-Z' 'a-z')${base:1}"; do
+    [ -n "$cand" ] || continue
+    if [ -d "$HOME/.claude/projects/$cand/memory" ]; then
+      printf '%s' "$HOME/.claude/projects/$cand/memory"; return 0
+    fi
+  done
+  return 0
+}
+
 # Prime the stdin cache in the SOURCING shell: a "$(...)" call would read stdin inside a
 # subshell and could not cache it for its parent, so the second reader would see EOF
 # (2026-08-16 sandbox finding). Hooks may then call gov_hook_input / gov_session_id freely.

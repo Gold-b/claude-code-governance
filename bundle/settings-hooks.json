@@ -156,6 +156,12 @@
             "type": "command",
             "command": "~/.claude/hooks/governance/close-completeness.sh",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/close-report.sh",
+            "timeout": 90,
+            "statusMessage": "Context Governance: generating the closing report from the record..."
           }
         ]
       }

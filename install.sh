@@ -273,22 +273,71 @@ copy_safe "$BUNDLE_DIR/hooks/check-full-finish.sh" \
           "$CLAUDE_HOME/hooks/check-full-finish.sh" \
           "hooks/check-full-finish.sh"
 
-# Governance hooks — ALL runtime file types, not just shell. The bundle carries .js
-# helpers (wa-send.js) and .ps1 notifiers (gov-notify.ps1); a *.sh-only glob left them
-# permanently stale on every install/update (found 2026-08-16: live wa-send.js was
-# months behind the bundle after a successful --force install).
-for f in "$BUNDLE_DIR/hooks/governance/"*.sh "$BUNDLE_DIR/hooks/governance/"*.js "$BUNDLE_DIR/hooks/governance/"*.ps1; do
-  [ -f "$f" ] || continue
-  fname="$(basename "$f")"
-  copy_safe "$f" "$CLAUDE_HOME/hooks/governance/$fname" "hooks/governance/$fname"
-done
-
-# Hook test suites (verification harness lives beside the hooks)
-if [ -d "$BUNDLE_DIR/hooks/governance/tests" ]; then
-  for f in "$BUNDLE_DIR/hooks/governance/tests/"*; do
+# Governance hooks — EVERY FILE THE BUNDLE CARRIES, enumerated by the bundle itself.
+#
+# DO NOT REINTRODUCE AN EXTENSION LIST HERE. It has now been wrong twice, and the second time it
+# was wrong ONE LINE BELOW A COMMENT RECORDING THE FIRST:
+#   2026-08-16  `*.sh` only -> wa-send.js and gov-notify.ps1 were left permanently stale on every
+#               install. Fixed by adding `*.js` and `*.ps1`, and a comment was written about it.
+#   2026-09-01  pii-gate-parse.py was added, `*.py` was not. A fresh install then REGISTERED the
+#               blocking PII gate and shipped it INERT: the hook printed "MALFUNCTION - parser
+#               missing ... Gate is OPEN", exited 1, and the write proceeded — while install.sh
+#               printed "Verified". Reproduced end-to-end before this fix.
+# The class is the defect, not the instance: any list of suffixes is a prediction about files that
+# do not exist yet, and it will be wrong again the next time someone adds a file type. So the
+# bundle's own contents are the list. `find` also carries subdirectories (tests/) for free, which
+# the hand-written `tests` loop below used to do separately and could equally have been forgotten.
+#
+# (Keep gov-notify.ps1 in mind before "tidying" anything here: _common.sh's gov_notify() calls it
+# to raise the Windows popup that reports a push abort. Bash cannot draw a window on Windows.)
+if [ -d "$BUNDLE_DIR/hooks/governance" ]; then
+  while IFS= read -r f; do
     [ -f "$f" ] || continue
-    fname="$(basename "$f")"
-    copy_safe "$f" "$CLAUDE_HOME/hooks/governance/tests/$fname" "hooks/governance/tests/$fname"
+    rel="${f#$BUNDLE_DIR/hooks/governance/}"
+    case "$rel" in *.bak|*.bak-*|*.tmp|*.orig|*.rej) continue ;; esac
+    dest="$CLAUDE_HOME/hooks/governance/$rel"
+    mkdir -p "$(dirname "$dest")" 2>/dev/null
+    copy_safe "$f" "$dest" "hooks/governance/$rel"
+  done <<HOOKFILES
+$(find "$BUNDLE_DIR/hooks/governance" -type f 2>/dev/null | sort)
+HOOKFILES
+fi
+
+# ── 1b. Assert the copy actually happened ────────────────────────────────────
+# EXISTENCE OF THE SOURCE IS NOT ARRIVAL AT THE DESTINATION. Every failure above was invisible
+# because nothing compared the two sides; the installer's own summary counted files in the
+# DESTINATION and was therefore happy with whatever it had managed to write. This compares.
+HOOK_MISSING=""
+if [ "$DRY_RUN" = "0" ] && [ -d "$BUNDLE_DIR/hooks/governance" ]; then
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    rel="${f#$BUNDLE_DIR/hooks/governance/}"
+    case "$rel" in *.bak|*.bak-*|*.tmp|*.orig|*.rej) continue ;; esac
+    [ -f "$CLAUDE_HOME/hooks/governance/$rel" ] || HOOK_MISSING="$HOOK_MISSING $rel"
+  done <<HOOKCHECK
+$(find "$BUNDLE_DIR/hooks/governance" -type f 2>/dev/null | sort)
+HOOKCHECK
+  if [ -n "$HOOK_MISSING" ]; then
+    error "These bundled files did NOT reach ~/.claude/hooks/governance/:$HOOK_MISSING"
+    error "A registered hook whose helper is missing does not fail loudly — it reports itself"
+    error "verified and lets the write through. Treating this as fatal."
+    INSTALL_DEGRADED=1
+  fi
+
+  # A registered hook is only a control if the files it CANNOT RUN WITHOUT are beside it. The
+  # dependency is declared here rather than discovered, because a wrong guess is silent.
+  for pair in \
+      "pii-gate-pretooluse.sh:pii-gate-parse.py" \
+      "pii-gate-pretooluse.sh:check-no-pii.sh" \
+      "selftest-advisory-stop.sh:governance-selftest.sh" \
+      "close-report.sh:_common.sh" \
+      "close-completeness.sh:_common.sh" \
+      "end-session.sh:check-no-pii.sh"; do
+    hook="${pair%%:*}"; dep="${pair##*:}"
+    if [ -f "$CLAUDE_HOME/hooks/governance/$hook" ] && [ ! -f "$CLAUDE_HOME/hooks/governance/$dep" ]; then
+      error "$hook is installed but its hard dependency $dep is NOT. That hook is INERT."
+      INSTALL_DEGRADED=1
+    fi
   done
 fi
 
@@ -417,6 +466,68 @@ else
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
     console.log('Settings merged successfully');
   " 2>&1 && success "settings.json hooks merged" || { error "Failed to merge settings.json"; INSTALL_DEGRADED=1; SETTINGS_FAILED=1; }
+fi
+
+# -- 5b. Seed the machine-local config a fresh install cannot work without ----
+#
+# WHY (task B3, 2026-09-01). Two files hold the real values that tracked files only reference by
+# placeholder. Neither was ever seeded, and three shipped scripts referenced an .example that did
+# not exist in the repo. The consequence on a NEW machine was not a crash - it was silence:
+#   ~/.claude/.pii-names             absent -> NAME_DENY inert -> every scan prints PASS while the
+#                                    one rule that catches proper nouns has never run. That is
+#                                    precisely how two people's names sat in a public repository
+#                                    for four months.
+#   ~/.claude/.governance-local.env  absent -> GOV_REPO_PATH, the commit identity and
+#                                    GOV_SELFTEST_PROJECT all unset; the framework audit then
+#                                    verifies nothing and reports GREEN-PARTIAL.
+#
+# NEITHER IS EVER OVERWRITTEN, not even with --force: they are the designated homes for real
+# values, so replacing one with a template is a silent downgrade of a live gate. Only the
+# .example is refreshed; .pii-names is CREATED, and only when absent.
+header "Seeding machine-local config (never overwritten)"
+
+if [ "$DRY_RUN" = "1" ]; then
+  info "[DRY] Would install .governance-local.env.example and create an empty ~/.claude/.pii-names if absent."
+else
+  if [ -f "$BUNDLE_DIR/.governance-local.env.example" ]; then
+    if cp "$BUNDLE_DIR/.governance-local.env.example" "$CLAUDE_HOME/.governance-local.env.example" 2>/dev/null; then
+      success "Installed: .governance-local.env.example (copy it to .governance-local.env and fill it in)"
+    else
+      warn "Could not write $CLAUDE_HOME/.governance-local.env.example"; INSTALL_DEGRADED=1
+    fi
+  else
+    warn "bundle/.governance-local.env.example is MISSING - three shipped scripts point users at it."
+    INSTALL_DEGRADED=1
+  fi
+
+  if [ -f "$CLAUDE_HOME/.governance-local.env" ]; then
+    success "Kept existing ~/.claude/.governance-local.env (machine-local; never overwritten)"
+  else
+    warn "~/.claude/.governance-local.env does not exist. Until you create it from the .example,"
+    warn "GOV_REPO_PATH, the commit identity and GOV_SELFTEST_PROJECT are all unset."
+  fi
+
+  if [ -f "$CLAUDE_HOME/.pii-names" ]; then
+    success "Kept existing ~/.claude/.pii-names (machine-local; never overwritten)"
+  elif [ -f "$BUNDLE_DIR/.pii-names.example" ]; then
+    if cp "$BUNDLE_DIR/.pii-names.example" "$CLAUDE_HOME/.pii-names" 2>/dev/null; then
+      success "Created ~/.claude/.pii-names (empty - see the warning in the summary)"
+    else
+      warn "Could not create $CLAUDE_HOME/.pii-names"
+    fi
+  else
+    warn "bundle/.pii-names.example is MISSING - NAME_DENY will be inert on this machine."
+    INSTALL_DEGRADED=1
+  fi
+  chmod 600 "$CLAUDE_HOME/.pii-names" "$CLAUDE_HOME/.governance-local.env" 2>/dev/null || true
+fi
+
+# Real entries = non-comment, non-blank. Reported as its OWN summary line: a "clean" printed above
+# an inert rule is exactly what three review rounds read past on 2026-09-01.
+PII_NAMES_N=0
+if [ -f "$CLAUDE_HOME/.pii-names" ]; then
+  PII_NAMES_N=$( { grep -cE '^[[:space:]]*[^#[:space:]]' "$CLAUDE_HOME/.pii-names" 2>/dev/null || true; } | head -1 )
+  case "$PII_NAMES_N" in ''|*[!0-9]*) PII_NAMES_N=0 ;; esac
 fi
 
 # ── 6. Create log directory ─────────────────────────────────────────────────
@@ -616,6 +727,13 @@ else
   printf "  ${GREEN}✓${NC} Settings:  Hooks registered in settings.json\n"
 fi
 printf "  ${GREEN}✓${NC} Logs:      ~/.claude/logs/ directory ready\n"
+if [ "$PII_NAMES_N" -gt 0 ] 2>/dev/null; then
+  success "Name list: $PII_NAMES_N proper noun(s) in ~/.claude/.pii-names - NAME_DENY is ARMED"
+else
+  warn "Name list: ~/.claude/.pii-names is EMPTY - NAME_DENY does nothing."
+  warn "           Every scan will print PASS with the one proper-noun rule switched off."
+  warn "           Add the names of people, clients and private projects BEFORE you publish."
+fi
 if [ "$VERIFY_FAILED" = "1" ]; then
   printf "  ${RED}✗${NC} Verified:  NO — the installed framework FAILED its own selftest (see above)
 "

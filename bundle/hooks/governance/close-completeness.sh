@@ -186,7 +186,16 @@ START_SHA=""
 START_ROOT=""
 if [ -f "$START_FILE" ]; then
   START_SHA=$(grep -o '^[0-9a-f]\{7,40\}' "$START_FILE" 2>/dev/null | head -1)
-  START_ROOT=$(awk 'NR==1{ $1=""; $2=""; sub(/^[[:space:]]+/,""); print }' "$START_FILE" 2>/dev/null)
+  # FIELD 3, not "everything after field 2" (fixed 2026-09-01 - found by the selftest case written
+  # for this hook the day after it was wired). pre-session.sh has written the stamp as
+  #     <sha> <iso-timestamp> <root> sid=<session-id>
+  # since 2026-08-16. Blanking $1 and $2 and printing the remainder yielded "<root> sid=abc123",
+  # a path that cannot be cd'd into, so the guard below compared an EMPTY string against the real
+  # root, concluded they differed, and SKIPPED. Measured: 219 lines in ~/.claude/logs/governance.log
+  # reading "session-start stamped for X, now in X - skip" with X IDENTICAL on both sides. This
+  # hook could not block a single session for 16 days - including every session that wired it and
+  # reported it armed. A path is a FIELD; never reconstruct one from "the rest of the line".
+  START_ROOT=$(awk 'NR==1{print $3}' "$START_FILE" 2>/dev/null)
 fi
 
 # No start marker means we cannot tell this session's work from history. Silence is the
@@ -203,9 +212,20 @@ if ! (cd "$PROJECT_ROOT" && git cat-file -e "${START_SHA}^{commit}" 2>/dev/null)
   gov_log "close-completeness" "session-start SHA $START_SHA not in this repo - skip"
   exit 0
 fi
-if [ -n "$START_ROOT" ] && [ "$(cd "$START_ROOT" 2>/dev/null && pwd)" != "$(cd "$PROJECT_ROOT" && pwd)" ]; then
-  gov_log "close-completeness" "session-start stamped for $START_ROOT, now in $PROJECT_ROOT - skip"
-  exit 0
+if [ -n "$START_ROOT" ]; then
+  # Log the RESOLVED paths that were actually compared, never the raw strings. The old line
+  # printed the two inputs, they were IDENTICAL, and it still said "skip" - which made the skip
+  # look like a mystery instead of a parse bug, 219 times. If a path fails to resolve, say so: an
+  # empty resolution compares unequal to everything, which is precisely how this skipped for 16
+  # days while being counted as an armed control.
+  _cc_a="$(cd "$START_ROOT" 2>/dev/null && pwd -P)"
+  _cc_b="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd -P)"
+  if [ -z "$_cc_a" ]; then
+    gov_log "close-completeness" "session-start root '$START_ROOT' does not resolve - judging $PROJECT_ROOT anyway"
+  elif [ "$_cc_a" != "$_cc_b" ]; then
+    gov_log "close-completeness" "session-start stamped for [$_cc_a], now in [$_cc_b] - skip"
+    exit 0
+  fi
 fi
 
 COMMITTED=$( cd "$PROJECT_ROOT" && git diff --name-only "$START_SHA" HEAD 2>/dev/null | sed 's#\\#/#g' | sort -u | grep -v '^$' )

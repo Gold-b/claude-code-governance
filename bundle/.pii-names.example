@@ -1,0 +1,56 @@
+# ~/.claude/.pii-names — machine-local proper-noun denylist for check-no-pii.sh (NAME_DENY)
+#
+# MACHINE-LOCAL. NEVER commit, never sync, never ship in the bundle. It holds real
+# identities ON PURPOSE — that is its whole job — so publishing it would BE the leak
+# the scanner exists to prevent. check-no-pii.sh skips this filename when scanning.
+#
+# HOW IT IS USED
+#   Each non-comment line becomes one alternative in  \b(a|b|c)\b  matched with grep -noiE.
+#   So: word-bounded, CASE-INSENSITIVE, regex-escaped for you. Write plain text, not regex.
+#
+# CREATED 2026-09-01, and the reason matters. NAME_DENY had been INERT since it was written,
+# because this file did not exist. Every scan printed
+#     "name list: none at ~/.claude/.pii-names — structural name rules only"
+# and passed. THREE sanitization rounds read that line and moved on; each declared the tree
+# clean while the one rule that catches proper nouns was switched off. A fourth reviewer
+# armed a list and immediately found 25 hits in 6 files. A control that announces it is
+# disabled is still a disabled control — see GOTCHAS #346.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# DELIBERATELY NOT LISTED — do not "helpfully" add these. Read this before editing.
+#
+#   Or          The owner's first name. Two letters, and matching is CASE-INSENSITIVE, so
+#               \b(or)\b would fire on every English conjunction — thousands of false
+#               positives, and a noisy gate gets switched off. It is covered instead by
+#               NAME_ATTRIB/NAME_FIELD and by reading `grep -rnw 'Or'` by hand, which is
+#               how the 22 real sites were found on 2026-09-01.
+#   אור · רון    Short Hebrew names. GNU grep's \b does not bind reliably around Hebrew, so
+#               these match inside ordinary words (סינכרון, אחרון, לאור). Verify Hebrew
+#               names by reading hits, never by counting them.
+#
+# THE RULE THIS FILE ENFORCES: tracked files carry placeholders or env lookups; real values
+# live only in machine-local gitignored files like this one. Replacement vocabulary:
+#   person → "Operator One" / "the operator" / "the owner" / "a teammate"
+#   org/product/provider → "<PARTNER_PLATFORM>" / "the client" / "a Linux host"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# — People (surname and full forms only; see the exclusions above for first names) —
+
+# — Organisations, products and providers that identify the owner or a client —
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS FILE IS EMPTY, AND WHILE IT IS EMPTY THE NAME_DENY RULE DOES NOTHING.
+#
+# check-no-pii.sh will print, on every single run:
+#     check-no-pii: name list: none at ~/.claude/.pii-names — structural name rules only
+# That line is not a footnote. It means the one rule that catches PROPER NOUNS — the names of
+# people, clients and private projects, which have no shape a regex can find — is switched off.
+# On 2026-09-01 three sanitization rounds read that exact line, called the tree clean, and a
+# fourth reviewer armed a list and found 25 hits in 6 files.
+#
+# Add one proper noun per line, plain text (it is regex-escaped and matched case-insensitively
+# with word boundaries). Names of people, client organisations, private project code names.
+# Do NOT add anything so short or so common that it fires on ordinary English — a noisy gate is
+# a gate someone disables, and a disabled gate is how the leak happened. Record what you left
+# out and why, right here, the way the entries above are documented.
+

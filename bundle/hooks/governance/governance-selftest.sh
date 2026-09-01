@@ -301,6 +301,10 @@ case_fn_for() {
     check-docs-updated.sh)      echo case_check_docs ;;
     pre-done.sh)                echo case_pre_done ;;
     end-session.sh)             echo case_end_session ;;
+    pii-gate-pretooluse.sh)     echo case_pii_gate ;;
+    selftest-advisory-stop.sh)  echo case_selftest_advisory ;;
+    close-report.sh)            echo case_close_report ;;
+    close-completeness.sh)      echo case_close_completeness ;;
     *) echo "" ;;
   esac
 }
@@ -641,6 +645,183 @@ case_end_session() {
   expect_not "HANDOFF.md was not refreshed" "refreshed handoff: no false block"
 }
 
+# --- pii-gate-pretooluse.sh -------------------------------------------------------------------
+# Armed 2026-09-01 and, until now, EXECUTED BY NOTHING. Three agents proved it by hand that night;
+# the selftest still reported it UNCOVERED, and it was right to: a hand-run is not coverage,
+# because nothing re-runs it on the next edit. That is the entire thesis of this repair.
+#
+# The MALFUNCTION case is the one that matters most. The gate's helper is a .py, and install.sh
+# copies `*.sh *.js *.ps1` — so a fresh install registers this gate and ships it INERT while
+# printing "Verified" (task B1). This case reproduces that state deliberately: the hook alone in a
+# directory with no parser beside it. It must announce itself and exit 1 (open but LOUD), never
+# exit 0 (open and silent).
+case_pii_gate() {
+  local gdir="$SBX_HOME/.claude/hooks/governance" nogate="$SBX/nogate"
+  mkdir -p "$gdir" "$nogate" 2>/dev/null
+  local target="$gdir/probe-hook.sh"
+  # A live-shaped Israeli mobile, ASSEMBLED AT RUNTIME so this file never contains the literal.
+  # It must NOT be the documented 972500000000 placeholder - the scanner is required to stay green
+  # on that, so a placeholder here would assert nothing. But a real-shaped literal in the source
+  # makes THIS file fail the very gate it is testing, and the file is published: the sync refused
+  # it (rc=2, [IL_PHONE]) the first time, which is the gate working exactly as intended. Fix the
+  # DATA, not the scanner - the same trick check-no-pii.sh uses for its own fixtures.
+  local _ilt='54' _il2='987' _il3='6543'
+  local dirty="# owner reachable on +972 ${_ilt} ${_il2} ${_il3} for escalations"
+  local clean='# owner reachable on +972500000000 (placeholder) for escalations'
+
+  # The payloads are built here rather than with pl_pre(): that helper hardcodes content "x", and
+  # the PENDING TEXT is the whole point of this gate — it scans what is about to be written, not
+  # the bytes already on disk (pointing a scanner at file_path passes every new file ever created).
+  local pay_dirty pay_clean pay_out
+  pay_dirty="{\"session_id\":\"sid-pii-1\",\"cwd\":\"$SBX\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$target\",\"content\":\"$dirty\"}}"
+  pay_clean="{\"session_id\":\"sid-pii-2\",\"cwd\":\"$SBX\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$target\",\"content\":\"$clean\"}}"
+  pay_out="{\"session_id\":\"sid-pii-3\",\"cwd\":\"$SBX\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SBX/elsewhere/notes.md\",\"content\":\"$dirty\"}}"
+
+  run_hook "$SBX" "sid-pii-1" "$pay_dirty"
+  expect_rc 2 "a real phone number in a PUBLISHED governance file: write BLOCKED"
+  expect_has "BLOCKED by pii-gate" "block: names itself so the agent knows what refused"
+
+  run_hook "$SBX" "sid-pii-2" "$pay_clean"
+  expect_rc 0 "the documented placeholder in the same file: write ALLOWED"
+  expect_not "BLOCKED" "allow: no block text on a clean write"
+
+  run_hook "$SBX" "sid-pii-3" "$pay_out"
+  expect_rc 0 "a file outside the published tree: out of scope, allowed"
+
+  # B1 in miniature: the gate present, its parser absent.
+  cp -f "$CUR_SCRIPT" "$nogate/pii-gate-pretooluse.sh" 2>/dev/null
+  rm -f "$nogate/pii-gate-parse.py" 2>/dev/null
+  _run "$nogate/pii-gate-pretooluse.sh" "$SBX" "sid-pii-4" "$pay_dirty"
+  expect_rc 1 "parser missing: exit 1 (open but LOUD), never a silent 0"
+  expect_has "MALFUNCTION" "parser missing: says so, instead of passing the leak in silence"
+}
+
+# --- selftest-advisory-stop.sh ----------------------------------------------------------------
+# The other hook armed that night and executed by nothing. It can NEVER exit 2 by design (a slow
+# machine-wide audit with veto power over "stop working" is what gets ripped out), so its teeth are
+# entirely in exit 1 + the banner. That makes an exit-code-only assertion worthless here and the
+# printed text load-bearing — the same property that hid the canonical-cwd-check bug.
+#
+# The throttle file is pre-dated to NOW on purpose: without it the hook launches the real ~118 s
+# suite, detached, in the middle of this run.
+case_selftest_advisory() {
+  local L="$SBX_HOME/.claude/logs"
+  mkdir -p "$L" 2>/dev/null
+  _adv_state() {   # $1 verdict
+    rm -rf "$L/governance-selftest.lock" 2>/dev/null
+    date +%s > "$L/governance-selftest.launched"
+    printf 'verdict=%s\nrc=1\nfinished=%s\nseconds=130\nproject=%s\nsummary=[governance-selftest] pass=1 fail=1 uncovered=0\n' \
+      "$1" "$(date +%s)" "$SBX/proj" > "$L/governance-selftest.result"
+  }
+
+  _adv_state RED
+  run_hook "$SBX" "sid-adv-1" "$(pl_plain "$SBX" sid-adv-1 Stop)"
+  expect_rc 1 "a RED framework audit: the close is nagged (exit 1), not blocked (never 2)"
+  expect_has "RED" "red: the verdict word reaches the human"
+
+  _adv_state GREEN-PARTIAL
+  run_hook "$SBX" "sid-adv-2" "$(pl_plain "$SBX" sid-adv-2 Stop)"
+  expect_rc 1 "GREEN-PARTIAL is reported as not-evidence, not as green"
+  expect_has "GREEN-PARTIAL" "partial: says which half was not verified"
+
+  _adv_state GREEN
+  run_hook "$SBX" "sid-adv-3" "$(pl_plain "$SBX" sid-adv-3 Stop)"
+  expect_rc 0 "a GREEN audit: silent close"
+  expect_quiet "green: prints nothing at all"
+}
+
+# --- close-report.sh --------------------------------------------------------------------------
+# The closing summary is GENERATED from the canonical files. Its whole value is one property, so
+# that is what is asserted here, as a PAIR: a token that is only in a non-canonical file must not
+# render, and the SAME token must render once it is written into a canonical one. Without the
+# second half the first proves nothing — "absent" and "the hook never ran" print identically.
+case_close_report() {
+  local proj="$SBX/crproj"
+  mkdir -p "$proj/docs/context" "$proj/MDs" "$proj/Plans" "$proj/scratch" 2>/dev/null
+  fx_project "$proj" SOURCE "$(_winform "$proj")"
+  printf -- '---\nstatus: active\ncreated_at: 2026-01-02\n---\n\n## TL;DR\n\nCR-RECORDED-LINE is in the handoff.\n' > "$proj/MDs/HANDOFF-cr.md"
+  printf -- '---\nstatus: active\ntype: pointer\npoints_to: ../../MDs/HANDOFF-cr.md\n---\n# pointer\n' > "$proj/docs/context/HANDOFF.md"
+  printf 'note: CR-UNRECORDED-TOKEN decided while writing the summary, never filed.\n' > "$proj/scratch/notes.md"
+
+  run_hook "$proj" "sid-cr-1" "$(pl_plain "$proj" sid-cr-1 Stop)"
+  expect_rc 0 "a report is not a gate: it never blocks a close"
+  expect_has "CR-RECORDED-LINE" "renders what IS in the canonical record"
+  expect_not "CR-UNRECORDED-TOKEN" "a claim in a scratch file has NO channel into the report"
+
+  printf -- '- **2026-01-03 — CR-UNRECORDED-TOKEN is now filed.**\n' >> "$proj/docs/context/MEMORY.md"
+  run_hook "$proj" "sid-cr-2" "$(pl_plain "$proj" sid-cr-2 Stop)"
+  expect_has "CR-UNRECORDED-TOKEN" "THE PAIR: the same token renders once it is written into MEMORY.md"
+}
+
+# --- close-completeness.sh --------------------------------------------------------------------
+# Wired 2026-09-01 after being found registered NOWHERE - the third such file in one session - and
+# it went straight from unwired to uncovered, which is the same hole wearing a different label.
+# Two behaviours must hold and they pull in opposite directions, so both are asserted:
+#   BLOCK  a session that changed CODE and never wrote the records that describe it;
+#   ALLOW  the moment those records actually GROW (a touch must not clear it: another Stop hook
+#          rewrites version lines in place, and counting that as compliance is how the drift
+#          stayed invisible for eleven days).
+# The integrity warnings are asserted separately BECAUSE they must never block: they are printed
+# on the allow path too, where a blocking assertion could never see them.
+case_close_completeness() {
+  local repo="$SBX/ccproj" sid
+  rm -rf "$repo" 2>/dev/null
+  mkdir -p "$repo/admin/lib" 2>/dev/null
+  fx_project "$repo" SOURCE "$(_winform "$repo")"
+  printf 'Plans/PLAN.md\n' > "$repo/docs/context/.close-required"
+  sbx_git "$repo" init
+  sbx_git "$repo" config user.email "you@example.com"
+  sbx_git "$repo" config user.name "Operator One"
+  sbx_git "$repo" add -A
+  sbx_git "$repo" commit -m baseline
+  local base; base="$("$REAL_GIT" -C "$repo" rev-parse HEAD 2>/dev/null)"
+
+  _cc_stamp() {  # $1 sid — pin THIS session's start to the baseline commit
+    local d; d="$(sess_dir "$1")"; mkdir -p "$d" 2>/dev/null
+    printf '%s %s %s sid=%s\n' "$base" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$1" > "$d/.gov-session-start"
+  }
+
+  # 1. Code changed, PLAN.md untouched -> the close is BLOCKED.
+  printf 'module.exports = 1;\n' > "$repo/admin/lib/feature.js"
+  sbx_git "$repo" add -A; sbx_git "$repo" commit -m "code, no record"
+  _cc_stamp sid-cc-1
+  run_hook "$repo" "sid-cc-1" "$(pl_plain "$repo" sid-cc-1 Stop)"
+  expect_rc 2 "code changed and PLAN.md never written: stop BLOCKED"
+  # NOT expect_has "close-completeness": that string also appears in the closing QUESTION this
+  # hook prints on every run, so the assertion passed while the hook was allowing the close - a
+  # check matching the description of the thing instead of the thing (#351). Match the block text.
+  expect_has "GOVERNANCE-ENFORCEMENT" "block: emits the enforcement banner, not merely the reminder"
+  expect_has "Plans/PLAN.md" "block: names the canonical file that is missing"
+
+  # 2. A TOUCH must not clear it. Rewriting a line in place is what the other Stop hook does
+  #    automatically, so if that counted, the gate would be satisfied by a machine every time.
+  sed -i 's/^# PLAN$/# PLAN (version line rewritten in place)/' "$repo/Plans/PLAN.md" 2>/dev/null
+  sbx_git "$repo" add -A; sbx_git "$repo" commit -m "touch only"
+  _cc_stamp sid-cc-2
+  run_hook "$repo" "sid-cc-2" "$(pl_plain "$repo" sid-cc-2 Stop)"
+  expect_rc 2 "an in-place rewrite of PLAN.md does NOT satisfy the gate"
+
+  # 3. A real entry GROWS the file -> allowed.
+  printf '\n| 2026-01-02 | a real milestone entry for this session |\n' >> "$repo/Plans/PLAN.md"
+  sbx_git "$repo" add -A; sbx_git "$repo" commit -m "record the work"
+  _cc_stamp sid-cc-3
+  run_hook "$repo" "sid-cc-3" "$(pl_plain "$repo" sid-cc-3 Stop)"
+  expect_rc 0 "PLAN.md grown by a real entry: stop allowed"
+  expect_not "BLOCKED" "allow: no block text once the record exists"
+
+  # 4. The integrity checks warn WITHOUT blocking, and run even on the allow path - they sit above
+  #    the early exits precisely because a governance session changes only documentation and would
+  #    otherwise never reach them.
+  mkdir -p "$repo/Plans" 2>/dev/null
+  printf '# NEXT-SESSION KICKOFF\nPaste this as the first message.\n' > "$repo/Plans/NEXT-SESSION-KICKOFF.md"
+  _cc_stamp sid-cc-4
+  run_hook "$repo" "sid-cc-4" "$(pl_plain "$repo" sid-cc-4 Stop)"
+  expect_rc 0 "a stray next-session prompt WARNS, it does not block"
+  expect_has "INTEGRITY WARNINGS" "the warning verdict word is never the word PASS"
+  expect_has "NEXT-SESSION-KICKOFF.md" "and it names the stray file"
+  rm -f "$repo/Plans/NEXT-SESSION-KICKOFF.md"
+}
+
 # ── Settings parsing ─────────────────────────────────────────────────────────────────────────
 # Priority: jq -> node -> python3 -> awk. NEVER a hard-coded hook list; a hard-coded list is the
 # same existence-test disease this script exists to replace (a hook deleted from settings.json
@@ -969,8 +1150,19 @@ part_b() {
 
   # --- admin/lib module inventory vs FILE-ROLES.md -------------------------------------------
   local lib_all lib_mod missing miss_list
-  lib_all=$(ls "$PROJECT/admin/lib"/*.js 2>/dev/null | wc -l | tr -d ' ')
-  lib_mod=$(ls "$PROJECT/admin/lib"/*.js 2>/dev/null | grep -vc '\.test\.js$')
+  # NEVER PARSE `ls` FOR A COUNT (fixed 2026-09-01). `ls` classifies executables with a trailing
+  # `*` on this platform, so `\.test\.js$` failed to match the three test files that happen to have
+  # the executable bit — and this function then reported 91 modules while the FILE-ROLES loop three
+  # lines below, which uses a shell GLOB, iterated 88. Two measurements of ONE fact inside one
+  # function, disagreeing by 3, one of them printed as "the document is wrong". The glob sees real
+  # filenames; `ls` output is a rendering. Both sides now use the glob.
+  lib_all=0; lib_mod=0
+  for _f in "$PROJECT/admin/lib"/*.js; do
+    [ -f "$_f" ] || continue
+    lib_all=$((lib_all+1))
+    case "$_f" in *.test.js) continue ;; esac
+    lib_mod=$((lib_mod+1))
+  done
   gf "admin_lib_js_files: ${lib_all:-0}"
   gf "admin_lib_modules_excluding_tests: ${lib_mod:-0}"
   local c2

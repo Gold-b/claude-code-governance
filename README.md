@@ -1,0 +1,371 @@
+# Context Governance Installer for Claude Code
+
+Portable installer that sets up the full Context Governance architecture at the user level (`~/.claude/`).
+
+## Quick Install
+
+```bash
+bash ~/.claude/governance-installer/install.sh
+```
+
+## Options
+
+| Flag | Effect |
+|---|---|
+| `--core-only` | Install only the 9 core governance skills (skip the 5 extended toolkit skills) |
+| `--force` | Overwrite existing files without prompting |
+| `--dry-run` | Preview what would be installed (no changes) |
+| `--no-claude-md` | Skip CLAUDE.md — keep your existing user instructions |
+| `--uninstall` | Remove all governance files (backs up before removal) |
+
+## What Gets Installed
+
+### Hooks (11 scripts in `~/.claude/hooks/`)
+| Event | Script | Purpose |
+|---|---|---|
+| SessionStart | `pre-session.sh` | Detects governance, triggers briefing |
+| UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
+| PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks protected-doc edits without success token |
+| PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
+| PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
+| TaskCompleted | `check-full-finish.sh` | Warns about uncommitted changes |
+| Stop | `end-session.sh` | Session-end handoff |
+
+### Core Skills (9)
+- **bootstrapper** — Loads relevant project context for session briefing
+- **context-governance** — Audits context file hygiene (lite + full modes)
+- **evidence-debugger** — Root-cause analysis with confidence grading
+- **impact-safe-executor** — Pre-write impact map, scope enforcement
+- **init-governance** — One-time project scaffold for governance structure
+- **live-state-orchestrator** — Keeps PLAN/MEMORY/HANDOFF in sync
+- **parallel-session-merge** — Reconciles multi-agent parallel work
+- **pre-close-check** — Parallel-session + drift scan; MANDATORY before any handoff write
+- **pr-to-git** — Review-gate PR loop. Core, not extended, because `bundle/docs/` installs unconditionally and `NEXT-SESSION-HANDOVER.md`'s default Definition of Done names it: a doc that ships in core may only mandate skills that ship in core.
+
+### Extended Skills (5, skipped with `--core-only`)
+- **plan-and-execute** — Multi-agent planning pipeline
+- **qa-sec** — QA + Security audit suite
+- **multi-agents** — Orchestrated agent teams
+- **full-finish** — Universal post-task release pipeline
+- **enable-remote-code** — Remote control for Claude Code sessions
+
+### Docs (3 documents in `~/.claude/docs/`)
+- **GOVERNANCE-AGENT-GUIDE.md** — Structured guide for LLM implementation
+- **GOVERNANCE-HUMAN-GUIDE.md** — Human-readable governance reference
+- **NEXT-SESSION-HANDOVER.md** — Goal-scoped continuation protocol: the `/goal` + `/loop` templates, the context-limit exception, and the rules that keep an autonomous loop from overriding a governance stop. It is the *renderer spec*; the rendered prompt lands in each project's `docs/context/NEXT-SESSION-PROMPT.md`, rewritten or deleted at every close.
+
+### Configuration
+- **CLAUDE.md** — User-level instructions (session protocol, security, governance rules)
+- **settings.json** — Hook registrations merged into existing settings
+
+## Portability
+
+To install on another machine:
+1. Copy the entire `~/.claude/governance-installer/` directory
+2. Run `bash ~/.claude/governance-installer/install.sh`
+
+All paths use `~/` notation — works on Windows (Git Bash/MSYS2), macOS, and Linux.
+
+## Versions & updates
+
+The installed version is stamped at `~/.claude/.governance-version`; the published one is
+`bundle/VERSION` on `master`. At session start, `pre-session.sh` compares them and prints
+`[GOVERNANCE UPDATE]` when a newer version exists.
+
+A machine with no usable marker is told so too — otherwise the machines most in need of the
+advisory (the ones predating versioning) would be the only ones never to get it.
+
+It **advises, never installs** — `install.sh` replaces the very hooks and skills that are running
+at that moment, so the update is always a deliberate action:
+
+```bash
+cd /path/to/claude-code-governance && git pull
+bash install.sh --force        # backs up first
+bash verify.sh
+```
+
+The network call is detached and only refreshes a 12-hour cache, so what a session prints is the
+result of a previous run and nothing waits on the network. The check itself costs a measured
+**+77 ms / +106 ms** on Windows/MSYS2 (two interleaved A/B runs, n=12 each; under 40 ms on
+Linux/macOS, where forks are cheaper). Offline machines back off a full TTL rather than retrying
+every session. `GOVERNANCE_UPDATE_CHECK=0` removes the cost entirely.
+
+The marker is a **claim**, so `install.sh` only writes it when the claim is true. Three outcomes:
+
+| Outcome | Marker |
+|---|---|
+| Every step succeeded | Stamped with the bundle's version |
+| A step failed | **Left exactly as it was.** The failure may be unrelated to the files on disk, and deleting a valid marker turns a working machine into one that reports "no usable version marker" at every session start |
+| The bundle carried no `VERSION` | **Removed — after being backed up** to `~/.claude/backups/governance-<timestamp>/`. This run really did overwrite hooks, skills and docs with content of unknown provenance, so a marker from an earlier install now describes files that are no longer there |
+
+A placeholder is never written: the reader would reject it as not-a-version and advise re-running
+the installer, which would write the placeholder again — a loop with no exit. Any run that did not
+fully succeed exits non-zero and does not say "ready". `--dry-run` previews all of it, exit code
+included. See Agent Guide §20.
+
+## Kill Switch
+
+Disable all governance hooks without uninstalling:
+```bash
+export GOVERNANCE_HOOKS=0
+```
+
+Silence only the update advisory (hooks keep working):
+```bash
+export GOVERNANCE_UPDATE_CHECK=0
+```
+
+## Uninstall
+
+```bash
+bash ~/.claude/governance-installer/install.sh --uninstall
+```
+Backs up all files before removal. CLAUDE.md is NOT removed (manual decision).
+
+## Testing the hooks (sandbox, never touches your real ~/.claude)
+
+```bash
+bash bundle/hooks/governance/tests/test-session-state.sh
+bash bundle/hooks/governance/tests/test-update-advisory.sh
+bash bundle/hooks/governance/tests/test-payload-root.sh
+```
+
+## Rolling out an update to a client machine
+
+```bash
+git pull
+bash install.sh --force          # backs up ~/.claude/hooks, skills, docs first
+bash bundle/hooks/governance/tests/test-session-state.sh
+bash bundle/hooks/governance/tests/test-update-advisory.sh
+bash verify.sh
+```
+
+## Placeholder convention (read this before you commit)
+
+**This repository is PUBLIC.** The rule is not "scrub secrets before pushing" — it is that the
+real values are never in a tracked file in the first place:
+
+> **A tracked file carries a placeholder or an env lookup. The real value lives in a
+> machine-local, gitignored config, and never appears in a tracked file.**
+
+Machine-local config files (`.governance-local.env`, `.governance-mirrors`, `.wa-bridge.json`,
+`.pii-names`) are the designated homes for real values. They are listed in `.gitignore`, so they
+cannot be staged by accident. Anything that must vary per machine belongs there, or behind an
+environment variable — never inlined into a script, doc, test or fixture.
+
+### Use exactly these placeholders
+
+Docs, tests and fixtures must use the spellings below. They are not arbitrary: `check-no-pii.sh`
+recognises each one as a placeholder and stays green, so anything *else* of the same shape is
+reported as a real value. Inventing a new "obviously fake" spelling will trip the gate.
+
+| Kind | Placeholder |
+|---|---|
+| Person, named | `Operator One` |
+| Person, referred to generically | `the operator` / `the owner` |
+| Phone, Israeli | `972500000000` |
+| Phone, US / NANP | `15550100000` |
+| WhatsApp group JID | `120363000000000000@g.us` |
+| WhatsApp user JID | `972500000000@s.whatsapp.net` |
+| WhatsApp LID | `100000000000001` |
+| WhatsApp message id | `3EB0EXAMPLE0000000000` |
+| IPv4, public | `203.0.113.10` (RFC 5737 documentation range) |
+| Home directory | `C:\Users\<user>` / `/c/Users/<user>` / `~/.claude` |
+| Project / checkout path | `C:\dev\example-project` / `/opt/example-project` |
+| Repository reference | `<SOURCE_REPO>` |
+| Email address | `you@example.com` |
+| Slack channel / user / team id | `C0EXAMPLE01` / `U0EXAMPLE01` / `T0EXAMPLE01` |
+| Slack workspace host | `example.slack.com` |
+| Google Drive / Sheets file id | `1EXAMPLE_FILE_ID` / `1EXAMPLE_SHEET_ID_00000000000000000000000` |
+| Tunnel hostname | `example.ngrok.io` / `placeholder.trycloudflare.com` |
+| Token / secret | `ghp_EXAMPLE0000000000000000000000000000` |
+
+Private IPs (`127.0.0.1`, `10.0.0.5`, `192.168.1.10`, `172.17.0.1`) and Windows system paths are
+not identities and need no placeholder.
+
+### The gate
+
+`bundle/hooks/governance/check-no-pii.sh` enforces all of the above. It matches **shapes**, not a
+denylist of known-bad strings, because a denylist always lags reality — the 2026-08-18 sweep found
+a third party's phone number and a real WhatsApp message id that nobody had thought to list.
+
+```bash
+bash bundle/hooks/governance/check-no-pii.sh --selftest              # prove the rules both ways
+bash bundle/hooks/governance/check-no-pii.sh --list-rules            # rule table + remedy for each
+bash bundle/hooks/governance/check-no-pii.sh --tree bundle           # scan before you push
+bash bundle/hooks/governance/check-no-pii.sh path/to/file            # scan one file
+```
+
+Exit `0` is clean, exit `2` means a tracked file carries a real value. **When it fires, fix the
+data, not the scanner.** Move the real value into `~/.claude/.governance-local.env` and leave a
+placeholder or an env lookup behind. A genuine, reviewed exception can be marked inline with a
+`pii-allow` marker — these are counted and reported, never silent.
+
+Two rules (`NAME_DENY`, and the project-noun denylist) read from a machine-local `~/.claude/.pii-names`
+and **ship empty on purpose**: putting real names and project nouns into a tracked scanner would
+re-create the exact leak it exists to prevent. With no list present the structural name rules
+(`NAME_ATTRIB`, `NAME_FIELD`) still run, and the skip is reported rather than hidden.
+
+## Changelog
+
+- **2026-08-25 — the framework can now tell a machine it is out of date, and a next-session
+  handover has a fixed name.** Three PRs. **#4** added `bundle/docs/NEXT-SESSION-HANDOVER.md`, the
+  renderer spec for a goal-scoped continuation prompt (`/goal` + `/loop`, the context-limit
+  exception, and the rule that `/loop` suppresses status-report stops **only** — never a governance
+  safety stop). **#5** made `docs/context/NEXT-SESSION-PROMPT.md` canonical: every governed project
+  already kept such a file, under three names in three locations, because `init-governance` never
+  scaffolded one. **#6** added `bundle/VERSION`, an install-time marker at
+  `~/.claude/.governance-version`, and a SessionStart advisory that reports a published update —
+  **advising, never installing**, because `install.sh` replaces the hooks and skills that are
+  running at that moment. §19 (public-repository hygiene) was also finally written; three files had
+  referenced it for months without it existing.
+  **Seven review rounds, 33 findings — and five of the seven found defects introduced by the
+  previous round's fixes.** Four of those were tests that could not fail: a timing threshold above
+  the timeout it measured, a cleanup routine gated out of ever running, a fixture whose `printf`
+  collapsed twelve inputs into one, and an agreement check that became a tautology after a
+  refactor. Two "verified" claims were measured wrong — `$?` read from a `tail` in a pipe, and a
+  494 ms per-session regression dismissed as noise from a single unpaired sample.
+  **None of the serious findings was a crash.** They were plausible wrong answers: a newline-less
+  version file reading as empty so an up-to-date machine nagged forever; two readers disagreeing
+  about what "the version in the file" is, one of them concatenating a two-line file into a token
+  that *passed* validation; a partially failed install deleting a valid marker unbacked; a preview
+  printing the opposite of the real run; and a network-fetched value validated with a glob, so
+  arbitrary text after `1.9.9` was echoed into the agent's context. Details and the reusable
+  lessons: `PARALLEL-SESSION-NOTES/2026-08-25-goal-scoped-continuation-review-notes.md`.
+
+- **2026-08-18 — the last four hooks are wired, and the "hanging" test was two of my own defects.**
+  `plan-gate.sh` and `parallel-import.sh` (UserPromptSubmit, advisory) and `pre-done.sh`
+  (TaskCompleted, **blocking**) are now registered, alongside `canonical-cwd-check.sh` and
+  `sync-governance-copies.sh` from earlier. Nothing in the framework runs unregistered any more.
+  **`pre-done.sh` genuinely blocks** — exit 2 when a session has tracked changes and no fresh
+  success token — and it now sees far more changes than it ever did, because the `$PWD` fix stopped
+  discarding them. Expect it to fire.
+  `hooks/wa-bridge-claim-check.test.js` was reported as hanging with no output. It was not hanging:
+  `fs.cpSync` cloned the ENTIRE skill directory per test, which by then included `agent/node_modules`
+  and a `.bak-*` backup someone had left inside it — hundreds of megabytes for a three-file fixture.
+  It took 33s and then failed at file level with no test output, which reads as "hung" rather than
+  "too slow". Second defect in the same file: the fixture still wrote the retired machine-wide
+  presence filename while the hook had moved to per-project claims, so it asserted against a state
+  production can no longer produce. Both fixed — the copy is filtered, the fixture uses
+  `presencePath(home, cwd)` — and the suite is 11/11 in 10s. Backups were also moved out of
+  `~/.claude/skills/`: anything that walks or copies a skill directory picks them up.
+  **Lesson worth keeping:** "hangs with no output" was neither a hang nor an outage, and the tool
+  that mattered was `--test-reporter=spec`, which showed a file-level failure where plain output
+  showed nothing at all.
+
+- **2026-08-18 — PRIVATE DATA REMOVED FROM THE WHOLE BUNDLE, not just the incident note.** Sweeping
+  the repository after sanitising one note turned up far more than project names: **two real
+  people's personal phone numbers**, a real WhatsApp group JID, real Slack channel and user IDs, a
+  WhatsApp LID, and a contributor's name in a fixture — across 18 files, in a PUBLIC repository. All
+  replaced with placeholders matching the fixture convention already in use (`972500000000`).
+  Three were **functional defaults**, and each needed a decision rather than a substitution:
+  `remind-teammate.js` hardcoded a person's number as its recipient fallback — it now requires
+  `TEAMMATE_WA_JID` and exits 2 with a clear message, because a placeholder number would either
+  fail silently or reach whoever really owns it (the file, that variable and the script's log
+  prefix all still carried the teammate's own first name until **2026-09-01**, when they were
+  renamed — a filename is published exactly as widely as a line of code, so the name was the leak
+  and the mechanism was fine); `wa-live-agent.mjs` and `react.js` defaulted to one machine's
+  checkout path, now environment-only. The mirror roots in `sync-governance-copies.sh`
+  became configuration (`~/.claude/.governance-mirrors`, machine-local, never shipped) instead of
+  two hardcoded private paths — which also makes the hook usable by anyone else for the first time.
+  **Two test failures were caused by the cleanup and both were worth having:** `spawn` raises ENOENT
+  when its `cwd` does not exist, so renaming a project path broke a suite in a way that presented as
+  a missing node binary — fixed properly, the test now creates its own temp directory instead of
+  depending on the author's directory layout. The second asserted the agent must carry a default
+  Slack sender path; that was the old contract, but it guarded a REAL property — a 2026-07-25
+  incident where Slack replies were dropped **silently** because the path did not resolve. Deleting
+  the assertion would have thrown that away, so the property was preserved in a new form: an unset
+  or missing sender is logged loudly and the reply refused, never spawned with an empty path.
+  Verified after cleanup: 10 bridge suites (143 assertions) and 3 governance suites (43) all green,
+  plus a syntax check of every modified shell and JS file.
+  **Still open, stated rather than glossed:** `hooks/wa-bridge-claim-check.test.js` hangs with no
+  output; the hook it covers exits 0 cleanly when driven directly, so the fault appears to be in
+  that test harness — but both files were touched here, so it is not attributed.
+  **None of this removes anything from history.** The repository is public: treat previously pushed
+  values as disclosed, and rotate anything that was a credential.
+
+- **2026-08-18 — this repo is PUBLIC; the incident note is sanitised and the rule is written down
+  (Agent Guide §19).** A handoff note filed here by a session working in a private project carried
+  that project's name (in the filename and throughout the body), absolute local paths including the
+  machine's user directory, session UUIDs, and commit hashes from a private repository. The intent
+  was right — the framework belongs to no project, so a note about the framework belongs here — but
+  it was written **about the session** rather than **about the framework**. Rewritten generically
+  (Project A/B, Session 1/2, `~/.claude/…` paths), keeping every technical finding, and renamed.
+  §19 states the rule, lists what must never be committed, and gives a pre-push grep.
+  **Note that a rewrite does not remove anything from history, and the repo is public** — treat
+  previously pushed content as disclosed and rotate anything that was a credential.
+  **The same leak exists in ~17 other files** (hardcoded mirror paths in `sync-governance-copies.sh`,
+  test fixtures, `skills/full-finish`); that is a separate job, since the hardcoded paths need to
+  become configuration rather than a find-and-replace.
+  Also shipped: `canonical-cwd-check.sh` (SessionStart) and `sync-governance-copies.sh`
+  (PostToolUse) added to `bundle/settings-hooks.json`, so a fresh install actually wires them —
+  `canonical-cwd-check.sh` had never been registered anywhere despite project docs describing it as
+  an active guard.
+- **2026-08-17 — the `$PWD` pattern is gone from all seven hooks.** The remaining four
+  (`canonical-cwd-check.sh`, `plan-gate.sh`, `parallel-import.sh`, `pre-done.sh`) now resolve the
+  project from the payload as well. `canonical-cwd-check.sh` needed its own treatment: it is
+  deliberately **standalone** — kill switch only, no `_common.sh` — so that it still works when the
+  rest of the framework does not, and that property was worth preserving, so it extracts the
+  payload `cwd` inline instead of gaining a dependency. It is also the one hook where drift is
+  worse than a lost record: it asks *"is this session sitting on the canonical copy?"*, so judging
+  the wrong directory either cries wolf or — far worse — stays **silent while the session really is
+  on a stale duplicate**, which is the failure that already cost this toolchain a corrupted
+  cloud-synced `.git` once. Tests 9-11 pin all three of its signals: no false alarm from outside the
+  project, the wrong-copy warning still fires, and the tombstone is found via the session's
+  directory. Suite now 11/11; `test-session-state.sh` unchanged at 23/23.
+  **Four of these seven still run nowhere** — see the entry below. Anchoring them is what makes
+  wiring them a one-line decision later instead of a fix-then-wire project.
+- **2026-08-17 — `pre-session.sh` / `pre-task.sh` anchored too, and an audit of which hooks are
+  actually wired.** Same `$PWD` defect as §18, in the two hooks that gate the *start* of everything:
+  from a directory holding a `CLAUDE.md` but no manifest — the exact shape of `~/.claude` —
+  `pre-session.sh` announced *"Ungoverned project detected. Run `/init-governance` NOW"* about a
+  fully governed repo, and `pre-task.sh` skipped enforcement outright. Both now call the new
+  `gov_prime_payload`, which reads stdin **once**, exports the cache so subshells stop re-reading a
+  drained stream (`gov_state_file` was consuming the payload inside `$( )`, leaving every later
+  read empty), and resolves `GOV_PROJECT_ROOT`. Tests 6-8 in `tests/test-payload-root.sh`, incl. the
+  negative control that an ungoverned directory is still called ungoverned.
+  **The audit is the bigger finding:** of the seven hooks carrying this pattern, only
+  `pre-session.sh` and `pre-task.sh` are registered on any event at all. `canonical-cwd-check.sh`,
+  `plan-gate.sh`, `parallel-import.sh` and `pre-done.sh` **run nowhere** — every `settings.json`
+  mention of them is a permissions-allowlist line, and `pre-done.sh` appears in `post-milestone.sh`
+  only inside a comment. `canonical-cwd-check.sh` is the guard against working on a stale duplicate
+  copy, and project docs describe it as enforcing that invariant at SessionStart; it does not.
+  Wiring them is a behaviour change, not a bug fix, so it is left as an explicit decision.
+- **2026-08-17 — `sync-governance-copies.sh` mirrors, it never RESURRECTS; and it is finally wired.**
+  The script was written to keep the 4 copies of the governance code in step, but it **was never
+  registered as a hook** — the only mention of it in `settings.json` was a permissions allowlist
+  line. It had therefore never run once, which is why the mirrors drift. Before wiring it up, two
+  `mkdir -p` calls had to go: the skills targets (and the client-repo hooks target) created the
+  destination when it was absent, so editing any user-level skill would have **re-created shadow
+  copies that had been deliberately deleted** — on 2026-08-17 three of them (`wa-cc-bridge`,
+  `whatsapp`, `wa-cc-poll`) were removed from two repos precisely because a project-level
+  `.claude/skills/<x>` shadows the user-level original, and two had already drifted. A deletion is a
+  decision; an auto-sync that silently undoes it is the defect class this framework exists to catch.
+  Now: refresh a mirror that exists, leave a removed one removed. The gate is the individual skill's
+  directory, not the `skills/` root, so an existing root cannot smuggle in a new shadow copy.
+  Register it on `PostToolUse` (`Edit|Write|MultiEdit|NotebookEdit`) alongside `post-milestone.sh`.
+- **2026-08-17 — hooks judge the project of the EDIT, not their own `$PWD` (Agent Guide §18).**
+  Writes made while a session's shell stood outside the project root were **silently dropped** from
+  the session change log. Two independent `$PWD` dependencies in `post-milestone.sh`: a relative
+  `[ ! -f "docs/context/CONTEXT-MANIFEST.md" ]` test, and `gov_role_guard SOURCE` →
+  `gov_detect_role` → `gov_find_project_root`, whose upward walk finds the **user-level**
+  `~/.claude/CLAUDE.md`, calls it "the project", sees no `.git` beside it and reports `DEPLOYMENT`.
+  Running a test suite out of `~/.claude/skills/<x>` was enough to trigger both. Visible symptom was
+  a false BLOCK at close ("HANDOFF.md was not refreshed" when it had been); the dangerous direction
+  is the inverse — the same omission under-counts `SESSION_WRITES`, and `end-session.sh` only fires
+  at `>= 3`, so **a session could close with no handoff and the gate would stay quiet**. New
+  `gov_payload_root <payload>` + `gov_is_governed <root>` in `_common.sh` resolve the project from
+  the hook payload (`cwd` → `file_path` → `$PWD` walk, with a regex fallback when strict JSON
+  parsing fails), and `gov_detect_role` now honours `GOV_PROJECT_ROOT`. Regression test:
+  `tests/test-payload-root.sh` (5 checks, incl. a negative control that an ungoverned edit is still
+  skipped). **Still carrying the same pattern and NOT changed here:** `parallel-import.sh:17`,
+  `plan-gate.sh:24`, `pre-done.sh:19`, `pre-session.sh:183,186`, `pre-task.sh:33,39`,
+  `canonical-cwd-check.sh:56` — each gates a different lifecycle stage and needs its own test
+  before being touched.
+- **2026-08-16 — session-scoped state (Agent Guide §17).** Per-session state dirs
+  (`~/.claude/logs/sessions/<sid>/`), crash-vs-parallel detection at SessionStart, `GOV_DRY_RUN=1`
+  for every state-mutating hook, `_common.sh` primes the stdin payload once (`gov_hook_input`),
+  `sync-governance-copies.sh` mirrors `docs/*.md`, `end-session.sh` pulls (`--rebase`) before pushing
+  and stages only the queued files, drift advisory live-vs-bundle, sandbox test harness (23 checks).
+- **2026-08-15 — parallel-session awareness (Agent Guide §16).** Detection signals + git rules
+  when two Claude sessions share one working tree; `pre-session.sh` 3-way union.

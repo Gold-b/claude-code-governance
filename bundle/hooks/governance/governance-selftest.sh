@@ -1,0 +1,1066 @@
+#!/usr/bin/env bash
+# governance-selftest.sh — EXECUTION-based health check for the Context Governance framework.
+#
+# ⛔ NOT WIRED, AND NOT PORTABLE AS SHIPPED — READ BEFORE USING ⛔
+# ------------------------------------------------------------------------------------------
+# 1. This script is deliberately ABSENT from settings.json and install.sh must not add it.
+#    It is a diagnostic you RUN BY HAND, not a hook. Wiring it to an event makes every
+#    session pay for a sandbox build, a mutation sweep and a full doc recount.
+# 2. Part (a) (hook execution) and part (c) (mutation) are generic and work anywhere.
+#    Part (b) ("RECOMPUTE every countable claim") is NOT. As written it encodes the layout
+#    and the claims of ONE project — it expects, among others:
+#        admin/lib/*.js                   (module inventory + a require()-able tool registry)
+#        admin/lib/godmode-tools.js       with a getToolNames() export
+#        MDs/FILE-ROLES.md                documenting every admin/lib module
+#        MDs/Open-Problems.md             whose line count CLAUDE.md/CONTEXT-MANIFEST.md claim
+#        version.json                     compared against the git tag on HEAD
+#    On a project without those, part (b) does not fail loudly — its checks go SKIP/NOT-FOUND
+#    and the suite can still print a green-looking tail. That is precisely the failure this
+#    file exists to catch, so ADAPT part (b) to your own countable claims (or delete it)
+#    before you trust its numbers.
+# 3. The audited project root is NOT baked in: set GOV_SELFTEST_PROJECT, or put it in
+#    ~/.claude/.governance-local.env. See ENV OVERRIDES below.
+# ------------------------------------------------------------------------------------------
+#
+# WHY THIS EXISTS
+# ---------------
+# `~/.claude/governance-installer/verify.sh` reports "37/37 passed" from 18 `[ -f ... ]` file
+# tests and 5 `s.hooks?.<Event>` truthiness tests. It never RUNS a hook and never RECOMPUTES a
+# documented number. Its admission criterion is EXISTENCE, not EXECUTION. The measured
+# consequence on this machine (2026-09-01): every hook that CAN `exit 2` worked, and every hook
+# that CANNOT was broken — the correlation was exact in both directions, and verify.sh was green
+# through all of it. A guard that exits 0 while printing the WRONG advice is invisible to an
+# exit-code-only check; canonical-cwd-check.sh does exactly that.
+#
+# This script replaces that criterion with three parts:
+#   (a) EXECUTE every hook registered in settings.json, in a sandbox, asserting BOTH the exit
+#       code AND the text it printed, in BOTH directions (a must-block case and a must-allow
+#       case). A hook with no constructible failing case is reported UNCOVERED, never green.
+#   (b) RECOMPUTE every countable claim the docs make and fail on mismatch. Recomputed values
+#       are written to docs/context/GENERATED-FACTS.md between machine-owned markers. This tool
+#       REPORTS drift; repairing prose is a human's job, so no other doc is touched.
+#   (c) MUTATION-CHECK ITSELF. Every hook is broken in a sandbox copy and the assertions from
+#       (a) must go RED. An assertion set that a dead hook still passes is not a check, and is
+#       reported UNCOVERED.
+#
+# EXIT CODES
+#   0 — all green (0 failures, 0 uncovered)
+#   1 — something is red (a failed assertion, a surviving mutant, or an uncovered hook)
+#   2 — NEVER emitted by this script. Reserved so a caller can use `exit 2` for its own gate
+#       semantics (e.g. a PreToolUse/Stop hook that wants to block on our exit 1) without
+#       colliding with ours.
+#
+# SAFETY
+#   * Nothing outside the sandbox is written. The sandbox is created under $HOME/.gov-selftest
+#     (NOT under /tmp, */temp/* or */logs/* — the collision guard's scope filter skips those
+#     paths, which would silently make its coverage vacuous).
+#   * Hooks run with HOME pointed at the sandbox, so every state file, token, lock and mirror
+#     target they compute lands inside it.
+#   * A `git` shim is prepended to PATH for every hook run. Network subcommands (clone/push/
+#     pull/fetch/remote) are DENIED unconditionally; mutating subcommands are allowed only
+#     inside the sandbox. end-session.sh really does `git clone`+`git push` to a public repo
+#     when a flag file exists — the shim is what makes running it safe.
+#   * GOV_NOTIFY=0 / GOV_WHATSAPP=0 keep the selftest off the owner's phone.
+#
+# USAGE
+#   bash ~/.claude/hooks/governance/governance-selftest.sh [--no-mutation] [--keep-sandbox]
+#
+# ENV OVERRIDES
+#   GOV_SELFTEST_PROJECT   project root audited by part (b)   (no baked default)
+#                          If unset, read from ~/.claude/.governance-local.env; else
+#                          discovered by walking up from $PWD to the nearest
+#                          docs/context/CONTEXT-MANIFEST.md.
+#   GOV_SELFTEST_HOME      real ~/.claude to read hooks+settings from (default: $HOME/.claude)
+#   GOV_SELFTEST_SANDBOX   sandbox parent dir                 (default: $HOME/.gov-selftest)
+#   GOV_SELFTEST_NO_WRITE  1 = do not write GENERATED-FACTS.md (report only)
+
+set +e
+umask 077
+
+# ── Options ──────────────────────────────────────────────────────────────────────────────────
+DO_MUTATION=1
+KEEP_SANDBOX=0
+for _a in "$@"; do
+  case "$_a" in
+    --no-mutation)  DO_MUTATION=0 ;;
+    --keep-sandbox) KEEP_SANDBOX=1 ;;
+    -h|--help)      sed -n '2,50p' "$0"; exit 0 ;;
+    *) printf 'unknown option: %s\n' "$_a" >&2; exit 1 ;;
+  esac
+done
+
+# Part (b) audits ONE project, at a root that is NAMED rather than discovered from $PWD: a
+# session's shell is routinely parked on a retired duplicate of the repo (that is the failure
+# canonical-cwd-check.sh exists for), and a $PWD walk would then cheerfully audit the tombstoned
+# copy and report its stale numbers as fact. The walk is only the last-resort fallback.
+# The named root is read from the ENVIRONMENT, never carried in this file: this script ships
+# in a PUBLIC bundle, where a hardcoded checkout path is both a leak and wrong on every other
+# machine. Precedence: $GOV_SELFTEST_PROJECT, then GOV_SELFTEST_PROJECT out of the machine-local
+# ~/.claude/.governance-local.env (see .governance-local.env.example), then the $PWD walk.
+PROJECT="${GOV_SELFTEST_PROJECT:-}"
+if [ -z "$PROJECT" ] && [ -f "$HOME/.claude/.governance-local.env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.claude/.governance-local.env" 2>/dev/null || true
+  PROJECT="${GOV_SELFTEST_PROJECT:-}"
+fi
+if [ -z "$PROJECT" ] || [ ! -d "$PROJECT" ]; then
+  _d="$PWD"
+  while [ -n "$_d" ] && [ "$_d" != "/" ]; do
+    [ -f "$_d/docs/context/CONTEXT-MANIFEST.md" ] && { PROJECT="$_d"; break; }
+    _d="$(dirname "$_d")"
+  done
+fi
+[ -n "$PROJECT" ] || PROJECT="(unset: set GOV_SELFTEST_PROJECT in ~/.claude/.governance-local.env)"
+CHOME="${GOV_SELFTEST_HOME:-$HOME/.claude}"
+SETTINGS="$CHOME/settings.json"
+HOOKS_ROOT="$CHOME/hooks"
+GOV_DIR="$HOOKS_ROOT/governance"
+
+PASS=0; FAIL=0; UNCOV=0
+FAIL_LOG=""     # accumulated "file :: expected vs actual" lines
+UNCOV_LOG=""
+
+# ── Sandbox ──────────────────────────────────────────────────────────────────────────────────
+# Deliberately NOT mktemp -d: the system temp dir on both platforms contains a path segment
+# ("/tmp/", "/Temp/") that file-collision-guard.sh and file-collision-record.sh skip outright.
+# A sandbox there would make both hooks exit 0 on every input and look "covered" while testing
+# nothing at all.
+SBX_PARENT="${GOV_SELFTEST_SANDBOX:-$HOME/.gov-selftest}"
+SBX="$SBX_PARENT/run-$$"
+SBX_HOME="$SBX/home"
+SBX_BIN="$SBX/bin"
+SBX_HOOKS="$SBX/hooks"          # mutant tree (part c)
+IO_OUT="$SBX/io.out"; IO_ERR="$SBX/io.err"
+GIT_VIOL="$SBX/git-violations.log"
+
+REAL_GIT="$(command -v git 2>/dev/null)"
+HAVE_TIMEOUT=0; command -v timeout >/dev/null 2>&1 && HAVE_TIMEOUT=1
+
+cleanup() {
+  [ "$KEEP_SANDBOX" = "1" ] && { printf '\nsandbox kept at: %s\n' "$SBX"; return 0; }
+  case "$SBX" in "$SBX_PARENT"/run-*) rm -rf "$SBX" 2>/dev/null ;; esac
+}
+trap cleanup EXIT
+
+mkdir -p "$SBX_HOME/.claude/logs" "$SBX_BIN" 2>/dev/null || {
+  printf 'cannot create sandbox at %s\n' "$SBX" >&2; exit 1; }
+: > "$GIT_VIOL"
+
+# git shim — the containment boundary for hook execution.
+cat > "$SBX_BIN/git" <<'GITSHIM'
+#!/usr/bin/env bash
+# selftest git shim. Reads pass through. Network subcommands are denied outright. Mutating
+# subcommands are allowed only when the repo they target lives inside the selftest sandbox.
+_sub=""
+for _a in "$@"; do case "$_a" in -*|-C) ;; *) _sub="$_a"; break ;; esac; done
+_dir="$PWD"
+_prev=""
+for _a in "$@"; do [ "$_prev" = "-C" ] && { _dir="$_a"; break; }; _prev="$_a"; done
+case "$_sub" in
+  clone|push|pull|fetch|remote|submodule|am|request-pull|send-email)
+    printf '%s DENIED-NETWORK git %s (cwd=%s)\n' "$(date +%s)" "$_sub" "$PWD" >> "$GOV_SELFTEST_SBX/git-violations.log"
+    echo "selftest: network git subcommand '$_sub' denied" >&2
+    exit 1 ;;
+  init|add|commit|checkout|reset|stash|tag|merge|rebase|cherry-pick|revert|restore|switch|rm|mv|update-index|update-ref|gc|worktree|config|apply)
+    case "$_dir" in
+      "$GOV_SELFTEST_SBX"*) ;;
+      *) printf '%s DENIED-OUTSIDE git %s (dir=%s)\n' "$(date +%s)" "$_sub" "$_dir" >> "$GOV_SELFTEST_SBX/git-violations.log"
+         echo "selftest: mutating git '$_sub' outside the sandbox denied" >&2
+         exit 1 ;;
+    esac ;;
+esac
+exec "$GOV_SELFTEST_REAL_GIT" "$@"
+GITSHIM
+chmod +x "$SBX_BIN/git" 2>/dev/null
+
+# ── Result plumbing ──────────────────────────────────────────────────────────────────────────
+# MUT=1 suppresses reporting and only counts failures — that is how a mutant is judged.
+MUT=0
+CASE_FAILS=0
+CUR_SCRIPT=""
+CUR_LABEL=""
+
+_snip() { printf '%s' "$1" | tr '\n' '|' | head -c 320; }
+
+_ok()  { CASE_FAILS=$CASE_FAILS; [ "$MUT" = 1 ] && return 0; PASS=$((PASS+1)); printf '    [PASS] %s\n' "$1"; }
+_bad() {
+  CASE_FAILS=$((CASE_FAILS+1))
+  [ "$MUT" = 1 ] && return 0
+  FAIL=$((FAIL+1))
+  printf '    [FAIL] %s\n           %s\n' "$1" "$2"
+  FAIL_LOG="$FAIL_LOG
+  $CUR_SCRIPT — $1
+      $2"
+}
+
+expect_rc()   { if [ "$RC" = "$1" ]; then _ok "$2 (rc=$1)"; else _bad "$2" "expected rc=$1, actual rc=$RC; output: $(_snip "$BOTH")"; fi; }
+expect_has()  { case "$BOTH" in *"$1"*) _ok "$2" ;; *) _bad "$2" "expected output to contain [$1]; actual: $(_snip "$BOTH")" ;; esac; }
+expect_not()  { case "$BOTH" in *"$1"*) _bad "$2" "output must NOT contain [$1]; actual: $(_snip "$BOTH")" ;; *) _ok "$2" ;; esac; }
+expect_quiet(){ if [ -z "$(printf '%s' "$OUT" | tr -d '[:space:]')" ]; then _ok "$1"; else _bad "$1" "expected NO stdout; actual: $(_snip "$OUT")"; fi; }
+expect_file() { if [ -f "$1" ]; then _ok "$2"; else _bad "$2" "expected file to exist: $1"; fi; }
+expect_nofile(){ if [ ! -f "$1" ]; then _ok "$2"; else _bad "$2" "file must NOT exist: $1"; fi; }
+expect_grep() { if grep -qF "$1" "$2" 2>/dev/null; then _ok "$3"; else _bad "$3" "expected [$1] inside $2; actual: $(_snip "$(cat "$2" 2>/dev/null)")"; fi; }
+
+# ── Hook runner ──────────────────────────────────────────────────────────────────────────────
+# $1 script, $2 cwd, $3 session id, $4 stdin payload
+_run() {
+  local script="$1" cwd="$2" sid="${3:-selftest-sid}" payload="$4"
+  : > "$IO_OUT"; : > "$IO_ERR"
+  local runner=(bash "$script")
+  [ "$HAVE_TIMEOUT" = 1 ] && runner=(timeout 60 bash "$script")
+  ( cd "$cwd" 2>/dev/null || exit 97
+    printf '%s' "$payload" | env \
+      HOME="$SBX_HOME" USERPROFILE="$SBX_HOME" \
+      PATH="$SBX_BIN:$PATH" \
+      GOV_SELFTEST_SBX="$SBX" GOV_SELFTEST_REAL_GIT="$REAL_GIT" \
+      GOV_NOTIFY=0 GOV_WHATSAPP=0 GOVERNANCE_UPDATE_CHECK=0 \
+      GOVERNANCE_HOOKS=1 GOV_ROLE_FRAMEWORK=1 GOV_COLLISION_GUARD=1 \
+      GOV_SESSION_ID="$sid" GIT_TERMINAL_PROMPT=0 \
+      "${runner[@]}"
+  ) > "$IO_OUT" 2> "$IO_ERR"
+  RC=$?
+  OUT="$(cat "$IO_OUT" 2>/dev/null)"
+  ERR="$(cat "$IO_ERR" 2>/dev/null)"
+  BOTH="$OUT
+$ERR"
+}
+run_hook()  { _run "$CUR_SCRIPT" "$@"; }              # the script under test (real or mutant)
+run_fixture(){ _run "$CUR_ORIG" "$@"; }               # always the pristine hook (fixture setup)
+
+# ── Sandbox fixtures ─────────────────────────────────────────────────────────────────────────
+sbx_git() {   # never let the selftest itself touch a repo outside the sandbox
+  case "$1" in "$SBX"*) ;; *) printf 'refusing git outside sandbox: %s\n' "$1" >&2; return 1 ;; esac
+  local d="$1"; shift
+  "$REAL_GIT" -C "$d" "$@" >/dev/null 2>&1
+}
+
+fx_project() {  # $1 dir, $2 role, $3 canonical_working_copy value
+  local d="$1" role="$2" canon="$3"
+  mkdir -p "$d/docs/context" "$d/Plans" "$d/admin/lib" "$d/MDs" 2>/dev/null
+  printf '# Sandbox project\n\n## Canonical Working Copy\n\n- %s\n' "$canon" > "$d/CLAUDE.md"
+  {
+    printf -- '---\ntype: manifest\n---\n\n'
+    printf -- '- **canonical_working_copy = `%s`** — the canonical working copy.\n' "$canon"
+    printf 'canonical_working_copy: %s\n' "$canon"
+  } > "$d/docs/context/CONTEXT-MANIFEST.md"
+  printf '# PLAN\nProject version: v9.9.9\n'  > "$d/Plans/PLAN.md"
+  printf '# MEMORY\nv9.9.9\n'                 > "$d/docs/context/MEMORY.md"
+  printf '# HANDOFF\npointer\n'               > "$d/docs/context/HANDOFF.md"
+  printf '%s\n' "$role"                       > "$d/.governance-role"
+}
+
+fx_state_reset() {   # wipe every piece of per-session governance state in the sandbox HOME
+  rm -rf "$SBX_HOME/.claude/logs" 2>/dev/null
+  mkdir -p "$SBX_HOME/.claude/logs" 2>/dev/null
+}
+sess_dir() { printf '%s/.claude/logs/sessions/%s' "$SBX_HOME" "$1"; }
+fx_changes() {  # $1 sid, then one path per remaining arg
+  local sid="$1"; shift
+  local d; d="$(sess_dir "$sid")"; mkdir -p "$d" 2>/dev/null
+  : > "$d/.gov-session-changes"
+  for p in "$@"; do printf '%s\n' "$p" >> "$d/.gov-session-changes"; done
+}
+fx_token() {   # $1 = seconds until expiry (negative for an expired token); absent = remove
+  local t="$SBX_HOME/.claude/logs/governance-success-token.json"
+  if [ -z "$1" ]; then rm -f "$t" 2>/dev/null; return 0; fi
+  printf '{"task":"selftest","expires_at_epoch":%s}\n' "$(( $(date +%s) + $1 ))" > "$t"
+}
+
+# JSON payload builders (posix paths only — no backslashes to escape)
+pl_session()  { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"SessionStart","source":"startup"}' "$2" "$1"; }
+pl_prompt()   { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"UserPromptSubmit","prompt":"%s"}' "$2" "$1" "$3"; }
+pl_pre()      { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"%s","content":"x"}}' "$2" "$1" "$3"; }
+pl_post()     { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"%s","content":"x"},"tool_response":{"filePath":"%s"}}' "$2" "$1" "$3" "$3"; }
+pl_plain()    { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s"}' "$2" "$1" "$3"; }
+# canonical-cwd-check.sh compares the SPELLING of paths, so its payload must carry the cwd the
+# way Claude Code really sends it on Windows: a drive path with backslashes, JSON-escaped. Sending
+# the msys /c/... form makes the guard's own normaliser compare "/c/x" against "c/x" and report a
+# mismatch that does not exist — a fixture artefact that would read as a hook bug.
+pl_session_win() { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"SessionStart","source":"startup"}' "$2" "$(_winform "$1" | sed 's/\\/\\\\/g')"; }
+
+# ── Case definitions ─────────────────────────────────────────────────────────────────────────
+# One function per hook. Each MUST contain at least one must-block/must-fire case and one
+# must-allow case, and MUST assert printed text — not only the exit code.
+#
+# This table is a table of CASES, not of hooks. The hook list itself always comes from
+# settings.json; a hook registered there with no entry here is reported UNCOVERED.
+case_fn_for() {
+  case "$1" in
+    canonical-cwd-check.sh)     echo case_canonical_cwd ;;
+    pre-session.sh)             echo case_pre_session ;;
+    pre-task.sh)                echo case_pre_task ;;
+    plan-gate.sh)               echo case_plan_gate ;;
+    parallel-import.sh)         echo case_parallel_import ;;
+    file-collision-guard.sh)    echo case_collision_guard ;;
+    governance-guard.sh)        echo case_governance_guard ;;
+    pre-write.sh)               echo case_pre_write ;;
+    post-milestone.sh)          echo case_post_milestone ;;
+    sync-governance-copies.sh)  echo case_sync_copies ;;
+    file-collision-record.sh)   echo case_collision_record ;;
+    check-full-finish.sh)       echo case_check_full_finish ;;
+    check-docs-updated.sh)      echo case_check_docs ;;
+    pre-done.sh)                echo case_pre_done ;;
+    end-session.sh)             echo case_end_session ;;
+    *) echo "" ;;
+  esac
+}
+
+# --- canonical-cwd-check.sh ------------------------------------------------------------------
+# THE stdout-only bug. Signal 1 takes `head -1` of ANY drive path in the tombstone and prints it
+# as the redirect target. When the tombstone names the condemned folder before the canonical one
+# (the normal way such a note is written: "this folder, C:\Old, is retired; use C:\New"), the
+# guard condemns a folder and in the same sentence sends the session back to it — while exiting 0
+# with a perfectly correct exit code. An exit-code-only assertion passes this.
+case_canonical_cwd() {
+  local stale="$SBX/stale" good="$SBX/proj" wrong="$SBX/wrongcopy"
+  mkdir -p "$stale" 2>/dev/null
+  printf '# STALE — DO NOT USE\n\nThis folder (%s) is retired. The canonical copy is %s.\n' \
+      "$(_winform "$stale")" "$(_winform "$good")" > "$stale/_STALE_DO_NOT_USE.md"
+
+  fx_state_reset
+  run_hook "$stale" "sid-cwd-1" "$(pl_session_win "$stale" sid-cwd-1)"
+  expect_rc 0 "tombstone: advisory only, never blocks the session"
+  expect_has "STALE" "tombstone: says the folder is stale"
+  expect_not "canonical copy: $(_winform "$stale")" \
+             "tombstone: redirect target is NOT the folder it just condemned"
+
+  fx_project "$wrong" SOURCE "$(_winform "$good")"
+  run_hook "$wrong" "sid-cwd-2" "$(pl_session_win "$wrong" sid-cwd-2)"
+  expect_rc 0 "wrong-copy: advisory only"
+  expect_has "WRONG WORKING COPY" "wrong-copy: reports the manifest/root mismatch"
+
+  fx_project "$good" SOURCE "$(_winform "$good")"
+  run_hook "$good" "sid-cwd-3" "$(pl_session_win "$good" sid-cwd-3)"
+  expect_rc 0 "canonical copy: allowed"
+  expect_quiet "canonical copy: prints nothing"
+}
+
+# --- pre-session.sh ---------------------------------------------------------------------------
+case_pre_session() {
+  local good="$SBX/proj" ungov="$SBX/ungoverned"
+  fx_project "$good" SOURCE "$(_winform "$good")"
+  fx_state_reset
+  run_hook "$good" "sid-ps-1" "$(pl_session "$good" sid-ps-1)"
+  expect_rc 0 "governed: SessionStart never blocks"
+  expect_has "Governed project detected" "governed: emits the Session Start Protocol directive"
+
+  mkdir -p "$ungov" 2>/dev/null
+  printf '# Ungoverned\n' > "$ungov/CLAUDE.md"
+  printf 'console.log(1)\n' > "$ungov/index.js"
+  printf 'SOURCE\n' > "$ungov/.governance-role"   # role gate is orthogonal to "needs scaffolding"
+  fx_state_reset
+  run_hook "$ungov" "sid-ps-2" "$(pl_session "$ungov" sid-ps-2)"
+  expect_rc 0 "ungoverned: never blocks"
+  expect_has "init-governance" "ungoverned: demands the scaffold skill"
+}
+
+# --- pre-task.sh ------------------------------------------------------------------------------
+case_pre_task() {
+  local good="$SBX/proj"
+  fx_project "$good" SOURCE "$(_winform "$good")"
+
+  fx_state_reset
+  run_hook "$good" "sid-pt-1" "$(pl_prompt "$good" sid-pt-1 "hello")"
+  expect_rc 0 "first prompt: UserPromptSubmit MUST NOT exit 2 (gotcha #218)"
+  expect_has "GOVERNANCE ENFORCEMENT" "first prompt: emits the mandatory bootstrapper directive"
+  expect_file "$(sess_dir sid-pt-1)/.gov-session-bootstrapped" "first prompt: auto-creates the marker (deadlock fix)"
+
+  run_hook "$good" "sid-pt-1" "$(pl_prompt "$good" sid-pt-1 "second")"
+  expect_rc 0 "second prompt: allowed"
+  expect_quiet "second prompt: silent once bootstrapped"
+}
+
+# --- plan-gate.sh -----------------------------------------------------------------------------
+case_plan_gate() {
+  local good="$SBX/proj"
+  fx_project "$good" SOURCE "$(_winform "$good")"
+  fx_state_reset
+  # >500 chars is one of plan-gate's two conditions, so the fixture asserts its own length
+  # rather than trusting that it looks long enough (the first version was 424 and silently
+  # tested the short-message path instead).
+  local big="Please implement and refactor the retrieval architecture in admin/lib/server.js and config.js. Step 1: extract the pipeline into a module. Step 2: rewrite the endpoint schema so the container can serve it. Step 3: migrate the database and add a module for the API service middleware. This is a multi phase change and it touches many files across the whole codebase, so plan it properly before writing any code at all please. It should also redesign the middleware layer, migrate the remaining endpoints, and rewrite the container build so the whole service comes up from one command."
+  if [ "${#big}" -ge 500 ]; then _ok "plan-gate fixture is over the 500-char threshold (${#big})"
+  else _bad "plan-gate fixture is over the 500-char threshold" "fixture is only ${#big} chars, so this case exercises the wrong branch"; fi
+  run_hook "$good" "sid-pg-1" "$(pl_prompt "$good" sid-pg-1 "$big")"
+  expect_rc 0 "large task: UserPromptSubmit MUST NOT exit 2"
+  expect_has "GOVERNANCE RECOMMENDATION" "large task: recommends /plan-and-execute"
+
+  run_hook "$good" "sid-pg-2" "$(pl_prompt "$good" sid-pg-2 "what time is it")"
+  expect_rc 0 "small talk: allowed"
+  expect_quiet "small talk: no planning nag"
+}
+
+# --- parallel-import.sh -----------------------------------------------------------------------
+case_parallel_import() {
+  local good="$SBX/proj"
+  fx_project "$good" SOURCE "$(_winform "$good")"
+  fx_state_reset
+  local dump="Here is the HANDOFF-v1.2.3 dump from another session, please merge this: status: active and consumed_at: null and remaining_items: 4"
+  run_hook "$good" "sid-pi-1" "$(pl_prompt "$good" sid-pi-1 "$dump")"
+  expect_rc 0 "pasted session dump: never blocks"
+  expect_has "GOVERNANCE WARNING" "pasted session dump: recommends /parallel-session-merge"
+
+  run_hook "$good" "sid-pi-2" "$(pl_prompt "$good" sid-pi-2 "fix the typo in the readme")"
+  expect_rc 0 "ordinary prompt: allowed"
+  expect_quiet "ordinary prompt: silent"
+}
+
+# --- file-collision-guard.sh ------------------------------------------------------------------
+case_collision_guard() {
+  local repo="$SBX/proj"
+  fx_project "$repo" SOURCE "$(_winform "$repo")"
+  [ -d "$repo/.git" ] || sbx_git "$repo" init
+  fx_state_reset
+
+  local contested="$repo/admin/lib/contested.js"
+  local free="$repo/admin/lib/untouched.js"
+
+  # Fixture: another live session claims the file, using the pristine guard's own claim path.
+  run_fixture "$repo" "sid-other" "$(pl_pre "$repo" sid-other "$contested")"
+
+  run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$contested")"
+  expect_rc 2 "concurrent claim: BLOCKS the second session"
+  expect_has "another Claude Code session is editing this file" "concurrent claim: names the real reason"
+  expect_has "sid-other" "concurrent claim: names the session holding it"
+
+  run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$free")"
+  expect_rc 0 "unclaimed new file: allowed"
+}
+
+# --- governance-guard.sh ----------------------------------------------------------------------
+case_governance_guard() {
+  local src="$SBX/proj" dep="$SBX/deployment"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  fx_project "$dep" DEPLOYMENT "$(_winform "$src")"
+  fx_state_reset
+
+  local prot="$src/docs/context/GOTCHAS.md"
+  printf '# gotchas\n' > "$prot"
+
+  fx_token
+  run_hook "$src" "sid-gg-1" "$(pl_pre "$src" sid-gg-1 "$prot")"
+  expect_rc 2 "protected doc, no token: BLOCKED"
+  expect_has "requires a success token" "protected doc: explains the token requirement"
+
+  fx_token 300
+  run_hook "$src" "sid-gg-2" "$(pl_pre "$src" sid-gg-2 "$prot")"
+  expect_rc 0 "protected doc, fresh token: allowed"
+
+  fx_token -60
+  run_hook "$src" "sid-gg-3" "$(pl_pre "$src" sid-gg-3 "$prot")"
+  expect_rc 2 "protected doc, expired token: BLOCKED"
+  expect_has "expired" "expired token: says so"
+
+  fx_token 300
+  run_hook "$src" "sid-gg-4" "$(pl_pre "$src" sid-gg-4 "$src/README.md")"
+  expect_rc 0 "ordinary file: allowed"
+
+  printf '# gotchas\n' > "$dep/docs/context/GOTCHAS.md"
+  run_hook "$dep" "sid-gg-5" "$(pl_pre "$dep" sid-gg-5 "$dep/docs/context/GOTCHAS.md")"
+  expect_rc 2 "governance edit on a DEPLOYMENT node: BLOCKED even with a valid token"
+  expect_has "DEPLOYMENT" "deployment block: names the node role"
+  fx_token
+}
+
+# --- pre-write.sh -----------------------------------------------------------------------------
+case_pre_write() {
+  local src="$SBX/proj"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  fx_state_reset
+  local hi="$src/admin/server.js"
+
+  run_hook "$src" "sid-pw-1" "$(pl_pre "$src" sid-pw-1 "$hi")"
+  expect_rc 2 "high-impact file without bootstrapper: BLOCKED"
+  expect_has "BLOCKED" "high-impact block: says BLOCKED"
+
+  mkdir -p "$(sess_dir sid-pw-2)" 2>/dev/null
+  touch "$(sess_dir sid-pw-2)/.gov-session-bootstrapped"
+  run_hook "$src" "sid-pw-2" "$(pl_pre "$src" sid-pw-2 "$hi")"
+  expect_rc 0 "high-impact file with bootstrapper: allowed"
+  expect_has "high-impact file" "bootstrapped write: still warns"
+
+  run_hook "$src" "sid-pw-3" "$(pl_pre "$src" sid-pw-3 "$src/notes.md")"
+  expect_rc 0 "ordinary file: allowed"
+  expect_quiet "ordinary file: silent"
+}
+
+# --- post-milestone.sh ------------------------------------------------------------------------
+case_post_milestone() {
+  local src="$SBX/proj" ungov="$SBX/ungoverned"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  mkdir -p "$ungov" 2>/dev/null; printf '# no manifest\n' > "$ungov/CLAUDE.md"
+  fx_state_reset
+
+  local f="$src/admin/lib/tracked.js"; printf 'x\n' > "$f"
+  run_hook "$src" "sid-pm-1" "$(pl_post "$src" sid-pm-1 "$f")"
+  expect_rc 0 "PostToolUse never blocks"
+  expect_grep "$f" "$(sess_dir sid-pm-1)/.gov-session-changes" "governed write is recorded in the session change log"
+
+  run_hook "$ungov" "sid-pm-2" "$(pl_post "$ungov" sid-pm-2 "$ungov/x.js")"
+  expect_rc 0 "ungoverned write: allowed"
+  expect_nofile "$(sess_dir sid-pm-2)/.gov-session-changes" "ungoverned write is NOT recorded"
+}
+
+# --- sync-governance-copies.sh ----------------------------------------------------------------
+case_sync_copies() {
+  local src="$SBX/proj"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  fx_state_reset
+  local hookfile="$SBX_HOME/.claude/hooks/governance/dummy-selftest.sh"
+  mkdir -p "$(dirname "$hookfile")" 2>/dev/null
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$hookfile"
+  # The hook mirrors, it never resurrects: it only refreshes a bundle that already exists. The
+  # fixture therefore has to create the bundle directory, or the case would test the
+  # "no bundle configured" path and call the silence a pass.
+  mkdir -p "$SBX_HOME/.claude/governance-installer/bundle/hooks/governance" 2>/dev/null
+  local mirror="$SBX_HOME/.claude/governance-installer/bundle/hooks/governance/dummy-selftest.sh"
+  rm -f "$mirror" 2>/dev/null
+
+  run_hook "$src" "sid-sc-1" "$(pl_post "$src" sid-sc-1 "$hookfile")"
+  expect_rc 0 "hook edit: never blocks"
+  expect_file "$mirror" "hook edit is mirrored into the installer bundle"
+
+  local other="$SBX_HOME/.claude/governance-installer/bundle/hooks/governance/not-a-hook.js"
+  rm -f "$other" 2>/dev/null
+  local proj_js="$src/admin/lib/not-a-hook.js"; printf 'x\n' > "$proj_js"
+  run_hook "$src" "sid-sc-2" "$(pl_post "$src" sid-sc-2 "$proj_js")"
+  expect_rc 0 "project file: allowed"
+  expect_nofile "$other" "project file is NOT mirrored into the bundle"
+}
+
+# --- file-collision-record.sh -----------------------------------------------------------------
+case_collision_record() {
+  local repo="$SBX/proj"
+  fx_project "$repo" SOURCE "$(_winform "$repo")"
+  [ -d "$repo/.git" ] || sbx_git "$repo" init
+  fx_state_reset
+  local f="$repo/admin/lib/recorded.js"; printf 'v1\n' > "$f"
+
+  run_hook "$repo" "sid-cr-1" "$(pl_post "$repo" sid-cr-1 "$f")"
+  expect_rc 0 "record: never blocks"
+  if [ -n "$(ls -A "$SBX_HOME/.claude/logs/file-locks" 2>/dev/null)" ]; then
+    _ok "write claim is recorded so other sessions can see it"
+  else
+    _bad "write claim is recorded so other sessions can see it" \
+         "expected at least one claim under $SBX_HOME/.claude/logs/file-locks (empty)"
+  fi
+
+  rm -rf "$SBX_HOME/.claude/logs/file-locks" 2>/dev/null
+  printf 'x\n' > "$SBX/outside-any-repo.js"
+  run_hook "$SBX" "sid-cr-2" "$(pl_post "$SBX" sid-cr-2 "$SBX/outside-any-repo.js")"
+  expect_rc 0 "non-repo write: allowed"
+  if [ -z "$(ls -A "$SBX_HOME/.claude/logs/file-locks" 2>/dev/null)" ]; then
+    _ok "non-repo write claims nothing"
+  else
+    _bad "non-repo write claims nothing" "a claim appeared for a file outside any git repo: $(ls -A "$SBX_HOME/.claude/logs/file-locks" 2>/dev/null | head -3)"
+  fi
+}
+
+# --- check-full-finish.sh ---------------------------------------------------------------------
+case_check_full_finish() {
+  # A fresh repo per invocation. This hook is registered TWICE (TaskCompleted and Stop), so a
+  # shared repo would carry the staged file from the first invocation into the second and turn
+  # the must-allow case red for a reason that has nothing to do with the hook.
+  FF_SEQ=$(( ${FF_SEQ:-0} + 1 ))
+  local repo="$SBX/ffrepo-$FF_SEQ"
+  mkdir -p "$repo" 2>/dev/null
+  [ -d "$repo/.git" ] || sbx_git "$repo" init
+  printf 'x\n' > "$repo/readme.md"
+  fx_state_reset
+
+  run_hook "$repo" "sid-ff-1" "$(pl_plain "$repo" sid-ff-1 Stop)"
+  expect_rc 0 "clean tree: stop allowed"
+
+  printf 'console.log(1)\n' > "$repo/feature.js"
+  sbx_git "$repo" add feature.js
+  run_hook "$repo" "sid-ff-2" "$(pl_plain "$repo" sid-ff-2 Stop)"
+  expect_rc 2 "staged code changes: stop BLOCKED"
+  expect_has "full-finish" "staged code changes: names the required pipeline"
+}
+
+# --- check-docs-updated.sh --------------------------------------------------------------------
+case_check_docs() {
+  local src="$SBX/proj"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  fx_state_reset
+
+  fx_changes sid-cd-1 "$src/admin/lib/a.js" "$src/admin/lib/b.js"
+  run_hook "$src" "sid-cd-1" "$(pl_plain "$src" sid-cd-1 TaskCompleted)"
+  expect_rc 0 "advisory only, never blocks a task"
+  expect_has "[doc-check]" "code changed with no doc update: advisory fires"
+
+  fx_changes sid-cd-2 "$src/admin/lib/a.js" "$src/docs/context/GOTCHAS.md"
+  run_hook "$src" "sid-cd-2" "$(pl_plain "$src" sid-cd-2 TaskCompleted)"
+  expect_rc 0 "documented session: allowed"
+  expect_not "[doc-check]" "documented session: no advisory"
+}
+
+# --- pre-done.sh ------------------------------------------------------------------------------
+case_pre_done() {
+  local src="$SBX/proj"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  fx_state_reset
+
+  fx_changes sid-pd-1 "$src/admin/lib/a.js" "$src/admin/lib/b.js"
+  fx_token
+  run_hook "$src" "sid-pd-1" "$(pl_plain "$src" sid-pd-1 TaskCompleted)"
+  expect_rc 2 "changes without evidence token: task completion BLOCKED"
+  expect_has "VERIFICATION GATE" "verification gate: names itself"
+
+  fx_token 300
+  run_hook "$src" "sid-pd-2" "$(pl_plain "$src" sid-pd-2 TaskCompleted)"
+  expect_rc 0 "no tracked changes: allowed"
+
+  fx_changes sid-pd-3 "$src/admin/lib/a.js"
+  fx_token 300
+  run_hook "$src" "sid-pd-3" "$(pl_plain "$src" sid-pd-3 TaskCompleted)"
+  expect_rc 0 "changes with a fresh token: allowed"
+  fx_token
+}
+
+# --- end-session.sh ---------------------------------------------------------------------------
+# The must-allow case deliberately uses a project with NO version.json so the hook returns at its
+# "no version.json" gate. Everything past that point in this hook eventually reaches a block that
+# does `git clone` + `git push` against a real public repo; the git shim would deny it, but a
+# check should not need its own safety net to be safe.
+case_end_session() {
+  local src="$SBX/proj"
+  fx_project "$src" SOURCE "$(_winform "$src")"
+  rm -f "$src/version.json" 2>/dev/null
+  rm -f "$SBX_HOME/.claude/logs/.governance-push-pending" 2>/dev/null
+  fx_state_reset
+
+  fx_changes sid-es-1 "$src/admin/lib/a.js" "$src/admin/lib/b.js" "$src/admin/lib/c.js" "$src/admin/lib/d.js"
+  run_hook "$src" "sid-es-1" "$(pl_plain "$src" sid-es-1 Stop)"
+  expect_rc 2 "4 writes and no fresh HANDOFF: stop BLOCKED"
+  expect_has "HANDOFF.md was not refreshed" "handoff gate: names what is missing"
+
+  fx_changes sid-es-2 "$src/admin/lib/a.js" "$src/admin/lib/b.js" "$src/docs/context/HANDOFF.md" "$src/admin/lib/c.js"
+  run_hook "$src" "sid-es-2" "$(pl_plain "$src" sid-es-2 Stop)"
+  expect_rc 0 "writes WITH a refreshed HANDOFF: stop allowed"
+  expect_not "HANDOFF.md was not refreshed" "refreshed handoff: no false block"
+}
+
+# ── Settings parsing ─────────────────────────────────────────────────────────────────────────
+# Priority: jq -> node -> python3 -> awk. NEVER a hard-coded hook list; a hard-coded list is the
+# same existence-test disease this script exists to replace (a hook deleted from settings.json
+# would still be "tested", and a hook added would never be).
+pick_parser() {
+  if   command -v jq      >/dev/null 2>&1; then echo jq
+  elif command -v node    >/dev/null 2>&1; then echo node
+  elif command -v python3 >/dev/null 2>&1; then echo python3
+  else echo awk; fi
+}
+
+parse_hooks() {
+  # PARSER is resolved by pick_parser() in the caller: this function runs inside $( ), so an
+  # assignment here would be discarded with the subshell and the report would always say "none".
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.hooks | to_entries[] as $e | $e.value[] | .hooks[]? | "\($e.key)\t\(.command)"' "$SETTINGS" 2>/dev/null
+    return
+  fi
+  if command -v node >/dev/null 2>&1; then
+
+    node -e '
+      const fs=require("fs");
+      const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+      for (const [ev,groups] of Object.entries(s.hooks||{}))
+        for (const g of (groups||[]))
+          for (const h of (g.hooks||[])) if (h && h.command) console.log(ev+"\t"+h.command);
+    ' "$SETTINGS" 2>/dev/null
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+
+    python3 -c '
+import json,sys
+s=json.load(open(sys.argv[1],encoding="utf-8"))
+for ev,groups in (s.get("hooks") or {}).items():
+    for g in groups or []:
+        for h in g.get("hooks") or []:
+            if h.get("command"): print(ev+"\t"+h["command"])
+' "$SETTINGS" 2>/dev/null
+    return
+  fi
+  # awk fallback (documented): settings.json is pretty-printed one key per line. Track the most
+  # recent top-level event key (a key at 2-space indent directly under "hooks") and pair it with
+  # every "command" string that follows. Correct for the pretty-printed layout Claude Code
+  # writes; it is a fallback, so it is reported as such in the header.
+
+  awk '
+    /"hooks"[[:space:]]*:/ { inhooks=1 }
+    inhooks && /^  "[A-Za-z]+"[[:space:]]*:/ { ev=$0; sub(/^  "/,"",ev); sub(/".*/,"",ev) }
+    /"command"[[:space:]]*:/ {
+      line=$0; sub(/.*"command"[[:space:]]*:[[:space:]]*"/,"",line); sub(/",?[[:space:]]*$/,"",line)
+      if (ev != "" && line != "") print ev "\t" line
+    }
+  ' "$SETTINGS"
+}
+
+expand_cmd() {   # ~ -> $CHOME's parent; strip trailing args; echo "" when not a file
+  local c="$1"
+  case "$c" in "~/"*) c="$HOME/${c#\~/}" ;; esac
+  local first="${c%% *}"
+  [ -f "$first" ] && printf '%s' "$first" || printf ''
+}
+
+_winform() {  # /c/foo/bar -> C:\foo\bar ; anything else passes through with / -> \ on drive paths
+  printf '%s' "$1" | sed -e 's|^/\([A-Za-z]\)/|\U\1:/|' | tr '/' '\\'
+}
+
+# Run canonical-cwd-check.sh's OWN parser over a manifest, by lifting its helper definitions out
+# of the file and evaluating them in a SUBSHELL. Deliberately not a reimplementation: the whole
+# point is to compare against the real thing, so that a future fix applied to only one of the two
+# copies is caught instead of silently believed. Sourcing the hook itself is not an option — it
+# executes its checks at load and writes to stdout. Prints nothing if the helpers are absent
+# (an older hook), which the caller treats as "no comparison possible", never as agreement.
+_hook_canon_extract() {
+  local manifest="$1" hook="$HOOKS_ROOT/governance/canonical-cwd-check.sh" defs
+  # HOOKS_ROOT is ~/.claude/hooks (NOT .../governance) — getting this wrong makes the function
+  # return empty and the drift check then reports a disagreement that does not exist. Fail LOUD
+  # on a missing hook rather than returning "" and being read as "<none>".
+  [ -f "$manifest" ] || return 0
+  if [ ! -f "$hook" ]; then printf '<hook-not-found:%s>' "$hook"; return 0; fi
+  defs="$(awk '/^_(clean_path|canon_line|canon_path|norm)\(\)/{f=1} f{print} f&&/^}/{f=0}' "$hook" 2>/dev/null)"
+  case "$defs" in *_canon_line*) ;; *) return 0 ;; esac
+  ( eval "$defs" 2>/dev/null && _canon_path "$(_canon_line "$manifest")" 2>/dev/null ) | head -1
+}
+
+# ── PART A + C ───────────────────────────────────────────────────────────────────────────────
+mutate_and_check() {   # $1 hook path (real), $2 case fn, $3 basename
+  local real="$1" fn="$2" base="$3"
+  local mutant_dir="$SBX_HOOKS" rel
+  rel="${real#$HOOKS_ROOT/}"
+  local mutant="$mutant_dir/$rel"
+  local survivors=0
+
+  # M1 — NOOP: the hook does nothing at all. Any assertion set a dead hook still satisfies is
+  # vacuous, so this is the coverage test, not just a mutation test.
+  { printf '%s\n' "$(head -1 "$real")"; printf 'exit 0  # selftest mutant: NOOP\n'; tail -n +2 "$real"; } > "$mutant"
+  MUT=1; CASE_FAILS=0; CUR_SCRIPT="$mutant"; "$fn" >/dev/null 2>&1; MUT=0
+  if [ "$CASE_FAILS" -eq 0 ]; then
+    survivors=$((survivors+1))
+    _bad "MUTATION[$base/NOOP] survived" "a hook that does NOTHING passes every assertion for it — the assertions are vacuous"
+  else
+    _ok "MUTATION[$base/NOOP] killed by $CASE_FAILS assertion(s)"
+  fi
+
+  # M2 — NOBLOCK: every `exit 2` becomes `exit 0`. Only meaningful for hooks that block.
+  # The trailing-comment form matters: check-full-finish.sh writes `exit 2  # Block stop`, and a
+  # `$`-anchored pattern left that mutant byte-identical to the original — which then "survived"
+  # and accused a perfectly good assertion set of being vacuous. A mutation operator that fails
+  # to mutate is a false alarm, not a finding.
+  if grep -qE '^[[:space:]]*exit 2([[:space:]]|#|$)' "$real"; then
+    sed -E 's/^([[:space:]]*)exit 2([[:space:]]*(#.*)?)$/\1exit 0\2/' "$real" > "$mutant"
+    MUT=1; CASE_FAILS=0; CUR_SCRIPT="$mutant"; "$fn" >/dev/null 2>&1; MUT=0
+    if [ "$CASE_FAILS" -eq 0 ]; then
+      survivors=$((survivors+1))
+      _bad "MUTATION[$base/NOBLOCK] survived" "neutralising every 'exit 2' changed nothing — the block is not actually asserted"
+    else
+      _ok "MUTATION[$base/NOBLOCK] killed by $CASE_FAILS assertion(s)"
+    fi
+  fi
+
+  cp -f "$real" "$mutant" 2>/dev/null
+  return $survivors
+}
+
+part_a() {
+  printf '\n=== PART A — execute every registered hook (settings.json: %s) ===\n' "$SETTINGS"
+  [ -f "$SETTINGS" ] || { _bad "settings.json readable" "not found at $SETTINGS"; return; }
+
+  PARSER="$(pick_parser)"
+  HOOK_LINES="$(parse_hooks)"
+  printf 'hook list parsed with: %s\n' "$PARSER"
+  if [ -z "$HOOK_LINES" ]; then
+    _bad "settings.json hook list" "parsed 0 hooks from $SETTINGS — every hook is therefore untested"
+    return
+  fi
+
+  # Mutation tree: the whole hooks dir, because a hook sources _common.sh from its own dir.
+  if [ "$DO_MUTATION" = 1 ]; then
+    mkdir -p "$SBX_HOOKS" 2>/dev/null
+    cp -R "$HOOKS_ROOT/." "$SBX_HOOKS/" 2>/dev/null
+  fi
+
+  local n=0
+  while IFS="$(printf '\t')" read -r ev cmd; do
+    [ -n "$cmd" ] || continue
+    n=$((n+1))
+    local path base fn
+    path="$(expand_cmd "$cmd")"
+    if [ -z "$path" ]; then
+      # Inline command (e.g. the Stop-event `echo ...` reminder). Still EXECUTED, not assumed.
+      printf '\n  [%s] inline command\n' "$ev"
+      CUR_SCRIPT=""; CUR_LABEL="inline:$ev"
+      local o rc
+      o=$(env HOME="$SBX_HOME" PATH="$SBX_BIN:$PATH" bash -c "$cmd" 2>&1); rc=$?
+      RC=$rc; OUT="$o"; BOTH="$o"
+      CUR_SCRIPT="inline:$(printf '%s' "$cmd" | head -c 60)"
+      expect_rc 0 "inline command runs cleanly"
+      if [ -n "$(printf '%s' "$o" | tr -d '[:space:]')" ]; then _ok "inline command emits its reminder"
+      else _bad "inline command emits its reminder" "produced no output — a silent reminder reminds nobody"; fi
+      continue
+    fi
+    base="$(basename "$path")"
+    fn="$(case_fn_for "$base")"
+    printf '\n  [%s] %s\n' "$ev" "$path"
+    if [ -z "$fn" ] || ! command -v "$fn" >/dev/null 2>&1; then
+      UNCOV=$((UNCOV+1))
+      UNCOV_LOG="$UNCOV_LOG
+  $path — no must-block/must-allow case is defined for it; it is EXECUTED nowhere and its behaviour is unverified"
+      printf '    [UNCOVERED] no case defined — behaviour unverified\n'
+      continue
+    fi
+    CUR_ORIG="$path"; CUR_SCRIPT="$path"
+    "$fn"
+    if [ "$DO_MUTATION" = 1 ]; then
+      mutate_and_check "$path" "$fn" "$base"
+      CUR_SCRIPT="$path"
+    fi
+  done <<EOF
+$HOOK_LINES
+EOF
+  printf '\n  hooks discovered in settings.json: %s\n' "$n"
+
+  if [ -s "$GIT_VIOL" ]; then
+    CUR_SCRIPT="(git shim)"
+    _bad "no hook attempted a denied git operation" "$(_snip "$(cat "$GIT_VIOL")")"
+  else
+    _ok "no hook attempted a network or out-of-sandbox git operation"
+  fi
+}
+
+# ── PART B — recompute every countable claim ─────────────────────────────────────────────────
+BLOCK="$SBX/facts.block"
+GEN_FACTS="$PROJECT/docs/context/GENERATED-FACTS.md"
+
+gf() { printf '%s\n' "$1" >> "$BLOCK"; }
+
+claim_check() {  # $1 label, $2 measured, $3 claimed (may be empty), $4 where
+  CUR_SCRIPT="$4"
+  if [ -z "$3" ]; then
+    _ok "$1: no claim found in $4 (nothing to contradict)"
+  elif [ "$2" = "$3" ]; then
+    _ok "$1: $4 claims $3, measured $2"
+  else
+    _bad "$1" "$4 claims $3, measured $2 — the document is wrong"
+  fi
+}
+
+part_b() {
+  printf '\n=== PART B — recompute every countable claim (project: %s) ===\n' "$PROJECT"
+  : > "$BLOCK"
+  if [ ! -d "$PROJECT" ]; then
+    CUR_SCRIPT="$PROJECT"; _bad "project root exists" "not a directory: $PROJECT"; return
+  fi
+
+  gf "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  gf "generated_by: ~/.claude/hooks/governance/governance-selftest.sh"
+  gf "project_root: $PROJECT"
+
+  # canonical_working_copy — ALSO emitted in the strict colon syntax below, so the guard reads a
+  # correct value from here regardless of how the manifest spells it.
+  #
+  # THIS EXTRACTION MUST STAY IN STEP WITH canonical-cwd-check.sh `_canon_line`/`_canon_path`
+  # (2026-09-01). It was a stale DUPLICATE of that hook's OLD regex: colon-only, plus a
+  # `cut -d: -f2-` that splits on the DRIVE colon and truncates "C:\dev\example-project" to
+  # "\example-project". The hook was relaxed to accept a `-`/`*`/`**` bullet and `:` or `=`;
+  # this copy was not, so the selftest reported the guard INERT after the guard had been fixed —
+  # the tool's own duplicate of a fact outliving the fact. The hook is deliberately standalone
+  # (it must work when the rest of the framework does not), so the duplication cannot simply be
+  # deleted; instead the drift is now ASSERTED below, the way `protected-list-consistency.test.sh`
+  # pins the protected-doc list. A duplicated fact you cannot delete, you must compare.
+  local measured_canon declared_canon _canon_l _hook_canon
+  measured_canon="$(_winform "$PROJECT")"
+  _canon_l="$(grep -iE '^[[:space:]]*([-*+][[:space:]]+)?(\*\*)?[[:space:]]*canonical_working_copy[[:space:]]*(\*\*)?[[:space:]]*[:=]' \
+                "$PROJECT/docs/context/CONTEXT-MANIFEST.md" 2>/dev/null | head -1)"
+  declared_canon="$(printf '%s' "$_canon_l" | grep -oE '`[^`]+`' | head -1 | tr -d '`')"
+  [ -z "$declared_canon" ] && declared_canon="$(printf '%s' "$_canon_l" | grep -oE '"[^"]+"' | head -1 | tr -d '"')"
+  [ -z "$declared_canon" ] && declared_canon="$(printf '%s' "$_canon_l" | sed -E 's/^[^:=]*[:=][[:space:]]*//')"
+  declared_canon="$(printf '%s' "$declared_canon" | sed -e 's/^[[:space:]`"*'"'"']*//' -e 's/[[:space:]`"*'"'"',.;:)]*$//')"
+
+  # Drift assertion: run the HOOK's own extraction over the same file and require agreement.
+  # If someone fixes one copy and not the other again, this goes red instead of lying.
+  CUR_SCRIPT="canonical-cwd-check.sh vs governance-selftest.sh"
+  _hook_canon="$(_hook_canon_extract "$PROJECT/docs/context/CONTEXT-MANIFEST.md")"
+  if [ "$_hook_canon" = "$declared_canon" ]; then
+    _ok "canonical_working_copy extraction agrees with canonical-cwd-check.sh ('${declared_canon:-<none>}')"
+  else
+    _bad "canonical_working_copy extraction drifted from canonical-cwd-check.sh" \
+         "hook reads '${_hook_canon:-<none>}', selftest reads '${declared_canon:-<none>}' — the two copies of this parser disagree"
+  fi
+  gf "canonical_working_copy: $measured_canon"
+  gf "canonical_working_copy_declared: ${declared_canon:-<none>}"
+  CUR_SCRIPT="docs/context/CONTEXT-MANIFEST.md"
+  if [ -z "$declared_canon" ]; then
+    _bad "canonical_working_copy declared in the manifest" "no 'canonical_working_copy:' line found — canonical-cwd-check.sh Signal 2 is inert on this project"
+  elif [ "$(printf '%s' "$declared_canon" | tr 'A-Z/' 'a-z\\' | tr -d ':')" = "$(printf '%s' "$measured_canon" | tr 'A-Z/' 'a-z\\' | tr -d ':')" ]; then
+    _ok "canonical_working_copy matches the audited root ($declared_canon)"
+  else
+    _bad "canonical_working_copy matches the audited root" "manifest declares [$declared_canon], this run audited [$measured_canon]"
+  fi
+
+  # --- GOTCHAS.md entry count ---------------------------------------------------------------
+  # THE REGEX. Entries come in two shapes in this file: a flat numbered list (`1. text`) for the
+  # early entries and markdown headings (`### 245. text`) for the later ones. A previous sync
+  # script counted only `^[0-9]\+\.` and therefore under-counted by exactly the number of heading
+  # entries (102 of them here). The expression below covers both, and the contiguity assertion
+  # underneath is what proves it is the right expression: extracted numbers must be 1..N with no
+  # duplicates and no gaps.
+  local G="$PROJECT/docs/context/GOTCHAS.md"
+  local GOTCHA_RE='^(#{1,6}[[:space:]]*)?#?[0-9]+[.)]'
+  gf "gotchas_entry_regex: $GOTCHA_RE"
+  if [ -f "$G" ]; then
+    local g_count g_declared g_nums g_uniq g_max
+    g_count=$(grep -cE "$GOTCHA_RE" "$G" 2>/dev/null)
+    g_declared=$(grep -iE '^total_entries:' "$G" 2>/dev/null | head -1 | tr -dc '0-9')
+    g_nums="$SBX/gnums"
+    grep -oE "$GOTCHA_RE" "$G" 2>/dev/null | grep -oE '[0-9]+' | sed 's/^0*//' | sort -n > "$g_nums"
+    g_uniq=$(sort -nu "$g_nums" | wc -l | tr -d ' ')
+    g_max=$(tail -1 "$g_nums" 2>/dev/null)
+    gf "gotchas_entries_measured: $g_count"
+    gf "gotchas_entries_declared: ${g_declared:-<none>}"
+    gf "gotchas_highest_number: ${g_max:-0}"
+    gf "gotchas_numbering_contiguous: $([ "$g_count" = "$g_uniq" ] && [ "$g_count" = "${g_max:-0}" ] && echo yes || echo no)"
+    CUR_SCRIPT="docs/context/GOTCHAS.md"
+    if [ "$g_count" = "$g_uniq" ] && [ "$g_count" = "${g_max:-0}" ]; then
+      _ok "gotchas numbering is contiguous 1..$g_max (proves the counting regex is the right one)"
+    else
+      _bad "gotchas numbering is contiguous" "matched $g_count lines, $g_uniq distinct numbers, highest ${g_max:-0} — the counting regex or the file's numbering is wrong"
+    fi
+    claim_check "gotchas total_entries" "$g_count" "$g_declared" "docs/context/GOTCHAS.md frontmatter"
+  else
+    CUR_SCRIPT="docs/context/GOTCHAS.md"; _bad "GOTCHAS.md exists" "not found at $G"
+  fi
+
+  # --- line counts --------------------------------------------------------------------------
+  local cm_lines op_lines
+  cm_lines=$(wc -l < "$PROJECT/CLAUDE.md" 2>/dev/null | tr -d ' ')
+  op_lines=$(wc -l < "$PROJECT/MDs/Open-Problems.md" 2>/dev/null | tr -d ' ')
+  gf "claude_md_lines: ${cm_lines:-0}"
+  gf "open_problems_lines: ${op_lines:-0}"
+  # The manifest states Open-Problems.md as "~409 lines" / "409 lines". Compare against the
+  # measured value; a stale size claim is how a reader mis-budgets a selective context load.
+  local op_claim
+  op_claim=$(grep -oE 'Open-Problems\.md[^|]*—?[[:space:]]*~?[0-9]+ lines' "$PROJECT/docs/context/CONTEXT-MANIFEST.md" 2>/dev/null \
+             | grep -oE '[0-9]+ lines' | head -1 | tr -dc '0-9')
+  claim_check "MDs/Open-Problems.md line count" "${op_lines:-0}" "$op_claim" "docs/context/CONTEXT-MANIFEST.md"
+
+  # --- God Mode tool count ------------------------------------------------------------------
+  local gm_measured=""
+  if [ -f "$PROJECT/admin/lib/godmode-tools.js" ] && command -v node >/dev/null 2>&1; then
+    gm_measured=$( cd "$PROJECT/admin" && node -e "console.log(require('./lib/godmode-tools.js').getToolNames().length)" 2>/dev/null | tail -1 | tr -dc '0-9')
+  fi
+  gf "godmode_tool_count: ${gm_measured:-<unmeasurable>}"
+  CUR_SCRIPT="admin/lib/godmode-tools.js"
+  if [ -z "$gm_measured" ]; then
+    _bad "God Mode tool count is measurable" "could not execute getToolNames() in $PROJECT/admin (node missing or module failed to load)"
+  else
+    _ok "God Mode tool count measured by execution: $gm_measured"
+    local c
+    c=$(grep -oE 'getToolNames\(\)\.length` = [0-9]+' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    claim_check "God Mode tools (self-declaring claim)" "$gm_measured" "$c" "CLAUDE.md"
+    c=$(grep -oE '[0-9]+ God Mode tools reference' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
+    claim_check "God Mode tools (doc map)" "$gm_measured" "$c" "CLAUDE.md Documentation Map"
+    c=$(grep -oE '[0-9]+ God Mode tools reference' "$PROJECT/docs/context/CONTEXT-MANIFEST.md" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
+    claim_check "God Mode tools (manifest)" "$gm_measured" "$c" "docs/context/CONTEXT-MANIFEST.md"
+  fi
+
+  # --- admin/lib module inventory vs FILE-ROLES.md -------------------------------------------
+  local lib_all lib_mod missing miss_list
+  lib_all=$(ls "$PROJECT/admin/lib"/*.js 2>/dev/null | wc -l | tr -d ' ')
+  lib_mod=$(ls "$PROJECT/admin/lib"/*.js 2>/dev/null | grep -vc '\.test\.js$')
+  gf "admin_lib_js_files: ${lib_all:-0}"
+  gf "admin_lib_modules_excluding_tests: ${lib_mod:-0}"
+  local c2
+  c2=$(grep -oE 'Backend modules \([0-9]+ files\)' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  claim_check "admin/lib module count" "${lib_mod:-0}" "$c2" "CLAUDE.md directory tree"
+
+  missing=0; miss_list=""
+  if [ -f "$PROJECT/MDs/FILE-ROLES.md" ]; then
+    for f in "$PROJECT/admin/lib"/*.js; do
+      case "$f" in *.test.js) continue ;; esac
+      b="$(basename "$f")"
+      grep -qF "$b" "$PROJECT/MDs/FILE-ROLES.md" 2>/dev/null || { missing=$((missing+1)); miss_list="$miss_list $b"; }
+    done
+  else
+    missing=-1
+  fi
+  gf "admin_lib_modules_absent_from_FILE_ROLES: $missing"
+  CUR_SCRIPT="MDs/FILE-ROLES.md"
+  if [ "$missing" -eq 0 ]; then
+    _ok "every admin/lib module is documented in MDs/FILE-ROLES.md"
+  elif [ "$missing" -lt 0 ]; then
+    _bad "MDs/FILE-ROLES.md exists" "not found — the module inventory claim cannot be checked"
+  else
+    _bad "every admin/lib module is documented in MDs/FILE-ROLES.md" \
+         "$missing of ${lib_mod:-0} modules are absent:$(printf '%s' "$miss_list" | head -c 400)"
+  fi
+
+  # --- release identity: version.json vs the tag on HEAD -------------------------------------
+  local vj tag
+  vj=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$PROJECT/version.json" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')
+  tag=$("$REAL_GIT" -C "$PROJECT" describe --tags --exact-match HEAD 2>/dev/null)
+  gf "version_json: ${vj:-<none>}"
+  gf "git_tag_on_head: ${tag:-<none — HEAD is not a released commit>}"
+  CUR_SCRIPT="version.json"
+  if [ -z "$tag" ]; then
+    _ok "version.json v${vj:-?}: HEAD carries no tag (unreleased work in progress — not a mismatch)"
+  elif [ "v$vj" = "$tag" ] || [ "$vj" = "$tag" ]; then
+    _ok "version.json ($vj) matches the tag on HEAD ($tag)"
+  else
+    _bad "version.json matches the tag on HEAD" "version.json says $vj, HEAD is tagged $tag"
+  fi
+
+  # --- write the generated block ------------------------------------------------------------
+  if [ "${GOV_SELFTEST_NO_WRITE:-0}" = "1" ]; then
+    printf '\n  (GOV_SELFTEST_NO_WRITE=1 — %s not written)\n' "$GEN_FACTS"
+    return
+  fi
+  local B='<!-- BEGIN GENERATED: governance-selftest -->'
+  local E='<!-- END GENERATED -->'
+  mkdir -p "$(dirname "$GEN_FACTS")" 2>/dev/null
+  if [ ! -f "$GEN_FACTS" ] || ! grep -qF "$B" "$GEN_FACTS" 2>/dev/null; then
+    {
+      [ -f "$GEN_FACTS" ] && cat "$GEN_FACTS"
+      printf '# Generated Facts — machine-owned\n\n'
+      printf 'Everything between the markers below is RECOMPUTED by\n'
+      printf '`~/.claude/hooks/governance/governance-selftest.sh` on every run. Do not hand-edit it:\n'
+      printf 'the next run overwrites it. If a value here disagrees with prose in another document,\n'
+      printf 'the value here was measured and the prose was not.\n\n'
+      printf '%s\n' "$B"
+      cat "$BLOCK"
+      printf '%s\n' "$E"
+    } > "$GEN_FACTS.selftest.tmp" && mv -f "$GEN_FACTS.selftest.tmp" "$GEN_FACTS"
+  else
+    awk -v b="$B" -v e="$E" -v blk="$BLOCK" '
+      $0 == b { print; while ((getline l < blk) > 0) print l; close(blk); skip=1; next }
+      $0 == e { print; skip=0; next }
+      skip != 1 { print }
+    ' "$GEN_FACTS" > "$GEN_FACTS.selftest.tmp" && mv -f "$GEN_FACTS.selftest.tmp" "$GEN_FACTS"
+  fi
+  printf '\n  recomputed facts written to: %s\n' "$GEN_FACTS"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────────────────────
+printf 'Context Governance SELFTEST — execution-based\n'
+printf '  hooks:    %s\n' "$HOOKS_ROOT"
+printf '  project:  %s\n' "$PROJECT"
+printf '  sandbox:  %s (HOME is redirected here for every hook run)\n' "$SBX"
+printf '  mutation: %s\n' "$([ "$DO_MUTATION" = 1 ] && echo on || echo off)"
+
+part_a
+part_b
+
+printf '\n============================================================\n'
+if [ -n "$FAIL_LOG" ]; then
+  printf 'FAILURES\n%s\n\n' "$FAIL_LOG"
+fi
+if [ -n "$UNCOV_LOG" ]; then
+  printf 'UNCOVERED (executed nowhere — NOT green)\n%s\n\n' "$UNCOV_LOG"
+fi
+printf '[governance-selftest] pass=%s fail=%s uncovered=%s\n' "$PASS" "$FAIL" "$UNCOV"
+
+if [ "$FAIL" -gt 0 ] || [ "$UNCOV" -gt 0 ]; then exit 1; fi
+exit 0

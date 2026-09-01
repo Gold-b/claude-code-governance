@@ -1,0 +1,72 @@
+# .gitignore — PUBLIC governance repository
+#
+# Two jobs. First, keep build and cache artifacts out of a repo that is meant to be
+# readable source. Second, and more important: make it IMPOSSIBLE to commit a
+# machine-local governance config by accident.
+#
+# The invariant these rules protect (see README.md "Placeholder convention"):
+#   a TRACKED file carries a placeholder or an env lookup;
+#   the REAL value lives in a machine-local, gitignored config and is never synced.
+#
+# check-no-pii.sh is the gate that catches a real value that slips into a tracked file.
+# The rules below are the belt to that scanner's braces: they stop the whole config file
+# from being staged in the first place.
+
+# --- Machine-local governance config — NEVER commit these -------------------
+# Each one is the designated home for a real value that a tracked file only
+# references by placeholder or env lookup.
+.governance-local.env
+.governance-mirrors
+.wa-bridge.json
+.pii-names
+
+# Same files wherever they land in the tree, not just at the root.
+**/.governance-local.env
+**/.governance-mirrors
+**/.wa-bridge.json
+**/.pii-names
+
+# --- Secrets and environment ------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+creds.json
+
+# --- Language and build caches ----------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+node_modules/
+.npm/
+
+# --- OS cruft ---------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# --- Editor / IDE -----------------------------------------------------------
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Logs, backups and scratch ----------------------------------------------
+*.log
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.tmp
+tmp/
+
+# --- Escape hatch -----------------------------------------------------------
+# Templates and examples are the documented, placeholder-only counterparts of the
+# machine-local files above. They are exactly what a new contributor needs, so they
+# must stay committable even when a rule above would have caught the name.
+!*.example
+!*.template
+!*.sample

@@ -1,0 +1,22 @@
+# Line-ending policy.
+#
+# Without this file, core.autocrlf=true on Windows makes every LF-written file
+# show as modified while the committed blob is byte-identical. On 2026-08-26 that
+# noise hid the truth: `git status` showed 40 modified files of which only 17 had
+# any content change -- including a 92-line skill edit from a parallel session.
+# Noise that conceals real changes is a safety problem, not a cosmetic one.
+
+* text=auto
+
+# Executed on Linux servers and by Git Bash. CRLF here yields
+# "$'\r': command not found" and a broken hook.
+*.sh    text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+
+# Windows-only hosts. Stated explicitly rather than left to the platform default.
+*.ps1   text eol=crlf
+*.vbs   text eol=crlf

@@ -288,8 +288,12 @@ copy_safe "$BUNDLE_DIR/hooks/check-full-finish.sh" \
 # bundle's own contents are the list. `find` also carries subdirectories (tests/) for free, which
 # the hand-written `tests` loop below used to do separately and could equally have been forgotten.
 #
-# (Keep gov-notify.ps1 in mind before "tidying" anything here: _common.sh's gov_notify() calls it
-# to raise the Windows popup that reports a push abort. Bash cannot draw a window on Windows.)
+# (A NOTE THAT WAS FALSE, corrected 2026-09-01. It used to say that _common.sh gov_notify()
+# calls gov-notify.ps1 to raise the Windows popup, and warned the reader not to tidy it away.
+# `grep -rn gov-notify ~/.claude/hooks` returns nothing but the comment itself: the file is an
+# ORPHAN, and the sole justification for keeping it was a claim nobody had checked. That is why
+# governance-selftest.sh now VERIFIES every "invoked-by" declaration against its named caller
+# rather than believing it. Tracked as B11, with render-gate.sh and render-rules-read.sh.)
 if [ -d "$BUNDLE_DIR/hooks/governance" ]; then
   while IFS= read -r f; do
     [ -f "$f" ] || continue

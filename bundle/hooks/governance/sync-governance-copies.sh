@@ -24,9 +24,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { exit 0; }
 gov_disabled && exit 0
 
+# --sync-all is a CLI reconcile, not a hook event: remember it here, ACT on it further down.
+# The reconciler needs the PII helpers, and those are defined below — while the stdin read a few
+# lines from here exits 0 on an empty payload, which is exactly what a CLI invocation has. Both
+# constraints are real, so the mode is latched first and executed after the helpers exist.
+GOV_SYNC_ALL=0
+case "${1:-}" in --sync-all) GOV_SYNC_ALL=1 ;; esac
+
 # --- Read tool result from stdin (JSON with file_path) ---
 INPUT=$(gov_hook_input)
-if [ -z "$INPUT" ]; then
+if [ -z "$INPUT" ] && [ "$GOV_SYNC_ALL" = "0" ]; then
   exit 0
 fi
 
@@ -51,7 +58,8 @@ if [ -z "$FILE_PATH" ]; then
 fi
 if [ -z "$FILE_PATH" ]; then
   gov_log "sync-copies" "no file_path extracted from stdin (len=${#INPUT})"
-  exit 0
+  # A CLI reconcile has no payload BY DESIGN; only the hook path needs a file_path.
+  [ "$GOV_SYNC_ALL" = "1" ] || exit 0
 fi
 
 # --- Normalize path (Windows backslash -> forward slash) ---
@@ -271,6 +279,144 @@ _pii_clear_divergence() {
   gov_log "sync-copies" "divergence cleared for $src"
   return 0
 }
+
+# ── --sync-all: reconcile EVERY file, not just the one that was edited (task B7, 2026-09-01) ──
+#
+# WHY THE PER-FILE HOOK CANNOT KEEP THE COPIES EQUAL, EVER.
+#   1. This hook is PostToolUse with matcher `Edit|Write|MultiEdit|NotebookEdit`. PostToolUse does
+#      NOT fire for Bash — so a file changed with sed, python, a heredoc, cp or a script is never
+#      synced at all. Measured 2026-09-01: a session that edited through Bash left the project
+#      mirror 5 files divergent and 2 absent, and nothing said so (gotcha #355 is the same input
+#      blindness, one hook over).
+#   2. Even for tool-made edits it derives ONE basename from the edited path and copies only that.
+#      A file that has not been edited since a mirror appeared stays stale forever, and a file the
+#      mirror never had is never created — the branch is deliberately "MIRROR, NEVER RESURRECT".
+#   So drift is not a bug in the sync; it is the shape of the sync. It needs a reconciler.
+#
+# Usage:  bash sync-governance-copies.sh --sync-all [--dry-run]
+# Every file crossing into the publishable installer bundle is PII-scanned first, exactly as the
+# per-file path does; a refusal leaves that one file diverged and is reported, never silent.
+# Counts are printed beside the verdict: "0 refused" out of 0 files examined is not agreement.
+if [ "$GOV_SYNC_ALL" = "1" ]; then
+  _SA_DRY=0; [ "${2:-}" = "--dry-run" ] && _SA_DRY=1
+  _SA_LIVE_HOOKS="$HOME/.claude/hooks/governance"
+  _SA_LIVE_SKILLS="$HOME/.claude/skills"
+  _SA_INST_HOOKS="$HOME/.claude/governance-installer/bundle/hooks/governance"
+  _sa_mirror_roots() {
+    local f="${GOV_MIRRORS_FILE:-$HOME/.claude/.governance-mirrors}"
+    [ -f "$f" ] || return 0
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' "$f" 2>/dev/null | grep -v '^$'
+  }
+  _sa_n=0; _sa_copied=0; _sa_same=0; _sa_refused=0; _sa_created=0; _sa_targets=0
+  _sa_report=""
+
+  _sa_one() {   # $1 live file, $2 relative path, $3 destination dir, $4 label, $5 gated(1/0)
+    local src="$1" rel="$2" dstdir="$3" label="$4" gated="$5"
+    # dst on its OWN line: bash expands every word of a `local` before performing any of its
+    # assignments, so `local dstdir="$3" dst="$dstdir/$2"` reads the OLD (empty) dstdir and yields
+    # "/wa-send.js". The dry run caught it before 80 files were written to the filesystem root -
+    # which is the entire argument for having a dry run at all.
+    local dst="$dstdir/$rel"
+    [ -d "$dstdir" ] || return 0
+    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then _sa_same=$((_sa_same+1)); return 0; fi
+    if [ "$gated" = "1" ] && ! gov_pii_gate_off; then
+      _pii_scan "$src"; local rc=$?
+      if [ "$rc" -ne 0 ]; then
+        _sa_refused=$((_sa_refused+1))
+        _sa_report="$_sa_report
+    REFUSED (PII rc=$rc): $rel -> $label"
+        return 0
+      fi
+    fi
+    # "First time entering this destination" is the moment junk reaches a publishable tree, so it
+    # is named, never folded into a count.
+    local _new=0; [ -f "$dst" ] || _new=1
+    if [ "$_SA_DRY" = "1" ]; then
+      if [ "$_new" = "1" ]; then
+        _sa_created=$((_sa_created+1))
+        _sa_report="$_sa_report
+    [dry] would CREATE (new to that destination): $rel -> $label"
+      else
+        _sa_copied=$((_sa_copied+1))
+        _sa_report="$_sa_report
+    [dry] would copy: $rel -> $label"
+      fi
+      return 0
+    fi
+    mkdir -p "$(dirname "$dst")" 2>/dev/null
+    if cp -f "$src" "$dst" 2>/dev/null; then
+      # Counted from the state BEFORE the copy. Testing `[ -f "$dst" ]` afterwards is always true
+      # and would report every creation as an ordinary copy.
+      if [ "$_new" = "1" ]; then
+        _sa_created=$((_sa_created+1))
+        _sa_report="$_sa_report
+    CREATED (new to that destination): $rel -> $label"
+      else
+        _sa_copied=$((_sa_copied+1))
+        _sa_report="$_sa_report
+    copied: $rel -> $label"
+      fi
+    else
+      _sa_report="$_sa_report
+    FAILED to write: $rel -> $label"
+    fi
+  }
+
+  echo "[sync-all] reconciling live governance files to every configured copy"
+  # The file set is taken from the LIVE tree itself — never an extension list. An enumeration of
+  # suffixes has been wrong twice in this framework already (.js/.ps1, then .py), the second time
+  # one line below the comment recording the first.
+  _SA_DESTS=""
+  [ -d "$_SA_INST_HOOKS" ] && _SA_DESTS="installer-bundle|$_SA_INST_HOOKS|1"
+  while IFS= read -r _root; do
+    [ -n "$_root" ] || continue
+    [ -d "$_root/.claude/hooks/governance" ] || continue
+    _SA_DESTS="$_SA_DESTS
+mirror:$_root|$_root/.claude/hooks/governance|${GOV_PII_GATE_MIRRORS:-0}"
+  done <<SAEOF
+$(_sa_mirror_roots)
+SAEOF
+  _sa_targets=$(printf '%s\n' "$_SA_DESTS" | grep -c . )
+
+  while IFS= read -r _f; do
+    [ -f "$_f" ] || continue
+    _rel="${_f#$_SA_LIVE_HOOKS/}"
+    # A DENY list of ARTIFACTS, deliberately not an allow list of source extensions. An allow list
+    # is a prediction about files that do not exist yet and it has been wrong twice here already
+    # (.js/.ps1, then .py). A deny list fails the safe way round: a new SOURCE type is included by
+    # default, and a new artifact type shows up in the "entering for the first time" report below
+    # instead of slipping into a publishable bundle unseen.
+    case "$_rel" in
+      *.bak|*.bak-*|*.tmp|*.orig|*.rej)  continue ;;
+      __pycache__/*|*/__pycache__/*|*.pyc|*.pyo) continue ;;   # build cache
+      services/*)                        continue ;;           # 2-byte stray fixture (2026-07-27) from the render-gate family; task B11
+    esac
+    _sa_n=$((_sa_n+1))
+    while IFS= read -r _d; do
+      [ -n "$_d" ] || continue
+      _lbl="${_d%%|*}"; _rest="${_d#*|}"; _dir="${_rest%%|*}"; _gate="${_rest##*|}"
+      _sa_one "$_f" "$_rel" "$_dir" "$_lbl" "$_gate"
+    done <<SADEOF
+$_SA_DESTS
+SADEOF
+  done <<SAFEOF
+$(find "$_SA_LIVE_HOOKS" -type f 2>/dev/null | sort)
+SAFEOF
+
+  [ -n "$_sa_report" ] && printf '%s\n' "$_sa_report"
+  printf '[sync-all] %s live file(s) x %s destination(s): %s already identical, %s copied, %s created, %s REFUSED by the PII gate\n' \
+    "$_sa_n" "$_sa_targets" "$_sa_same" "$_sa_copied" "$_sa_created" "$_sa_refused"
+  if [ "$_sa_n" -eq 0 ] || [ "$_sa_targets" -eq 0 ]; then
+    echo "[sync-all] NOTHING WAS EXAMINED (files=$_sa_n destinations=$_sa_targets) — this is not agreement." >&2
+    exit 1
+  fi
+  if [ "$_sa_copied" -gt 0 ] || [ "$_sa_created" -gt 0 ]; then
+    [ "$_SA_DRY" = "1" ] || echo "$(date -Iseconds) $_SA_LIVE_HOOKS (--sync-all)" >> "$HOME/.claude/logs/.governance-push-pending"
+    echo "[sync-all] the installer bundle changed; a GitHub push is queued for session end."
+  fi
+  [ "$_sa_refused" -gt 0 ] && exit 2
+  exit 0
+fi
 
 # _bundle_copy <src> <dest> <label>
 #   0 copied - 1 nothing to do - 2 refused (contaminated) - 3 refused (gate unusable)

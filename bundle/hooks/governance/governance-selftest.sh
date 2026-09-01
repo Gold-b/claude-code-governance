@@ -637,12 +637,59 @@ case_end_session() {
   fx_changes sid-es-1 "$src/admin/lib/a.js" "$src/admin/lib/b.js" "$src/admin/lib/c.js" "$src/admin/lib/d.js"
   run_hook "$src" "sid-es-1" "$(pl_plain "$src" sid-es-1 Stop)"
   expect_rc 2 "4 writes and no fresh HANDOFF: stop BLOCKED"
-  expect_has "HANDOFF.md was not refreshed" "handoff gate: names what is missing"
+  expect_has "no HANDOFF file is among them" "handoff gate: names what is missing"
 
   fx_changes sid-es-2 "$src/admin/lib/a.js" "$src/admin/lib/b.js" "$src/docs/context/HANDOFF.md" "$src/admin/lib/c.js"
   run_hook "$src" "sid-es-2" "$(pl_plain "$src" sid-es-2 Stop)"
   expect_rc 0 "writes WITH a refreshed HANDOFF: stop allowed"
-  expect_not "HANDOFF.md was not refreshed" "refreshed handoff: no false block"
+  expect_not "BLOCKED" "refreshed handoff: no false block"
+
+  # ── The git half (task B27, 2026-09-01) ────────────────────────────────────────────────────
+  # Until this shipped, Check 0 read ONLY the PostToolUse change log — which never sees a Bash
+  # edit, because PostToolUse does not fire for Bash. Two consequences, and BOTH are asserted here
+  # because they pull in opposite directions:
+  #   * a session that wrote everything through Bash logged ZERO, stayed under the >= 3 threshold,
+  #     and closed with no handoff in SILENCE (the dangerous half);
+  #   * a session that DID write a handoff through Bash was blocked for not having one (the loud
+  #     half — measured at a real close on 2026-09-01, 6 logged against 23 actually written).
+  local grepo="$SBX/esgit"
+  rm -rf "$grepo" 2>/dev/null
+  mkdir -p "$grepo/admin/lib" "$grepo/MDs" 2>/dev/null
+  fx_project "$grepo" SOURCE "$(_winform "$grepo")"
+  rm -f "$grepo/version.json" 2>/dev/null
+  [ -d "$grepo/.git" ] || sbx_git "$grepo" init
+  sbx_git "$grepo" config user.email "you@example.com"
+  sbx_git "$grepo" config user.name "Operator One"
+  sbx_git "$grepo" add -A
+  sbx_git "$grepo" commit -m baseline
+  local gbase; gbase="$("$REAL_GIT" -C "$grepo" rev-parse HEAD 2>/dev/null)"
+
+  _es_stamp() {   # $1 sid, $2 root to stamp
+    local d; d="$(sess_dir "$1")"; mkdir -p "$d" 2>/dev/null
+    : > "$d/.gov-session-changes"     # EMPTY on purpose: this is the Bash-only session
+    printf '%s %s %s sid=%s\n' "$gbase" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$1" > "$d/.gov-session-start"
+  }
+
+  printf 'a\n' > "$grepo/admin/lib/g1.js"; printf 'b\n' > "$grepo/admin/lib/g2.js"; printf 'c\n' > "$grepo/admin/lib/g3.js"
+  sbx_git "$grepo" add -A; sbx_git "$grepo" commit -m "three files, via a script"
+  _es_stamp sid-es-3 "$grepo"
+  run_hook "$grepo" "sid-es-3" "$(pl_plain "$grepo" sid-es-3 Stop)"
+  expect_rc 2 "3 files written through Bash with an EMPTY change log: stop BLOCKED (the log alone saw nothing)"
+  expect_has "git " "block: names git as the evidence, not just the log"
+
+  printf -- '---\nstatus: active\n---\n' > "$grepo/MDs/HANDOFF-es.md"
+  sbx_git "$grepo" add -A; sbx_git "$grepo" commit -m "handoff, also via a script"
+  _es_stamp sid-es-4 "$grepo"
+  run_hook "$grepo" "sid-es-4" "$(pl_plain "$grepo" sid-es-4 Stop)"
+  expect_rc 0 "a handoff written through Bash (never logged): stop allowed"
+
+  # A stamp belonging to ANOTHER repository must not be used as a range, and the degradation to
+  # log-only must be stated out loud rather than absorbed.
+  _es_stamp sid-es-5 "$SBX/proj"
+  fx_changes sid-es-5 "$grepo/admin/lib/x.js" "$grepo/admin/lib/y.js" "$grepo/admin/lib/z.js"
+  run_hook "$grepo" "sid-es-5" "$(pl_plain "$grepo" sid-es-5 Stop)"
+  expect_rc 2 "a stamp from another repo: falls back to the log and still blocks"
+  expect_has "GIT NOT CONSULTED" "fallback: says the gate is running blind, instead of pretending"
 }
 
 # --- pii-gate-pretooluse.sh -------------------------------------------------------------------
@@ -1004,6 +1051,94 @@ $HOOK_LINES
 EOF
   printf '\n  hooks discovered in settings.json: %s\n' "$n"
 
+  # ── Every script on disk is registered, or DECLARED not-a-hook with a reason ────────────────
+  #
+  # WHY THIS EXISTS. Part A takes its hook list from settings.json, which is right — a hard-coded
+  # list is the same existence-test disease this file replaces. But it has a blind spot the exact
+  # size of the framework's worst failure: a script that is registered NOWHERE is not reported
+  # UNCOVERED, it is INVISIBLE. Three files were found in that state in one session
+  # (close-completeness.sh, render-gate.sh, render-rules-read.sh); close-completeness.sh was then
+  # wired, and the very next audit found it had been unable to block for 16 days. "uncovered=0"
+  # means "everything REGISTERED is covered", never "everything that EXISTS runs".
+  #
+  # So the rule is inverted: presence on disk must be JUSTIFIED. A script is acceptable when it is
+  # registered in settings.json, or named below with a reason. Anything else is a failure — the
+  # default for an unknown file is RED, because the whole class was born from files nobody decided
+  # about.
+  #
+  # `invoked-by:` claims are VERIFIED, not believed: the named caller must exist and must actually
+  # mention the script. A declaration nobody checks is the same unenforced description this file
+  # keeps finding elsewhere.
+  script_decl() {
+    case "$1" in
+      _common.sh)                  echo "library: sourced by every hook" ;;
+      check-no-pii.sh)             echo "library: the PII scanner, invoked by the gates and by hand" ;;
+      governance-selftest.sh)      echo "library: this suite" ;;
+      commit-task-success.sh)      echo "tool: run by the model to mint a success token" ;;
+      governance-helpers-check.sh) echo "tool: lint, run by hand and by the test suites" ;;
+      close-report.sh)             echo "invoked-by:settings.json" ;;
+      sync-governance.sh)          echo "invoked-by:end-session.sh" ;;
+      file-collision-ack.sh)       echo "invoked-by:file-collision-guard.sh" ;;
+      render-gate.sh)              echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
+      render-rules-read.sh)        echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
+      pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
+      wa-send.js)                  echo "invoked-by:_common.sh" ;;
+      gov-notify.ps1)              echo "ORPHAN: nothing in the tree references it. install.sh carries a comment claiming _common.sh gov_notify() calls it to raise the Windows popup - grep says otherwise, and that comment is the only reason anyone would keep the file. Task B11, register/wire or delete (owner decision)" ;;
+      *.test.sh)                   echo "test: a suite, not a hook" ;;
+      *) echo "" ;;
+    esac
+  }
+
+  local n_disk=0 n_reg=0 n_decl=0 n_orph=0 n_undecl=0 orph_list="" undecl_list="" bad_claim=""
+  for _s in "$GOV_DIR"/*.sh "$GOV_DIR"/*.py "$GOV_DIR"/*.js "$GOV_DIR"/*.ps1; do
+    [ -f "$_s" ] || continue
+    local _b; _b="$(basename "$_s")"
+    case "$_b" in *.bak|*.bak-*|*.tmp|*.orig) continue ;; esac
+    n_disk=$((n_disk+1))
+    if printf '%s\n' "$HOOK_LINES" | grep -qF "$_b"; then n_reg=$((n_reg+1)); continue; fi
+    local _d; _d="$(script_decl "$_b")"
+    case "$_d" in
+      "")        n_undecl=$((n_undecl+1)); undecl_list="$undecl_list $_b" ;;
+      ORPHAN:*)  n_orph=$((n_orph+1));  orph_list="$orph_list $_b" ;;
+      invoked-by:*)
+        n_decl=$((n_decl+1))
+        local _caller="${_d#invoked-by:}"
+        case "$_caller" in
+          settings.json) : ;;   # a hook whose registration part A already walked
+          *) if [ ! -f "$GOV_DIR/$_caller" ] || ! grep -qF "$_b" "$GOV_DIR/$_caller" 2>/dev/null; then
+               bad_claim="$bad_claim $_b(claims $_caller)"
+             fi ;;
+        esac ;;
+      *)         n_decl=$((n_decl+1)) ;;
+    esac
+  done
+
+  # THE SIZES ARE PART OF THE VERDICT. "0 undeclared" is producible by a loop that examined
+  # nothing; "41 scripts on disk, 21 registered, 0 undeclared" is not (gotcha #353).
+  printf '\n  scripts on disk: %s · registered: %s · declared not-a-hook: %s · ORPHANED: %s · undeclared: %s\n' \
+    "$n_disk" "$n_reg" "$n_decl" "$n_orph" "$n_undecl"
+  GF_HOOKS_DISK=$n_disk; GF_HOOKS_REG=$n_reg; GF_HOOKS_ORPH=$n_orph; GF_HOOKS_UNDECL=$n_undecl
+
+  CUR_SCRIPT="$GOV_DIR (registration coverage)"
+  if [ "$n_disk" -eq 0 ]; then
+    _bad "every script on disk is registered or declared" "found NO scripts at all in $GOV_DIR — this check examined nothing, which is not agreement"
+  elif [ "$n_undecl" -gt 0 ]; then
+    _bad "every script on disk is registered or declared" \
+         "$n_undecl script(s) are registered in no event and declared nowhere:$undecl_list — a file nobody decided about is how a hook stays invisible for weeks"
+  else
+    _ok "all $n_disk script(s) are registered ($n_reg) or declared with a reason ($((n_decl + n_orph)))"
+  fi
+  if [ -n "$bad_claim" ]; then
+    CUR_SCRIPT="$GOV_DIR (declaration claims)"
+    _bad "every 'invoked-by' declaration names a caller that really calls it" \
+         "unverified claim(s):$bad_claim — a declaration nobody checks is an unenforced description"
+  fi
+  if [ "$n_orph" -gt 0 ]; then
+    printf '  [ORPHANED, declared and still open] %s\n' "$orph_list"
+    printf '      Registered in no event and called by nothing. Named here on every run so the\n'
+    printf '      decision (register or delete) cannot go quiet again. Task B11.\n'
+  fi
+
   if [ -s "$GIT_VIOL" ]; then
     CUR_SCRIPT="(git shim)"
     _bad "no hook attempted a denied git operation" "$(_snip "$(cat "$GIT_VIOL")")"
@@ -1037,6 +1172,10 @@ part_b() {
   fi
 
   gf "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  gf "hooks_scripts_on_disk: ${GF_HOOKS_DISK:-<not measured>}"
+  gf "hooks_registered_in_settings: ${GF_HOOKS_REG:-<not measured>}"
+  gf "hooks_orphaned_declared: ${GF_HOOKS_ORPH:-<not measured>}"
+  gf "hooks_undeclared: ${GF_HOOKS_UNDECL:-<not measured>}"
   gf "generated_by: ~/.claude/hooks/governance/governance-selftest.sh"
   gf "project_root: $PROJECT"
 
@@ -1188,6 +1327,45 @@ part_b() {
   else
     _bad "every admin/lib module is documented in MDs/FILE-ROLES.md" \
          "$missing of ${lib_mod:-0} modules are absent:$(printf '%s' "$miss_list" | head -c 400)"
+  fi
+
+  # --- canonical documents must contain no control bytes ------------------------------------
+  # A single NUL byte makes grep declare a text file BINARY: it prints "Binary file ... matches"
+  # and stops emitting lines, while `grep -c` keeps counting. Every extraction pipeline over that
+  # document then silently short-reads. Measured 2026-09-01: one NUL in GOTCHAS.md truncated the
+  # numbering scan at line 1623 of 1644 and the contiguity check reported "341 distinct, highest
+  # 341" for a file whose highest entry was 354 — while awk and python both said 354.
+  #
+  # It is asserted rather than remembered because the same mistake was made TWICE in one session,
+  # hours apart, both times while writing the entry that documents it: a `\0` in the tool composing
+  # the file reaches disk as the byte itself. A rule broken twice in two hours is not a rule, it is
+  # a wish. The scanned COUNT is printed so an empty sweep cannot read as a clean one.
+  local _ctl_n=0 _ctl_bad=""
+  for _cf in "$PROJECT"/docs/context/*.md "$PROJECT"/CLAUDE.md "$PROJECT"/Plans/PLAN.md; do
+    [ -f "$_cf" ] || continue
+    _ctl_n=$((_ctl_n+1))
+    # tr, NOT `grep -P`: on this platform grep -P refuses with "supports only unibyte and UTF-8
+    # locales", exits non-zero, and the `if` then reads as CLEAN - a detector that errors into a
+    # pass, which is the very class this check exists to catch. Proven in BOTH directions before
+    # wiring: a planted NUL+SOH counts 2, a clean file 0, and a Hebrew UTF-8 document 0 (the
+    # allowed set keeps tab/LF/CR and every byte >= 0200, so multi-byte text is never mistaken
+    # for control data).
+    _ctl_c=$(LC_ALL=C tr -d '\011\012\015\040-\176\200-\377' < "$_cf" 2>/dev/null | wc -c | tr -d ' ')
+    case "$_ctl_c" in ''|*[!0-9]*) _ctl_c=0 ;; esac
+    if [ "$_ctl_c" -gt 0 ]; then
+      _ctl_bad="$_ctl_bad $(basename "$_cf")($_ctl_c)"
+    fi
+  done
+  gf "canonical_docs_scanned_for_control_bytes: $_ctl_n"
+  gf "canonical_docs_with_control_bytes: $(printf '%s' "${_ctl_bad:-none}" | sed 's/^ //')"
+  CUR_SCRIPT="docs/context/*.md (control bytes)"
+  if [ "$_ctl_n" -eq 0 ]; then
+    _bad "canonical documents carry no control bytes" "scanned NO files at all under $PROJECT/docs/context — that is not a clean result"
+  elif [ -n "$_ctl_bad" ]; then
+    _bad "canonical documents carry no control bytes" \
+         "control byte(s) found in:$_ctl_bad — grep will call the file binary and every extraction over it short-reads while grep -c still counts"
+  else
+    _ok "all $_ctl_n canonical document(s) are free of control bytes"
   fi
 
   # --- release identity: version.json vs the tag on HEAD -------------------------------------

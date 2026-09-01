@@ -146,15 +146,24 @@ if [ -f "$SCRIPT_DIR/sync-governance.sh" ]; then
   bash "$SCRIPT_DIR/sync-governance.sh" 2>/dev/null || true
 fi
 
-# --- Detect project root (walk up to find CLAUDE.md) ---
-PROJECT_ROOT="$PWD"
-if [ ! -f "$PROJECT_ROOT/CLAUDE.md" ]; then
-  d="$PROJECT_ROOT"
-  while [ "$d" != "/" ] && [ "$d" != "" ]; do
-    if [ -f "$d/CLAUDE.md" ]; then PROJECT_ROOT="$d"; break; fi
-    d="$(dirname "$d")"
-  done
+# --- Detect project root: the PAYLOAD first, $PWD only as a fallback (2026-09-01) -------------
+# A Stop hook must judge the project of the SESSION, not whatever directory the shell wandered
+# into. `gov_payload_root` was written on 2026-08-17 for exactly this and, until close-completeness
+# adopted it, no hook used it: measured, a $PWD walk had a Stop hook auditing a RETIRED tombstoned
+# tree. This matters more now that Check 0 below derives its evidence from git — a git range taken
+# in the wrong repository is not a weaker check, it is a confident wrong answer.
+PROJECT_ROOT="$(gov_payload_root "$(gov_hook_input)" 2>/dev/null)"
+if [ -z "$PROJECT_ROOT" ] || [ ! -d "$PROJECT_ROOT" ]; then
+  PROJECT_ROOT="$PWD"
+  if [ ! -f "$PROJECT_ROOT/CLAUDE.md" ]; then
+    d="$PROJECT_ROOT"
+    while [ "$d" != "/" ] && [ "$d" != "" ]; do
+      if [ -f "$d/CLAUDE.md" ]; then PROJECT_ROOT="$d"; break; fi
+      d="$(dirname "$d")"
+    done
+  fi
 fi
+export GOV_PROJECT_ROOT="$PROJECT_ROOT"
 
 # --- Only governed projects ---
 if [ ! -f "$PROJECT_ROOT/docs/context/CONTEXT-MANIFEST.md" ]; then
@@ -197,36 +206,106 @@ fi
 # block the stop and direct the LLM to run /live-state-orchestrator.
 # Signal: ~/.claude/logs/.gov-session-changes (append-only paths, reset each SessionStart).
 CHANGES_LOG="$(gov_state_file .gov-session-changes)"
+
+# THE CHANGE LOG IS A LOWER BOUND, NOT THE RECORD (fixed 2026-09-01 — gotcha #355, task B27).
+# It is written by post-milestone.sh, a PostToolUse hook, and PostToolUse does NOT fire for Bash.
+# Every sed / python / heredoc / cp edit is therefore invisible to it. Measured at the close that
+# exposed this: 6 paths logged against 23 actually written, 0 handoffs logged against 2 real — so
+# this gate BLOCKED a session that had refreshed its handoff, committed it and pushed it.
+#
+# The FALSE BLOCK was the safe direction. The dangerous one is silent: the gate only fires at
+# SESSION_WRITES >= 3, so a session that edits entirely through Bash logs ZERO writes, never
+# reaches the threshold, and closes with no handoff at all and no complaint.
+#
+# So the evidence is now the UNION of the log and GIT — the same source close-completeness.sh has
+# used since it was written, for the reason its own header states: git "also catches edits made by
+# scripts, which the Edit/Write changes-log cannot see". The log is kept as an additional signal,
+# never as the source.
+#
+# FAIL-SAFE: when git cannot be consulted (no repo, no session-start stamp, a stamp belonging to
+# another repository) the gate falls back to the log alone AND SAYS SO in its own output. A gate
+# that silently degrades to a blind input is the defect being fixed here, so the degradation is
+# always named.
+SESSION_WRITES=0
+HANDOFF_REFRESHED=0
+EVIDENCE_SRC=""
+LOG_N=0
+GIT_N=0
+
 if [ -f "$CHANGES_LOG" ]; then
-  SESSION_WRITES=$(grep -c . "$CHANGES_LOG" 2>/dev/null | tr -d ' ')
-  [ -z "$SESSION_WRITES" ] && SESSION_WRITES=0
-  HANDOFF_REFRESHED=0
-  # Match ANY handoff filename, not just the bare pointer. Real handoffs this project
-  # writes include HANDOFF.md, HANDOFF-v1.4.194.md and HANDOFF-2026-08-25-token-economy-design.md;
-  # the old 'HANDOFF\.md' pattern matched only the first, so a session that wrote a versioned
-  # handoff was still BLOCKED as "handoff not refreshed". [^/\\] keeps it to the basename.
-  grep -qiE 'HANDOFF[^/\\]*\.md' "$CHANGES_LOG" 2>/dev/null && HANDOFF_REFRESHED=1
-  # Threshold: 3+ writes = real work (avoids blocking trivial 1-2 edit / conversation-only sessions).
-  if [ "$SESSION_WRITES" -ge 3 ] && [ "$HANDOFF_REFRESHED" -eq 0 ]; then
-    gov_log "end-session" "BLOCKED (version-independent): $SESSION_WRITES session writes, HANDOFF.md NOT refreshed"
-    gov_notify \
-      "שער שמירה" \
-      "נעשתה עבודה בסשן אך HANDOFF לא עודכן. הרץ /live-state-orchestrator לפני סגירה." \
-      "/live-state-orchestrator"
-    printf "[end-session] BLOCKED — %s file writes this session but HANDOFF.md was not refreshed.\n" "$SESSION_WRITES" >&2
-    cat <<ENDMSG
+  LOG_N=$(grep -c . "$CHANGES_LOG" 2>/dev/null | head -1)
+  case "$LOG_N" in ''|*[!0-9]*) LOG_N=0 ;; esac
+  # [^/\] keeps the match to the BASENAME: HANDOFF.md, HANDOFF-v1.4.194.md and
+  # HANDOFF-2026-08-25-token-economy-design.md are all real handoffs this project writes.
+  grep -qiE 'HANDOFF[^/\]*\.md' "$CHANGES_LOG" 2>/dev/null && HANDOFF_REFRESHED=1
+  EVIDENCE_SRC="change log ($LOG_N)"
+fi
 
-[GOVERNANCE-ENFORCEMENT] Session stop BLOCKED. This session made ${SESSION_WRITES} file writes, but docs/context/HANDOFF.md was not refreshed.
-
-Required BEFORE you can stop:
-  Run /live-state-orchestrator — it updates Plans/PLAN.md, docs/context/MEMORY.md, and docs/context/OPEN-PROBLEMS.md, writes a fresh docs/context/HANDOFF.md reflecting THIS session's work, and manages the handoff lifecycle (active -> consumed -> archived).
-
-After a new HANDOFF.md is written, try stopping again — this hook re-checks.
-If this is a genuine false positive (the session did no state-changing work), override with: GOVERNANCE_HOOKS=0
-ENDMSG
-    exit 2
+GIT_START=""
+_ES_START_FILE="${GOV_SESSION_START_FILE:-$(gov_state_file .gov-session-start)}"
+if [ -f "$_ES_START_FILE" ]; then
+  # FIELD 3. Not "everything after field 2" — pre-session.sh appends ` sid=<id>` to this line, and
+  # reconstructing a path from the remainder yields "<root> sid=abc", which resolves to nothing.
+  # That exact mistake made close-completeness.sh skip 219 times over 16 days.
+  GIT_START=$(grep -o '^[0-9a-f]\{7,40\}' "$_ES_START_FILE" 2>/dev/null | head -1)
+  _ES_START_ROOT=$(awk 'NR==1{print $3}' "$_ES_START_FILE" 2>/dev/null)
+  if [ -n "$_ES_START_ROOT" ]; then
+    _ES_A="$(cd "$_ES_START_ROOT" 2>/dev/null && pwd -P)"
+    _ES_B="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd -P)"
+    # A stamp from a DIFFERENT repository would make every range meaningless. Refuse it; do not
+    # guess. An unresolvable root is not a mismatch — it is an unknown, and is allowed through.
+    if [ -n "$_ES_A" ] && [ "$_ES_A" != "$_ES_B" ]; then GIT_START=""; fi
   fi
 fi
+
+if [ -d "$PROJECT_ROOT/.git" ] && [ -n "$GIT_START" ]    && git -C "$PROJECT_ROOT" cat-file -e "${GIT_START}^{commit}" 2>/dev/null; then
+  GIT_CHANGED=$( { git -C "$PROJECT_ROOT" diff --name-only "$GIT_START" HEAD 2>/dev/null;                    git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | sed 's/^...//' | sed 's/.* -> //';                  } | sort -u | grep -v '^$' )
+  GIT_N=$(printf '%s
+' "$GIT_CHANGED" | grep -c . 2>/dev/null | head -1)
+  case "$GIT_N" in ''|*[!0-9]*) GIT_N=0 ;; esac
+  printf '%s
+' "$GIT_CHANGED" | grep -qiE 'HANDOFF[^/]*\.md' && HANDOFF_REFRESHED=1
+  EVIDENCE_SRC="${EVIDENCE_SRC:+$EVIDENCE_SRC + }git ${GIT_START%${GIT_START#???????}}..HEAD ($GIT_N)"
+else
+  EVIDENCE_SRC="${EVIDENCE_SRC:-none} — GIT NOT CONSULTED (no repo, no session-start stamp, or a stamp from another repository), so this gate is running on the PostToolUse log alone and cannot see a single Bash-made edit"
+fi
+
+# The union. Sizes are carried into the message on purpose: "3 writes" produced by an input that
+# could not contain most of them is the failure this rewrite exists to end, and a count printed
+# beside its SOURCE cannot be mistaken for a measurement of everything.
+SESSION_WRITES=$LOG_N
+[ "$GIT_N" -gt "$SESSION_WRITES" ] 2>/dev/null && SESSION_WRITES=$GIT_N
+
+# Threshold: 3+ writes = real work (avoids blocking trivial 1-2 edit / conversation-only sessions).
+if [ "$SESSION_WRITES" -ge 3 ] && [ "$HANDOFF_REFRESHED" -eq 0 ]; then
+    gov_log "end-session" "BLOCKED: $SESSION_WRITES writes [$EVIDENCE_SRC], no HANDOFF among them"
+    gov_notify       "שער שמירה"       "נעשתה עבודה בסשן אך HANDOFF לא עודכן. הרץ /live-state-orchestrator לפני סגירה."       "/live-state-orchestrator"
+    printf "[end-session] BLOCKED — %s file writes this session (evidence: %s) but no HANDOFF file is among them.
+" "$SESSION_WRITES" "$EVIDENCE_SRC" >&2
+    cat <<ENDMSG
+
+[GOVERNANCE-ENFORCEMENT] Session stop BLOCKED. This session wrote ${SESSION_WRITES} file(s) and none of them was a handoff.
+
+EVIDENCE: ${EVIDENCE_SRC}
+  The count above is the LARGER of the PostToolUse change log and the git range since this
+  session started. If those two disagree, git is the truthful one: the change log cannot see an
+  edit made through Bash (sed, python, a heredoc, cp, a script), because PostToolUse does not
+  fire for Bash. See GOTCHAS #355.
+
+Required BEFORE you can stop:
+  Run /live-state-orchestrator — it updates Plans/PLAN.md, docs/context/MEMORY.md, and docs/context/OPEN-PROBLEMS.md, writes a fresh handoff reflecting THIS session's work, and manages the handoff lifecycle (active -> consumed -> archived).
+
+If you DID write a handoff and this still fires, do not reach for GOVERNANCE_HOOKS=0. Check what
+the gate can actually see:
+    cat "${CHANGES_LOG}"
+    git -C "${PROJECT_ROOT}" diff --name-only ${GIT_START:-<no-stamp>} HEAD
+A gate reading a blind input is repaired by making the input TRUE, never by switching the gate off.
+
+Override (user only): GOVERNANCE_HOOKS=0
+ENDMSG
+    exit 2
+fi
+gov_log "end-session" "handoff gate passed: $SESSION_WRITES write(s) [$EVIDENCE_SRC], handoff=$HANDOFF_REFRESHED"
 
 # --- Need version.json to compare ---
 if [ ! -f "$PROJECT_ROOT/version.json" ]; then

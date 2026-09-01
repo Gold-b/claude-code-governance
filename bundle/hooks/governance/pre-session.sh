@@ -285,19 +285,99 @@ elif command -v pgrep >/dev/null 2>&1; then
 fi
 [ "${_OTHER_CLAUDE:-0}" -gt 1 ] && [ -n "$PARALLEL_HINT" ] && PARALLEL_HINT="$PARALLEL_HINT; $_OTHER_CLAUDE claude processes"
 
-# --- Drift advisory (§17): live hooks vs the installer bundle (repo mirror) ---
-_BUNDLE_HOOKS="$HOME/.claude/governance-installer/bundle/hooks/governance"
-if [ -d "$_BUNDLE_HOOKS" ]; then
-  _DRIFT=""
-  for _f in "$SCRIPT_DIR"/*.sh; do
-    _b="$_BUNDLE_HOOKS/$(basename "$_f")"
-    [ -f "$_b" ] || continue
-    cmp -s "$_f" "$_b" || _DRIFT="${_DRIFT:+$_DRIFT, }$(basename "$_f")"
-  done
-  if [ -n "$_DRIFT" ]; then
-    gov_log "pre-session" "DRIFT: live hooks differ from installer bundle: $_DRIFT"
-    echo "[GOVERNANCE DRIFT] Live hooks differ from the installer bundle (repo mirror): $_DRIFT. Reconcile with the governance repo before editing hooks (see GOVERNANCE-AGENT-GUIDE §17)."
-  fi
+# --- Drift advisory (SS17): live governance files vs EVERY copy (rewritten 2026-09-01, task B7) ---
+#
+# The previous version had three holes, each the same shape as the bugs it was meant to surface,
+# and together they made it blind to the drift that actually happens here:
+#   1. `for _f in "$SCRIPT_DIR"/*.sh` - only `.sh`, only the top directory. It could not see
+#      pii-gate-parse.py, wa-send.js, gov-notify.ps1 or anything under tests/.
+#   2. `[ -f "$_b" ] || continue` - a file ABSENT from the bundle was SKIPPED, not reported. A new
+#      live hook that never reached the bundle was invisible, and that is the most consequential
+#      drift of all: the one that publishes nothing while everything looks fine.
+#   3. It compared the installer bundle only. The divergence measured on 2026-09-01 was in the
+#      PROJECT MIRROR - 5 files behind, 2 missing - and this check never looked there.
+# It also never stated how much it compared, so "no drift" was indistinguishable from "the
+# comparison examined nothing" (gotcha #353).
+#
+# Why it must exist: the sync is PostToolUse, PostToolUse does not fire for Bash, so any session
+# that edits with sed/python/cp leaves the copies diverged silently. The reconciler is
+# `sync-governance-copies.sh --sync-all`; this is the thing that tells you to run it.
+# Cost: one md5sum per directory (a few processes), not one cmp per file per destination.
+_gov_dir_hashes() {
+  # awk, NOT sed. Written through one layer of escaping too many, the sed form landed on disk with
+  # its \1 backreference turned into a literal control character, so EVERY line was rewritten to
+  # the same "hash" and the comparison found perfect agreement across a tree with a planted
+  # divergence in it. Third escape-layer failure in one session to manufacture a false GREEN
+  # (gotcha #353). The output is now built by awk from md5sum's own fields, and its shape is
+  # ASSERTED below instead of assumed.
+  [ -d "$1" ] || return 0
+  ( cd "$1" 2>/dev/null || exit 0
+    find . -type f ! -name '*.bak*' ! -name '*.tmp' ! -path './__pycache__/*' ! -path './services/*' \
+      -exec md5sum {} + 2>/dev/null \
+    | awk '{ h=$1; n=$2; sub(/^\*/,"",n); sub(/^\.\//,"",n);
+             if (h ~ /^[0-9a-f]{32}$/ && n != "") print h" "n }' \
+    | sort -k2 )
+}
+# The hasher must emit 32 hex digits. If it ever stops, every comparison below silently AGREES, so
+# the shape is checked once here and a failure is announced rather than absorbed.
+_GOV_HASHER_OK=1
+case "$(_gov_dir_hashes "$SCRIPT_DIR" | head -1 | cut -d' ' -f1)" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) _GOV_HASHER_OK=0 ;;
+esac
+
+_GOV_DRIFT_DESTS="$HOME/.claude/governance-installer/bundle/hooks/governance"
+if [ -f "$HOME/.claude/.governance-mirrors" ]; then
+  while IFS= read -r _m; do
+    _m="$(printf '%s' "$_m" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -n "$_m" ] && [ -d "$_m/.claude/hooks/governance" ]; then
+      _GOV_DRIFT_DESTS="$_GOV_DRIFT_DESTS
+$_m/.claude/hooks/governance"
+    fi
+  done < "$HOME/.claude/.governance-mirrors"
+fi
+_GOV_LIVE_H="$(_gov_dir_hashes "$SCRIPT_DIR")"
+_GOV_LIVE_N="$(printf '%s' "$_GOV_LIVE_H" | grep -c . )"
+_GOV_DRIFT_MSG=""
+_GOV_DEST_N=0
+if [ "$_GOV_LIVE_N" -gt 0 ]; then
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    [ -d "$_d" ] || continue
+    _GOV_DEST_N=$((_GOV_DEST_N + 1))
+    _o="$(_gov_dir_hashes "$_d")"
+    _diff=0; _abs=0; _names=""
+    while IFS= read -r _line; do
+      [ -n "$_line" ] || continue
+      _h="${_line%% *}"
+      _n="${_line#* }"
+      _oh="$(printf '%s' "$_o" | awk -v k="$_n" '{h=$1; $1=""; sub(/^ /,""); if ($0==k) {print h; exit}}')"
+      if [ -z "$_oh" ]; then
+        _abs=$((_abs+1)); _names="$_names $_n(absent)"
+      elif [ "$_oh" != "$_h" ]; then
+        _diff=$((_diff+1)); _names="$_names $_n"
+      fi
+    done <<GOVDRIFTEOF
+$_GOV_LIVE_H
+GOVDRIFTEOF
+    if [ "$_diff" -gt 0 ] || [ "$_abs" -gt 0 ]; then
+      _GOV_DRIFT_MSG="$_GOV_DRIFT_MSG
+  $_d - $_diff differing, $_abs absent:$(printf '%s' "$_names" | cut -c1-220)"
+    fi
+  done <<GOVDESTEOF
+$_GOV_DRIFT_DESTS
+GOVDESTEOF
+fi
+if [ "$_GOV_LIVE_N" -eq 0 ] || [ "$_GOV_DEST_N" -eq 0 ] || [ "$_GOV_HASHER_OK" = "0" ]; then
+  gov_log "pre-session" "DRIFT CHECK INERT: live=$_GOV_LIVE_N destinations=$_GOV_DEST_N"
+  echo "[GOVERNANCE DRIFT] The drift check examined NOTHING it could trust (live files: $_GOV_LIVE_N, destinations: $_GOV_DEST_N, hasher-ok: $_GOV_HASHER_OK). That is not agreement - it means the installer bundle and every mirror are unreachable from here."
+elif [ -n "$_GOV_DRIFT_MSG" ]; then
+  gov_log "pre-session" "DRIFT detected across $_GOV_DEST_N destination(s)"
+  echo "[GOVERNANCE DRIFT] $_GOV_LIVE_N live governance file(s) compared against $_GOV_DEST_N copy location(s) - they do NOT agree:$_GOV_DRIFT_MSG"
+  echo "  A file marked (absent) never reached that copy at all. Reconcile before editing hooks:  bash ~/.claude/hooks/governance/sync-governance-copies.sh --sync-all --dry-run"
+  echo "  The per-file PostToolUse sync cannot do this: it never fires for a Bash edit, and it only ever copies the one file that was edited (GOTCHAS #355, task B7)."
+else
+  gov_log "pre-session" "drift check: $_GOV_LIVE_N file(s) x $_GOV_DEST_N destination(s) all agree"
 fi
 
 

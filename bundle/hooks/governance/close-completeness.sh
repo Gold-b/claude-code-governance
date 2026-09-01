@@ -40,8 +40,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { exit 0; }
 gov_disabled && exit 0
 
-PROJECT_ROOT="$(gov_find_project_root 2>/dev/null)"
+# THE SESSION'S PROJECT COMES FROM THE PAYLOAD, NOT FROM $PWD (fixed 2026-09-01).
+# This hook judged whatever directory the shell had wandered into. `gov_payload_root` was built on
+# 2026-08-17 for exactly this — after a $PWD walk made post-milestone.sh silently discard a whole
+# session's change log — and only that one hook ever adopted it. Measured tonight: with a payload
+# naming the canonical repo, this hook was auditing a RETIRED, tombstoned tree, so its git range,
+# its .close-required config and its integrity checks all described the wrong project.
+# A helper that exists and is not used is the defect this file reports about other files.
+GOV_INPUT="$(gov_hook_input)"
+PROJECT_ROOT="$(gov_payload_root "$GOV_INPUT" 2>/dev/null)"
+[ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="$(gov_find_project_root 2>/dev/null)"
 [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="$PWD"
+export GOV_PROJECT_ROOT="$PROJECT_ROOT"
 
 # NOTE (2026-09-01): these run HERE, before every early exit below, on purpose.
 # Placed at the tail they were unreachable: this hook exits early when a session changed
@@ -114,6 +124,41 @@ if [ -d "$_cc_mem" ]; then
         Either write the memory the link names, or repoint it. A dangling link is a promise the
         next session cannot collect."
   fi
+fi
+
+# ── The check no hook can perform (added 2026-09-01, at the owner's instruction) ─────────────
+#
+# On 2026-09-01 the owner asked "is everything recorded?" SIX times at the close of one session.
+# Six times the answer was no, and six times the gap was the same shape: work that was done,
+# verified, proven by mutation, pushed — and never written where the next session reads. Twice it
+# was a rule the session had authored minutes earlier and then broken (B21 'write BOTH memories',
+# and #351 'never read a partial artifact as a negative result').
+#
+# Every automated control built that night MISSED this class, including the three above. They match
+# shapes — a stray filename, a wrong number, a dead link. "I said I would and I didn't" has no
+# shape; catching it needs free-text transcript analysis, which is unreliable, and a noisy hook is
+# a hook that gets switched off.
+#
+# So this is not a check. It is the question, printed with its commands attached, at the moment it
+# is needed — because the six that were caught were caught by a human asking, and the answer was
+# only ever right when it came from a command instead of from recollection.
+#
+# Silence with GOV_CLOSE_PROMPT=0 (or GOVERNANCE_HOOKS=0 for the whole family).
+if [ "${GOV_CLOSE_PROMPT:-1}" != "0" ]; then
+  cat >&2 <<'CLOSEQ'
+[close-completeness] BEFORE CALLING THIS CLOSED — answer each with a command, not from memory:
+  1. Everything you ANNOUNCED this session — is it in a canonical file?
+       grep -ril "<the thing>" docs/context/ MDs/ Plans/
+       ...and include one string that MUST NOT be found. Without a failing control, "0 hits"
+       means "clean" and "the check never ran" and nothing tells them apart.
+  2. Did BOTH memory systems get it? They serve different readers and are written separately:
+       docs/context/MEMORY.md   (in git, reaches every clone)
+       ~/.claude/projects/<project-key>/memory/   (machine-local, auto-loaded next session)
+  3. Is every repo you touched actually pushed?
+       git status --porcelain   (empty) AND   git rev-parse HEAD == git rev-parse @{u}
+       Verify against the PUSHED ref. "I committed it" has been true of one repo and false of
+       another in the same breath.
+CLOSEQ
 fi
 
 if [ -n "$_CC_WARN" ]; then

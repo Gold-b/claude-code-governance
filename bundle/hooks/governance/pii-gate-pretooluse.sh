@@ -48,7 +48,7 @@
 set +e
 umask 077
 
-[ "${GOV_PII_GATE:-1}" = "0" ] && exit 0
+if [ "${GOV_PII_GATE:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOV_PII_GATE=0 — bypassing pii-gate (PreToolUse PII block is OFF). (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 if [ "${GOVERNANCE_HOOKS:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing pii-gate (PreToolUse PII block is OFF). (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 
 PAYLOAD="$(cat 2>/dev/null)"

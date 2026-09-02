@@ -78,8 +78,8 @@ FILE_PATH=$(echo "$FILE_PATH" | tr '\\' '/')
 # WHAT IS GATED, AND WHAT IS NOT
 #   installer bundle -> ALWAYS. It is the only publishable destination on this machine.
 #   mirror roots     -> ON by default (B28, 2026-09-02). A mirror listed in
-#                       ~/.claude/.governance-mirrors can be a REAL GitHub repo (e.g.
-#                       Gold-B-s-Agent), and the previous leak also travelled through a tree
+#                       ~/.claude/.governance-mirrors can be a REAL GitHub repo (a product
+#                       checkout), and the previous leak also travelled through a tree
 #                       everyone assumed was private, so the safe default is to scan the crossing.
 #                       The verdict is already computed by then and the union pre-filter makes a
 #                       clean file one grep, so the cost is small. GOV_PII_GATE_MIRRORS=0 turns it
@@ -183,6 +183,11 @@ _pii_scan() {
   cand=()
   PII_REPORT=""
   if [ $# -eq 1 ] && [ -n "$_PII_MEMO_F" ] && [ "$_PII_MEMO_F" = "$1" ]; then
+    # B28-fix: restore the REPORT too, not just the rc. Since B28 defaulted the mirror gate ON,
+    # the mirror scans a file BEFORE the bundle does; the bundle's memo hit would otherwise return
+    # rc=2 with an EMPTY report, and _pii_refuse would log the public-crossing refusal as
+    # "(gate-error)" (losing the real rule + remedy, and nudging toward the leaking GOV_PII_GATE=0).
+    PII_REPORT="$_PII_MEMO_REPORT"
     return "$_PII_MEMO_RC"
   fi
   if [ ! -f "$PII_SCANNER" ]; then
@@ -220,7 +225,7 @@ _pii_scan() {
       *) PII_REPORT="check-no-pii.sh exited $rc (expected 0 or 2); treating the gate as unusable. $out"; rc=3 ;;
     esac
   fi
-  if [ $# -eq 1 ]; then _PII_MEMO_F="$1"; _PII_MEMO_RC="$rc"; fi
+  if [ $# -eq 1 ]; then _PII_MEMO_F="$1"; _PII_MEMO_RC="$rc"; _PII_MEMO_REPORT="$PII_REPORT"; fi
   return "$rc"
 }
 
@@ -449,14 +454,22 @@ _bundle_copy() {
 }
 
 # Same verdict, applied to a machine-local mirror root. ON by default (B28, 2026-09-02) — a mirror
-# can be a real GitHub repo (e.g. Gold-B-s-Agent), and the previous leak also travelled through a
+# can be a real GitHub repo (a product checkout), and the previous leak also travelled through a
 # tree everyone assumed was private. GOV_PII_GATE_MIRRORS=0 turns it off (accepting that a leak
 # refused from the publishable bundle could still reach a mirror ungated). The scan is cheap in the
 # common case: the union pre-filter makes a clean file one grep, not a full scanner run.
 # Returns 0 when the copy may proceed.
 _mirror_allowed() {
   local src="$1" dest="$2" label="$3" rc
-  [ "${GOV_PII_GATE_MIRRORS:-1}" = "1" ] || return 0
+  if [ "${GOV_PII_GATE_MIRRORS:-1}" != "1" ]; then
+    # B10 principle: a bypass is legitimate, a SILENT one is not. Opting out of the mirror scan
+    # copies governance files to a (possibly real GitHub) mirror UNSCANNED — announce once/process.
+    if [ -z "${_GOV_MIRROR_OFF_ANNOUNCED:-}" ] && [ "${GOV_BYPASS_QUIET:-0}" != "1" ]; then
+      _GOV_MIRROR_OFF_ANNOUNCED=1
+      echo "[governance] GOV_PII_GATE_MIRRORS=${GOV_PII_GATE_MIRRORS} — mirror PII scan is OFF; governance files copy to mirror roots UNSCANNED. (GOV_BYPASS_QUIET=1 to mute)" >&2
+    fi
+    return 0
+  fi
   gov_pii_gate_off && return 0
   _pii_scan "$src"; rc=$?
   [ "$rc" -eq 0 ] && return 0

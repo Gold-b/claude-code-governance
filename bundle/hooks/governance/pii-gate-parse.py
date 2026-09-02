@@ -10,6 +10,7 @@
 # hook is the exact edit shape that keeps getting mangled by outer quoting on this machine.
 import json
 import os
+import posixpath
 import sys
 
 
@@ -90,12 +91,20 @@ def main():
 
     home_expand = os.path.expanduser("~").replace("\\", "/").rstrip("/")
     home = home_expand.lower()
-    low = p.replace("\\", "/").lower()
+    # SECURITY: canonicalize before the prefix test. A plain startswith() over the raw path is
+    # defeated by a trivial traversal — C:/repo/x/../bundle/evil.sh is NOT a prefix of the bundle
+    # root, so the gate would ALLOW it, yet the OS resolves the write straight into repo/bundle/,
+    # which end-session.sh publishes and no PostToolUse case backstops. normpath collapses . and ..
+    # so the scope decision is made on where the write ACTUALLY lands. (pentest B9-HIGH, 2026-09-02)
+    low = posixpath.normpath(p.replace("\\", "/")).lower()
     roots = []
 
     def _add_root(base, sub):
-        b = (base or "").replace("\\", "/").rstrip("/").lower()
-        if b:
+        raw = (base or "").replace("\\", "/").strip()
+        if not raw:
+            return
+        b = posixpath.normpath(raw).rstrip("/").lower()  # normalize the root too (GOV_REPO_PATH may carry ..)
+        if b and b != ".":
             for hh in drive_forms(b):
                 roots.append(hh + sub)
 
@@ -117,8 +126,8 @@ def main():
     #  1. the repo checkout's bundle/ — a write straight into it reaches the PUBLIC repo on the
     #     next push (its dir name has no ".claude" substring, so the wrapper's fast prefilter also
     #     had to be widened to let it reach this parser);
-    #  2. every mirror's .claude/hooks|skills — a mirror can be a real project repo (e.g.
-    #     Gold-B-s-Agent) and the sync copies live governance files straight into it.
+    #  2. every mirror's .claude/hooks|skills — a mirror can be a real product repo (the sync
+    #     copies live governance files straight into it, so it is a publication surface too).
     repo = (os.environ.get("GOV_REPO_PATH") or _read_env_var("GOV_REPO_PATH")
             or (home_expand + "/claude-code-governance"))
     _add_root(repo, "/bundle/")

@@ -155,7 +155,7 @@ Every time Claude Code performs `/compact` (context compression), it **MUST** ex
 
 1. **Review the session** — identify recurring patterns, manual steps that could be automated, process improvements, or repetitive tool sequences.
 2. **Extract at least 2 items**: new hook (`.claude/hooks/`), new skill (`~/.claude/skills/`), or improvement to an existing hook/skill. Improvements count toward the minimum.
-3. **Implement** — write the hook scripts, skill files, or edits. Register in `settings.json` if needed.
+3. **Implement** — write the hook scripts, skill files, or edits. Register in `~/.claude/settings.json` (user-level ONLY — never a project `.claude/settings.json`, which would double-fire the hook via the user+project merge) if needed.
 4. **Document** — add a brief entry to the project's MEMORY.md describing the new/improved items.
 
 This applies to **all projects**. The goal is continuous self-improvement of the development workflow.

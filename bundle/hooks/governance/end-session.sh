@@ -49,6 +49,9 @@ gov_disabled && exit 0
 # rather than shared because both files ship standalone in the installer bundle.
 # ---------------------------------------------------------------------------
 PII_SCANNER="${GOV_PII_SCANNER:-$SCRIPT_DIR/check-no-pii.sh}"
+# B10: an override of the scanner is legitimate but must not be silent — a bogus GOV_PII_SCANNER
+# would neuter the last gate before the PUBLIC repo without a word. Announce it.
+[ -n "${GOV_PII_SCANNER:-}" ] && { [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOV_PII_SCANNER override active — end-session push gate is using $GOV_PII_SCANNER instead of the built-in check-no-pii.sh. (GOV_BYPASS_QUIET=1 to mute)" >&2; }
 PII_UNION_CACHE="$HOME/.claude/logs/.gov-pii-union.cache"
 PII_UNION_SIG="$HOME/.claude/logs/.gov-pii-union.sig"
 PII_NAMES_FILE="${GOV_PII_NAMES:-$HOME/.claude/.pii-names}"
@@ -470,6 +473,22 @@ if [ -f "$PUSH_FLAG" ]; then
   # Clone if not present, or pull if exists
   if [ ! -d "$GH_REPO/.git" ]; then
     git clone "https://github.com/Gold-b/claude-code-governance.git" "$GH_REPO" 2>/dev/null
+  fi
+
+  # B8: git NEVER copies hooks on clone, and the repo ships its pre-commit / pre-push PII gates
+  # as TRACKED files under .githooks/, active only when core.hooksPath points at them. Without
+  # this, the last-ditch git-level PII block that the push below relies on exists only if someone
+  # typed the README command by hand once — on a fresh clone it is silently absent. Set it
+  # unconditionally (idempotent, fail-soft) whenever the checkout carries the tracked hooks dir.
+  if [ -d "$GH_REPO/.git" ] && [ -d "$GH_REPO/.githooks" ]; then
+    if [ "$(git -C "$GH_REPO" config --get core.hooksPath 2>/dev/null)" != ".githooks" ]; then
+      if gov_dry; then
+        echo "[GOVERNANCE DRY-RUN] end-session: would set core.hooksPath=.githooks on $GH_REPO (B8)"
+      else
+        git -C "$GH_REPO" config core.hooksPath .githooks 2>/dev/null \
+          && gov_log "end-session" "B8: activated tracked git hooks (core.hooksPath=.githooks) on $GH_REPO"
+      fi
+    fi
   fi
 
   if [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then

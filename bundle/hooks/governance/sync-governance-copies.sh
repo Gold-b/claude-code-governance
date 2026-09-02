@@ -77,11 +77,14 @@ FILE_PATH=$(echo "$FILE_PATH" | tr '\\' '/')
 #
 # WHAT IS GATED, AND WHAT IS NOT
 #   installer bundle -> ALWAYS. It is the only publishable destination on this machine.
-#   mirror roots     -> NOT by default. A mirror listed in ~/.claude/.governance-mirrors is a
-#                       machine-local checkout of a PRIVATE repo; refusing those copies would
-#                       manufacture local drift while protecting nothing public. The verdict is
-#                       already computed by then, so opting in is free: GOV_PII_GATE_MIRRORS=1.
-#                       If a PUBLIC checkout is ever listed there, that is the switch to flip.
+#   mirror roots     -> ON by default (B28, 2026-09-02). A mirror listed in
+#                       ~/.claude/.governance-mirrors can be a REAL GitHub repo (e.g.
+#                       Gold-B-s-Agent), and the previous leak also travelled through a tree
+#                       everyone assumed was private, so the safe default is to scan the crossing.
+#                       The verdict is already computed by then and the union pre-filter makes a
+#                       clean file one grep, so the cost is small. GOV_PII_GATE_MIRRORS=0 turns it
+#                       off, accepting that a leak refused from the bundle could still reach a
+#                       mirror ungated (say so in the guide — the silence used to read as "scanned").
 #   the live tree    -> never. That is where the real values legitimately live.
 #
 # COST, AND WHY THE GATE IS SHAPED THIS WAY. Measured on this machine: ONE check-no-pii.sh run
@@ -106,11 +109,13 @@ FILE_PATH=$(echo "$FILE_PATH" | tr '\\' '/')
 # default - copy anyway and print "skipped" - is the precise failure this session exists to fix.
 #
 # Kill switches: GOVERNANCE_HOOKS=0 (all governance) - GOV_PII_GATE=0 (this gate only)
-#                GOV_PII_GATE_MIRRORS=1 (extend it to mirror roots)
+#                GOV_PII_GATE_MIRRORS=0 (STOP scanning mirror roots; on by default since B28)
 # ---------------------------------------------------------------------------
 # Overridable so the gate can be exercised against a stub in a test, and so an installer
 # that relocates the scanner does not silently turn the gate into a no-op.
 PII_SCANNER="${GOV_PII_SCANNER:-$SCRIPT_DIR/check-no-pii.sh}"
+# B10: announce a scanner override — a silent GOV_PII_SCANNER swap could disable the sync gate.
+[ -n "${GOV_PII_SCANNER:-}" ] && { [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOV_PII_SCANNER override active — sync boundary gate is using $GOV_PII_SCANNER instead of the built-in check-no-pii.sh. (GOV_BYPASS_QUIET=1 to mute)" >&2; }
 PII_UNION_CACHE="$HOME/.claude/logs/.gov-pii-union.cache"
 PII_UNION_SIG="$HOME/.claude/logs/.gov-pii-union.sig"
 PII_NAMES_FILE="${GOV_PII_NAMES:-$HOME/.claude/.pii-names}"
@@ -372,7 +377,7 @@ if [ "$GOV_SYNC_ALL" = "1" ]; then
     [ -n "$_root" ] || continue
     [ -d "$_root/.claude/hooks/governance" ] || continue
     _SA_DESTS="$_SA_DESTS
-mirror:$_root|$_root/.claude/hooks/governance|${GOV_PII_GATE_MIRRORS:-0}"
+mirror:$_root|$_root/.claude/hooks/governance|${GOV_PII_GATE_MIRRORS:-1}"
   done <<SAEOF
 $(_sa_mirror_roots)
 SAEOF
@@ -443,11 +448,15 @@ _bundle_copy() {
   return "$rc"
 }
 
-# Same verdict, applied to a machine-local mirror root. Off unless GOV_PII_GATE_MIRRORS=1.
+# Same verdict, applied to a machine-local mirror root. ON by default (B28, 2026-09-02) — a mirror
+# can be a real GitHub repo (e.g. Gold-B-s-Agent), and the previous leak also travelled through a
+# tree everyone assumed was private. GOV_PII_GATE_MIRRORS=0 turns it off (accepting that a leak
+# refused from the publishable bundle could still reach a mirror ungated). The scan is cheap in the
+# common case: the union pre-filter makes a clean file one grep, not a full scanner run.
 # Returns 0 when the copy may proceed.
 _mirror_allowed() {
   local src="$1" dest="$2" label="$3" rc
-  [ "${GOV_PII_GATE_MIRRORS:-0}" = "1" ] || return 0
+  [ "${GOV_PII_GATE_MIRRORS:-1}" = "1" ] || return 0
   gov_pii_gate_off && return 0
   _pii_scan "$src"; rc=$?
   [ "$rc" -eq 0 ] && return 0

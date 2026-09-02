@@ -23,6 +23,44 @@ def drive_forms(x):
     return out
 
 
+def _read_env_var(name):
+    """B9: read a KEY=value (optionally `export KEY=value`) out of the gitignored, machine-local
+    ~/.claude/.governance-local.env. The real path lives ONLY there, so this published file stays
+    clean; a naive hardcoded checkout dir would be both an identity leak and wrong on every other
+    machine (see end-session.sh's GH_REPO note)."""
+    path = os.path.expanduser("~") + "/.claude/.governance-local.env"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                s = ln.strip()
+                if s.startswith("export "):
+                    s = s[7:].strip()
+                if s.startswith(name + "="):
+                    v = s[len(name) + 1:].strip()
+                    if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0]:
+                        v = v[1:-1]
+                    return v or None
+    except Exception:
+        return None
+    return None
+
+
+def _read_mirror_roots():
+    """B9: machine-local checkout roots that carry a mirror of the framework, one per line,
+    '#' comments and blanks ignored. Same source sync-governance-copies.sh reads."""
+    path = os.path.expanduser("~") + "/.claude/.governance-mirrors"
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                s = ln.strip()
+                if s and not s.startswith("#"):
+                    out.append(s)
+    except Exception:
+        pass
+    return out
+
+
 def main():
     if len(sys.argv) < 2:
         return 0
@@ -50,9 +88,17 @@ def main():
     if not isinstance(p, str) or not p.strip():
         return 0
 
-    home = os.path.expanduser("~").replace("\\", "/").rstrip("/").lower()
+    home_expand = os.path.expanduser("~").replace("\\", "/").rstrip("/")
+    home = home_expand.lower()
     low = p.replace("\\", "/").lower()
     roots = []
+
+    def _add_root(base, sub):
+        b = (base or "").replace("\\", "/").rstrip("/").lower()
+        if b:
+            for hh in drive_forms(b):
+                roots.append(hh + sub)
+
     for h in drive_forms(home):
         # These are exactly the trees sync-governance-copies.sh copies into the installer
         # bundle, i.e. the private->public crossing. Keep this list in step with that hook:
@@ -65,6 +111,21 @@ def main():
         # The installer bundle is the publishable artifact itself: anything written straight
         # into it bypasses the sync and reaches the repo on the next push with no other check.
         roots.append(h + "/.claude/governance-installer/bundle/")
+
+    # B9: two publication surfaces the roots above did NOT cover, both resolved from gitignored
+    # machine-local config so this file stays clean:
+    #  1. the repo checkout's bundle/ — a write straight into it reaches the PUBLIC repo on the
+    #     next push (its dir name has no ".claude" substring, so the wrapper's fast prefilter also
+    #     had to be widened to let it reach this parser);
+    #  2. every mirror's .claude/hooks|skills — a mirror can be a real project repo (e.g.
+    #     Gold-B-s-Agent) and the sync copies live governance files straight into it.
+    repo = (os.environ.get("GOV_REPO_PATH") or _read_env_var("GOV_REPO_PATH")
+            or (home_expand + "/claude-code-governance"))
+    _add_root(repo, "/bundle/")
+    for m in _read_mirror_roots():
+        _add_root(m, "/.claude/hooks/")
+        _add_root(m, "/.claude/skills/")
+
     if not any(f.startswith(r) for f in drive_forms(low) for r in roots):
         return 0
 

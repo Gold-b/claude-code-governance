@@ -16,7 +16,7 @@
 # context) and ALWAYS exits 0. Never blocks a session. Generic across all governed
 # projects. Kill switch: GOVERNANCE_HOOKS=0.
 set +e
-[ "${GOVERNANCE_HOOKS:-1}" = "0" ] && exit 0
+if [ "${GOVERNANCE_HOOKS:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing canonical-cwd-check (stale-copy guard). (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 
 # Normalize a Windows/POSIX path for comparison: lowercase, backslashes->slashes,
 # strip surrounding quotes/space, drop the drive colon, strip trailing slashes.

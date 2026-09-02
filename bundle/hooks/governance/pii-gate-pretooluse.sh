@@ -49,7 +49,7 @@ set +e
 umask 077
 
 [ "${GOV_PII_GATE:-1}" = "0" ] && exit 0
-[ "${GOVERNANCE_HOOKS:-1}" = "0" ] && exit 0
+if [ "${GOVERNANCE_HOOKS:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing pii-gate (PreToolUse PII block is OFF). (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 
 PAYLOAD="$(cat 2>/dev/null)"
 [ -n "$PAYLOAD" ] || exit 0
@@ -58,10 +58,16 @@ PAYLOAD="$(cat 2>/dev/null)"
 # in-scope path contains ".claude", so if the whole payload does not, no file_path inside it
 # can be in scope. This is the path taken by essentially every edit the user ever makes, so
 # nothing that costs a subshell (dirname/pwd, command -v, mktemp) may run above this line.
-case "$PAYLOAD" in *.claude*) ;; *) exit 0 ;; esac
+# B9: also let repo-bundle writes through. The checkout dir "claude-code-governance" has NO
+# ".claude" substring, so a write straight into its bundle/ used to fast-exit here, ungated.
+# The slug is the PUBLIC repo name (not an identity), safe to bake in; the parser still decides
+# scope by resolving GOV_REPO_PATH, so this only widens the over-approximating prefilter.
+case "$PAYLOAD" in *.claude*|*claude-code-governance*) ;; *) exit 0 ;; esac
 
 GOV_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 SCANNER="${GOV_PII_SCANNER:-$HOME/.claude/hooks/governance/check-no-pii.sh}"
+# B10: announce a scanner override — a silent GOV_PII_SCANNER swap could disable this write gate.
+[ -n "${GOV_PII_SCANNER:-}" ] && { [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOV_PII_SCANNER override active — PreToolUse PII gate is using $GOV_PII_SCANNER instead of the built-in check-no-pii.sh. (GOV_BYPASS_QUIET=1 to mute)" >&2; }
 [ -f "$SCANNER" ] || SCANNER="$GOV_DIR/check-no-pii.sh"
 
 PY=""

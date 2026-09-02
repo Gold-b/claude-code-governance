@@ -53,6 +53,14 @@ gov_log() {
 # Use as: `gov_disabled && exit 0`
 gov_disabled() {
   if [ "$GOVERNANCE_HOOKS" = "0" ]; then
+    # B10: a bypass is legitimate; a SILENT bypass is not. When the global kill switch is on,
+    # say so once per process so a disabled control cannot pass unnoticed. Silence the notice
+    # itself with GOV_BYPASS_QUIET=1 (the bypass stays; only the announcement is muted).
+    if [ -z "${_GOV_DISABLED_ANNOUNCED:-}" ] && [ "${GOV_BYPASS_QUIET:-0}" != "1" ]; then
+      _GOV_DISABLED_ANNOUNCED=1
+      _gd_hook="${GOV_HOOK_NAME:-$(basename "${0:-hook}" 2>/dev/null || echo hook)}"
+      echo "[governance] GOVERNANCE_HOOKS=0 — governance hooks are DISABLED; bypassing ${_gd_hook}. (silence this notice with GOV_BYPASS_QUIET=1)" >&2
+    fi
     return 0
   fi
   return 1

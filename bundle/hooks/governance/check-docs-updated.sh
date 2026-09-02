@@ -17,7 +17,7 @@ set +e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR="."
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || true
 command -v gov_disabled >/dev/null 2>&1 && gov_disabled && exit 0
-[ "${GOVERNANCE_HOOKS:-1}" = "0" ] && exit 0
+if [ "${GOVERNANCE_HOOKS:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing check-docs-updated. (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 
 # --- Detect project root (walk up to CLAUDE.md) ---
 PROJECT_ROOT="$PWD"

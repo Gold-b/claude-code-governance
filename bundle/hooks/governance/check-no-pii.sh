@@ -714,7 +714,7 @@ selftest() {
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
-[ "${GOVERNANCE_HOOKS:-1}" = "0" ] && [ -n "${CLAUDE_HOOK:-}" ] && exit 0
+if [ "${GOVERNANCE_HOOKS:-1}" = "0" ] && [ -n "${CLAUDE_HOOK:-}" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing check-no-pii (hook mode; scanner still runs when invoked directly). (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 
 case "${1:-}" in
   ""|-h|--help)

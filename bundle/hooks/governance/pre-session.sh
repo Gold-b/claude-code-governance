@@ -82,11 +82,32 @@ fi
 
 if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
   _GOV_LATEST="$HOME/.claude/logs/.governance-latest"
-  _GOV_URL="https://raw.githubusercontent.com/Gold-b/claude-code-governance/master/bundle/VERSION"
+  # B13: overridable so a private-repo operator can point it at an authenticated/raw-with-token
+  # VERSION (the default 404s to an unauthenticated fetch while the repo is PRIVATE).
+  _GOV_URL="${GOV_UPDATE_VERSION_URL:-https://raw.githubusercontent.com/Gold-b/claude-code-governance/master/bundle/VERSION}"
 
   _LOCAL_V=""
   gov_read_version_var _LOCAL_V "$HOME/.claude/.governance-version"
   gov_is_semver "$_LOCAL_V" || _LOCAL_V=""
+
+  # B13: surface an INERT advisory instead of failing soft and silent. The background fetch (from
+  # a PRIOR session) records the HTTP code whenever it cannot get a usable VERSION; a 4xx is the
+  # known permanent state while the repo is PRIVATE (an unauthenticated raw.githubusercontent
+  # fetch 404s). Say so — throttled to once / 12h so it is visible without being noise.
+  _GOV_STATUS_F="$HOME/.claude/logs/.governance-version-status"
+  if [ -n "$_LOCAL_V" ] && [ ! -s "$_GOV_LATEST" ] && [ -s "$_GOV_STATUS_F" ]; then
+    _GOV_HTTP=$(tr -d '[:space:]' < "$_GOV_STATUS_F" 2>/dev/null)
+    case "$_GOV_HTTP" in
+      401|403|404)
+        _GOV_UNREACH_MARK="$HOME/.claude/logs/.governance-advised-unreachable"
+        if [ -z "$(find "$_GOV_UNREACH_MARK" -maxdepth 0 -mmin -720 2>/dev/null)" ]; then
+          touch "$_GOV_UNREACH_MARK" 2>/dev/null
+          gov_log "pre-session" "update advisory INERT: VERSION source returned HTTP $_GOV_HTTP (repo private?)"
+          echo "[GOVERNANCE UPDATE] The framework update check is INERT: the published VERSION source returned HTTP $_GOV_HTTP (the governance repo is PRIVATE, or the path moved), so this machine cannot tell whether a newer version exists. This is expected while the repo stays private. Point GOV_UPDATE_VERSION_URL at a reachable VERSION, or silence with GOVERNANCE_UPDATE_CHECK=0."
+        fi
+        ;;
+    esac
+  fi
 
   # An installed framework with NO usable marker predates versioning (or was stamped by a failed
   # install). Gating the whole advisory on the marker would have excluded exactly the machines the
@@ -145,13 +166,24 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
     if [ "$_NEED_FETCH" = "1" ]; then
       find "$_GOV_LOGDIR" -maxdepth 1 -name ".governance-latest.*" -mmin +60 -delete 2>/dev/null || true
       (
-        _v=$(curl -fsS -m 3 "$_GOV_URL" 2>/dev/null | tr -d '[:space:]')
-        if gov_is_semver "$_v"; then
+        # B13: capture the HTTP status (drop -f so a 404 is visible, not swallowed). Body to a
+        # temp file, code from -w, so a private-repo 404 is RECORDED rather than silently touched.
+        _bodyf="$_GOV_LATEST.body.$$"
+        _code=$(curl -sS -m 3 -o "$_bodyf" -w '%{http_code}' "$_GOV_URL" 2>/dev/null)
+        _v=$(tr -d '[:space:]' < "$_bodyf" 2>/dev/null)
+        rm -f "$_bodyf" 2>/dev/null
+        case "$_code" in ''|*[!0-9]*) _code=000 ;; esac
+        if gov_is_semver "$_v" && [ "$_code" = "200" ]; then
           _tmp="$_GOV_LATEST.$$"
           echo "$_v" > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$_GOV_LATEST" 2>/dev/null
           rm -f "$_tmp" 2>/dev/null
+          rm -f "$HOME/.claude/logs/.governance-version-status" 2>/dev/null
         else
+          # Record WHY there is no usable version (an HTTP code) instead of a silent touch, so the
+          # foreground can announce the advisory is INERT. 4xx is the known state while PRIVATE.
           touch "$_GOV_LATEST" 2>/dev/null
+          echo "$_code" > "$HOME/.claude/logs/.governance-version-status" 2>/dev/null
+          gov_log "pre-session" "update advisory: VERSION fetch HTTP $_code (no usable version) — INERT (repo private? set GOV_UPDATE_VERSION_URL, or silence GOVERNANCE_UPDATE_CHECK=0)"
         fi
       ) >/dev/null 2>&1 &
     fi

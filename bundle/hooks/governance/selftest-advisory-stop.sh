@@ -161,7 +161,7 @@ esac
 # Hook mode. Must stay well under a second.
 # --------------------------------------------------------------------------------------------
 [ "${GOV_SELFTEST_HOOK:-1}" = "0" ] && exit 0
-[ "${GOVERNANCE_HOOKS:-1}" = "0" ] && exit 0
+if [ "${GOVERNANCE_HOOKS:-1}" = "0" ]; then [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOVERNANCE_HOOKS=0 — bypassing selftest-advisory. (GOV_BYPASS_QUIET=1 to mute)" >&2; exit 0; fi
 cat >/dev/null 2>&1   # drain the Stop payload; we do not need any field from it
 
 mkdir -p "$LOGDIR" 2>/dev/null

@@ -5,6 +5,20 @@
 
 set -euo pipefail
 
+# ─── RETIRED 2026-08-20 (owner decision) ────────────────────────────────────────────────────────
+# This hook existed to AUTO-ARM a local bridge monitor at SessionStart. The bridge moved to the remote host
+# on 2026-08-19 and runs there as a systemd service, so an arm instruction is now actively harmful:
+# a local monitor claims presence, the remote agent correctly yields to it, and the local reader
+# cannot read - the owner's message reaches nobody (GOTCHAS #27, reproduced 2026-08-19).
+#
+# The owner asked for the CODE to be retired rather than for a written rule, because a written rule
+# failed silently twice this week. The entry points themselves also refuse now
+# (WA_ALLOW_LOCAL_MONITOR), so this is the second of two independent stops, not the only one.
+# The body below is left intact and unreachable as the record of what it used to do.
+exit 0
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
 HOME_DIR="${USERPROFILE:-$HOME}"
 
 # Kill-switch: stay completely silent
@@ -12,12 +26,13 @@ if [ -f "${HOME_DIR}/.claude/wa-bridge-off" ]; then
   exit 0
 fi
 
-# NEVER emit arm instructions while the session is CLOSING. This script is registered on
-# SessionStart, Stop and PostCompact with ONE body, so on Stop it would tell the model to arm a
-# persistent Monitor at the exact moment the close is tearing that Monitor down - and a session
-# that re-arms on its way out is the one that steals the next session's messages. Re-arming after
-# a COMPACT is still correct, so only Stop/SessionEnd are suppressed. An unknown or absent event
-# behaves as before (arm), because a silent bridge is worse than a redundant arm instruction.
+# NEVER emit arm instructions while the session is CLOSING (owner, 2026-07-28). This script
+# is registered on SessionStart, Stop and PostCompact with one body, so on Stop it used to
+# tell the model to arm a persistent Monitor at the exact moment the close was tearing that
+# Monitor down - and a session that re-arms on its way out is the one that keeps stealing
+# the next session's messages. Re-arming after a COMPACT is still correct, so only Stop is
+# suppressed. Unknown/absent event -> behave as before (arm), because a silent bridge is
+# worse than a redundant arm instruction.
 EVENT=""
 if [ ! -t 0 ]; then
   EVENT=$(timeout 3 cat 2>/dev/null | python3 -c "
@@ -30,25 +45,12 @@ if [ "$EVENT" = "Stop" ] || [ "$EVENT" = "SessionEnd" ]; then
   exit 0
 fi
 
-# The gateway container name is MACHINE-LOCAL. This hook ships in a PUBLIC bundle, where a
-# real container name names a real deployment, so there is no baked default: set
-# WA_GATEWAY_CONTAINER (e.g. in ~/.claude/.governance-local.env). Unset means "not
-# configured", and the hook reports the bridge inactive rather than guessing a name --
-# fail-closed, because a wrong guess would arm a bridge against somebody else's container.
-WA_GATEWAY_CONTAINER="${WA_GATEWAY_CONTAINER:-}"
-if [ -z "$WA_GATEWAY_CONTAINER" ]; then
-  _WA_STACK_UP=0
-elif docker ps --format "{{.Names}}" 2>/dev/null | grep -q "$WA_GATEWAY_CONTAINER"; then
-  _WA_STACK_UP=1
-else
-  _WA_STACK_UP=0
-fi
-if [ "$_WA_STACK_UP" -eq 0 ]; then
+if ! docker ps --format "{{.Names}}" 2>/dev/null | grep -q "goldb-admin"; then
   cat <<'ENDJSON'
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "[WA-CC Bridge v2] Gateway containers NOT running. Bridge inactive. To enable: set WA_GATEWAY_CONTAINER to your gateway container name, then start the stack from your own gateway checkout: docker compose up -d --remove-orphans."
+    "additionalContext": "[WA-CC Bridge v2] Gateway containers NOT running. Bridge inactive. To enable: start the gateway stack from your gateway checkout: docker compose up -d --remove-orphans."
   }
 }
 ENDJSON
@@ -59,7 +61,7 @@ cat <<'ENDJSON'
 {
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "[WA-CC Bridge v2] AUTO-ARM (standing owner directive 2026-07-21, no need to ask): SILENTLY arm a persistent Monitor running: node \"$USERPROFILE/.claude/skills/wa-cc-bridge/wa-monitor.js\"  (description: 'WhatsApp bridge: allowlisted incoming messages', persistent: true). If the process exits immediately with code 3, another session already holds the bridge - do NOT arm again, do NOT mention it. NEVER use CronCreate for this bridge (v1 is retired). When a bridge event (JSON line) arrives: REPLY FIRST - send an immediate short ack/answer via send.js within seconds, BEFORE any verification or work (owner rule 2026-07-21); then treat .text as a normal user instruction in THIS session (mediator model - full normal workflow, governance, approvals) and follow up. Reply via: node ~/.claude/skills/whatsapp/send.js \"[CC] <reply>\" - Hebrew, SHORT, essence only, NO code blocks/logs, BiDi/RTL rules per the whatsapp skill. Full behavior: ~/.claude/skills/wa-cc-bridge/SKILL.md."
+    "additionalContext": "[WA-CC Bridge v2] AUTO-ARM (standing owner directive 2026-07-21, no need to ask): SILENTLY arm a persistent Monitor running, FROM THE PROJECT DIRECTORY: cd <project> && WA_SESSION_CWD='<project>' node \"$USERPROFILE/.claude/skills/wa-cc-bridge/wa-session-inbox.js\"  (description: 'WhatsApp bridge: allowlisted incoming messages', persistent: true). Pass WA_SESSION_CWD explicitly or presence is scoped to the wrong project and the always-on agent will not yield. NEVER arm wa-monitor.js - the always-on WA-Live-Agent task owns ~/.claude/wa-monitor.lock, so a session monitor either exits 3 or wins the race and leaves the agent dead. NEVER use CronCreate for this bridge (v1 is retired). This session's presence is released deterministically at close by ~/.claude/hooks/wa-session-inbox-stop.sh - do NOT re-arm while closing. When a bridge event (JSON line) arrives: REPLY FIRST - send an immediate short ack/answer via send.js within seconds, BEFORE any verification or work (owner rule 2026-07-21); then treat .text as a normal user instruction in THIS session (mediator model - full normal workflow, governance, approvals) and follow up. Reply via: node ~/.claude/skills/whatsapp/send.js \"[CC] <reply>\" - Hebrew, SHORT, essence only, NO code blocks/logs, BiDi/RTL rules per the whatsapp skill. Full behavior: ~/.claude/skills/wa-cc-bridge/SKILL.md."
   }
 }
 ENDJSON

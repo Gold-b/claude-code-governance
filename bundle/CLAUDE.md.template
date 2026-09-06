@@ -195,6 +195,12 @@ Look for `docs/context/CONTEXT-MANIFEST.md` in the project root. If it exists �
 
 ---
 
+## Server-Only Automation (standing rule, 2026-09-06)
+
+When a project has a remote server, **every monitor, cron, routine, self-check and data-heavy research job runs on that server and notifies the user by itself** (server → notification channel), never on the user's PC and never dependent on an open Claude session. Session-bound mechanisms (Monitor, CronCreate, `/loop`) are at most a convenience while a session is open — never the mechanism of record. Research compute runs niced with a memory cap so live services are never starved. Every such change is written into the repo and the governance docs (CLAUDE.md, HANDOFF, OPEN-PROBLEMS), not only announced in chat.
+
+---
+
 ## Strict File Concurrency & Integrity Protocol
 
 Assume multiple parallel Claude Code sessions are active. To prevent race conditions and data loss:

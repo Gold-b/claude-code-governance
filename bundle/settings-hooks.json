@@ -76,6 +76,16 @@
             "timeout": 60
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/no-local-compute.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

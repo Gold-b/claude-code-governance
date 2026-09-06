@@ -30,6 +30,7 @@ bash ~/.claude/governance-installer/install.sh
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
 | TaskCompleted | `check-full-finish.sh` | Warns about uncommitted changes |
 | Stop | `end-session.sh` | Session-end handoff |
+| PreToolUse (Bash) | `governance/no-local-compute.sh` | In projects with a `.remote-compute` marker: blocks running project scripts / pulling server data on the PC — scripts run on the remote servers (v1.1.7) |
 
 ### Core Skills (9)
 - **bootstrapper** — Loads relevant project context for session briefing

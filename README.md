@@ -20,17 +20,39 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (11 scripts in `~/.claude/hooks/`)
+### Hooks (18 scripts, all registered in `~/.claude/settings.json`)
+
+Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
+is registered on two events, so the table has 19 rows over 18 distinct scripts.
+
 | Event | Script | Purpose |
 |---|---|---|
-| SessionStart | `pre-session.sh` | Detects governance, triggers briefing |
+| SessionStart | `canonical-cwd-check.sh` | Refuses a session opened on a stale or duplicate checkout |
+| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
-| PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks protected-doc edits without success token |
+| UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
+| UserPromptSubmit | `parallel-import.sh` | Detects pasted output from another session |
+| PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks protected-doc edits without a success token |
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
+| PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
+| PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
+| PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
+| PostToolUse (Edit/Write) | `sync-governance-copies.sh` | Mirrors a governance edit to the other copies; **the private-to-public crossing**, and gated as one |
+| PostToolUse (Edit/Write) | `file-collision-record.sh` | Records this session's view of a file it just wrote |
 | TaskCompleted | `check-full-finish.sh` | Warns about uncommitted changes |
-| Stop | `end-session.sh` | Session-end handoff |
-| PreToolUse (Bash) | `governance/no-local-compute.sh` | In projects with a `.remote-compute` marker: blocks running project scripts / pulling server data on the PC — scripts run on the remote servers (v1.1.7) |
+| TaskCompleted | `pre-done.sh` | Verification-gate checklist before a task counts as done |
+| TaskCompleted | `check-docs-updated.sh` | Warns when code changed and the docs did not |
+| Stop | `end-session.sh` | Session-end handoff, and the gated push of the framework bundle |
+| Stop | `close-completeness.sh` | Integrity warnings a closing summary cannot produce for itself |
+| Stop | `close-report.sh` | Generates the closing summary **from the canonical files**, so an unrecorded claim cannot appear in it |
+| Stop | `selftest-advisory-stop.sh` | Reports that the framework is unverified since the last selftest |
+
+Not registered on any event, and named on every selftest run so the decision cannot go quiet:
+`render-gate.sh`, `render-rules-read.sh`, `gov-notify.ps1`. Helpers called by other hooks
+(`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
+`file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
+`sync-governance.sh`) are installed but are not themselves hook entry points.
 
 ### Core Skills (9)
 - **bootstrapper** — Loads relevant project context for session briefing
@@ -279,6 +301,22 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-07 (v1.2.0) — the copy-parity check is now an assertion, and publishing asks first.**
+  Three things closed. **(1)** `governance-selftest.sh` now asserts that every hook the installer
+  bundle carries is byte-identical to the live copy, and goes RED when they diverge. This is the
+  only check that catches an identity with no shape - it is what found the leaked group name on
+  2026-09-01, gotcha #350 recommended asserting it here, and until now it was a thing a human had
+  to remember to run. An absent root or zero shared files is a FAILURE, not a pass: a comparison
+  with nothing to compare is not agreement. It found a real divergence on its first run.
+  **(2)** The end-of-session push to the PUBLIC repo now requires `GOV_PUBLISH=1`. The flag it used
+  to trust is seeded automatically by *any* governance edit, so it only ever meant "something
+  changed", never "publish this" - and twice, unreviewed content reached GitHub down that path
+  (#347, #358). Without the variable the session ends normally, the queue is **preserved** and its
+  files are named. The pipe is kept and simply asks first; this is not the "kill the auto-push"
+  proposal that was correctly rejected on 2026-09-01. **(3)** The hooks table is regenerated from
+  `bundle/settings-hooks.json`: 18 registered scripts, up from a 9-row table under a heading that
+  claimed 11. Seven active hooks had never been documented at all.
 
 - **2026-09-07 — a project's own `.claude/docs/` could publish itself, and the sync now says so.**
   Every branch of `sync-governance-copies.sh` rebuilds its source from `$HOME` except one: the

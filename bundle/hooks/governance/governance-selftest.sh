@@ -1139,6 +1139,48 @@ EOF
     printf '      decision (register or delete) cannot go quiet again. Task B11.\n'
   fi
 
+  # ── COPY PARITY ─────────────────────────────────────────────────────────────────────────────
+  # THE check that catches what no rule can. check-no-pii.sh matches SHAPES, so an identity with
+  # no shape - a group name, a client name, a codename - scores 0 and every scan prints PASS. On
+  # 2026-09-01 the owner's real WhatsApp group name survived four sanitization rounds and five
+  # certifications for exactly that reason, and was found ONLY by diffing the copies against each
+  # other: one said the placeholder, another said the real name. Gotcha #350 recommended asserting
+  # it here; it was not done, and on 2026-09-07 the same string was still sitting in the public
+  # repo's initial commit. So it is asserted now: divergence between the copies is a RED result,
+  # not something a human has to remember to run.
+  #
+  # Direction matters. Sync is live -> installer -> repo, so a dirty live file is two hops from a
+  # public commit; the copies must agree BEFORE anything is published, whichever way they drifted.
+  CUR_SCRIPT="(four-copy parity)"
+  _par_live="$HOME/.claude/hooks/governance"
+  _par_bundle="$HOME/.claude/governance-installer/bundle/hooks/governance"
+  _par_missing=""
+  [ -d "$_par_live" ]   || _par_missing="$_par_missing live"
+  [ -d "$_par_bundle" ] || _par_missing="$_par_missing installer-bundle"
+  if [ -n "$_par_missing" ]; then
+    # A missing root means the comparison examined nothing. That is not agreement.
+    _bad "the governance copies agree" "cannot compare - absent root(s):$_par_missing. A parity check with nothing to compare is not a pass."
+  else
+    _par_diff=""
+    _par_n=0
+    for _pf in "$_par_live"/*.sh; do
+      [ -f "$_pf" ] || continue
+      _pb=$(basename "$_pf")
+      # Only files the bundle actually carries: a live-only file (a .bak, a local experiment) is
+      # not a divergence, it is simply not distributed.
+      [ -f "$_par_bundle/$_pb" ] || continue
+      _par_n=$((_par_n + 1))
+      diff -q "$_pf" "$_par_bundle/$_pb" >/dev/null 2>&1 || _par_diff="$_par_diff $_pb"
+    done
+    if [ "$_par_n" -eq 0 ]; then
+      _bad "the governance copies agree" "compared 0 shared file(s) - the check ran but examined nothing"
+    elif [ -n "$_par_diff" ]; then
+      _bad "the governance copies agree" "live and installer-bundle DIFFER on:$_par_diff - sync is live -> installer -> repo, so this is either an unpublished fix or an unsanitized value one edit from a public commit. Diff them and decide which side is right (gotcha #350)."
+    else
+      _ok "all $_par_n shared hook(s) are byte-identical across live and the installer bundle"
+    fi
+  fi
+
   if [ -s "$GIT_VIOL" ]; then
     CUR_SCRIPT="(git shim)"
     _bad "no hook attempted a denied git operation" "$(_snip "$(cat "$GIT_VIOL")")"

@@ -453,7 +453,32 @@ if [ -s "$DIVERGENCE_LOG" ]; then
   fi
 fi
 
-if [ -f "$PUSH_FLAG" ]; then
+# PUBLISH CONSENT (2026-09-07). The flag alone is NOT authorization to publish.
+#
+# The flag is seeded automatically by sync-governance-copies.sh on ANY governance edit, so
+# "a flag exists" only means "something changed", never "the owner asked to publish it". This
+# hook then does `git clone` + `git push origin master` UNATTENDED at session end, and since
+# 2026-09-07 the target repository is PUBLIC. Twice already, content nobody had reviewed
+# reached GitHub down exactly this path (gotchas #347, #358).
+#
+# So the push now requires a deliberate, separate act:
+#   GOV_PUBLISH=1     for one session (export it, or set it in ~/.claude/.governance-local.env)
+# Without it the session ends normally, the flag is PRESERVED, and the queued files are named
+# so nothing is lost and nothing is silent -- the publish simply becomes a thing you do, not a
+# thing that happens to you. This is not the 2026-09-01 "kill the auto-push" proposal that was
+# correctly rejected: the pipe is kept, it just asks first.
+if [ -f "$PUSH_FLAG" ] && [ "${GOV_PUBLISH:-0}" != "1" ]; then
+  _PUB_N=$(grep -c . "$PUSH_FLAG" 2>/dev/null | tr -d " ")
+  [ -z "$_PUB_N" ] && _PUB_N=0
+  gov_log "end-session" "publish HELD: $_PUB_N queued file(s), GOV_PUBLISH not set"
+  echo "[GOVERNANCE] Publish HELD. $_PUB_N governance file(s) are queued for the PUBLIC repo,"
+  echo "  and this session will NOT push them. The queue is preserved."
+  sed "s|.* ||" < "$PUSH_FLAG" 2>/dev/null | sort -u | tail -10 | sed "s|^|    |"
+  echo "  Review them, then publish deliberately:  GOV_PUBLISH=1 <re-run the close>"
+  echo "  Or clear the queue without publishing:   rm \"$PUSH_FLAG\""
+fi
+
+if [ -f "$PUSH_FLAG" ] && [ "${GOV_PUBLISH:-0}" = "1" ]; then
   # Overridable so this publish path can be exercised end-to-end against a throwaway repo
   # instead of the real public one. A gate nobody can rehearse is a gate nobody trusts.
   INSTALLER_REPO="${GOV_INSTALLER_REPO:-$HOME/.claude/governance-installer}"

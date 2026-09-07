@@ -280,6 +280,20 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 — a real WhatsApp group name is gone from the bundle, sanitised at the SOURCE.**
+  The name was an identity with no shape: not phone-, path- or token-shaped, so the 20-rule
+  scanner scored it 0 and it survived four sanitisation rounds and five certifications (gotcha
+  #350). It is replaced by the `Ops-Group` placeholder `check-no-pii.sh` already uses, in **all
+  three copies at once** — live, installer bundle, repo — because the sync direction is
+  live -> installer -> repo, so a repo cleaned while its upstream stays dirty is clean only until
+  the next edit. Verified safe before the swap: the group JID is read from a gitignored local
+  config rather than from this label, and nothing branches on the value (the only equality tests
+  in the bridge are on `Slack-Bridge`). `wa-monitor.test.js` passes 50/50; the two failing suites
+  fail identically with the old and the new label, so they are pre-existing. The same commit syncs
+  `no-local-compute.sh`, whose live copy carried a governance-plumbing exemption the bundle lacked,
+  and drops an owner first-name reference from its comment — a name the denylist deliberately
+  excludes, since a two-letter name matched case-insensitively fires on every English "or".
+
 - **2026-08-25 — the framework can now tell a machine it is out of date, and a next-session
   handover has a fixed name.** Three PRs. **#4** added `bundle/docs/NEXT-SESSION-HANDOVER.md`, the
   renderer spec for a goal-scoped continuation prompt (`/goal` + `/loop`, the context-limit

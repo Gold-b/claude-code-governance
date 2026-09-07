@@ -31,6 +31,12 @@ if printf '%s' "$CMD" | grep -qE '^\s*(ssh|scp)\b' ; then
   fi
   exit 0
 fi
+# .claude/hooks/governance/* are governance plumbing, NOT project compute. Blocking them once
+# deadlocked a session: governance-guard demanded a re-issued success token, and the only way to
+# issue one is a local governance script this hook refused to run (2026-09-06, owner approved).
+if printf '%s' "$CMD" | grep -qE '(^|[;&| /])(commit-task-success|end-session|pre-session|pre-task|post-milestone|governance-guard|close-completeness|check-full-finish)\.sh' ; then
+  exit 0
+fi
 if printf '%s' "$CMD" | grep -qE 'pytest|--selftest|unittest|ast\.parse|py_compile|bash -n|^\s*(git|gh|ls|cat|grep|sed|awk|head|tail|wc|du|rm|mkdir|cp|mv|echo|date|stat|find|diff|node [^ ]*send\.js|timeout [0-9]+ bash )' ; then
   exit 0
 fi

@@ -302,6 +302,19 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 (v1.2.1) — the v1.1.7 governance-plumbing exemption never worked, and only a test found it.**
+  `no-local-compute.sh` ends its exemption pattern with a word boundary. The two characters were
+  consumed when the file was written on 2026-09-06 and landed as a **single 0x08 backspace byte**,
+  so the alternation could never match and the hook kept blocking the governance scripts the
+  exemption was added to permit — the owner-approved fix was inert from the day it shipped. It was
+  found because this release gave the hook its first test case: it was the selftest's only
+  UNCOVERED hook, and a registered hook with no case is not green, it is unverified. Four cases now
+  cover it (block project compute · allow it unmarked · allow `ssh` · allow governance plumbing).
+  **The same escape-eating bit three times in one session** — a lost `sed` capture group, a
+  swallowed `tr` argument, and this byte — including the first attempt to repair this very line,
+  which replaced the byte with itself. Build such literals from character codes and verify by
+  executing, never by reading. Selftest `pass=157 fail=0 uncovered=0`.
+
 - **2026-09-07 (v1.2.0) — the copy-parity check is now an assertion, and publishing asks first.**
   Three things closed. **(1)** `governance-selftest.sh` now asserts that every hook the installer
   bundle carries is byte-identical to the live copy, and goes RED when they diverge. This is the

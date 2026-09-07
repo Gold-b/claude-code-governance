@@ -305,8 +305,45 @@ case_fn_for() {
     selftest-advisory-stop.sh)  echo case_selftest_advisory ;;
     close-report.sh)            echo case_close_report ;;
     close-completeness.sh)      echo case_close_completeness ;;
+    no-local-compute.sh)        echo case_no_local_compute ;;
     *) echo "" ;;
   esac
+}
+
+# --- no-local-compute.sh ----------------------------------------------------------------------
+case_no_local_compute() {
+  # Registered on PreToolUse(Bash) since v1.1.7 and executed by nothing until now: it was the
+  # selftest's only UNCOVERED hook at the 2026-09-07 close. A registered hook with no case is not
+  # green, it is unverified - the same hole the pii-gate and close-completeness cases were added
+  # to close.
+  local proj="$SBX/nlc-proj" plain="$SBX/nlc-plain"
+  mkdir -p "$proj" "$plain" 2>/dev/null
+  : > "$proj/.remote-compute"        # marks the project as server-only compute
+  : > "$proj/run-analysis.sh"
+
+  local pay
+  # 1. MUST BLOCK - running a project script locally in a marked project.
+  pay="{\"session_id\":\"sid-nlc-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"node run-analysis.js\"}}"
+  run_hook "$proj" "sid-nlc-1" "$pay"
+  expect_rc 2 "marked project: running project compute on the PC is BLOCKED"
+
+  # 2. MUST ALLOW - the same command where no .remote-compute marker exists. Without this the
+  #    case would pass just as well against a hook that blocks everything.
+  pay="{\"session_id\":\"sid-nlc-2\",\"cwd\":\"$plain\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"node run-analysis.js\"}}"
+  run_hook "$plain" "sid-nlc-2" "$pay"
+  expect_rc 0 "unmarked project: the identical command is ALLOWED"
+
+  # 3. MUST ALLOW - ssh, in the marked project: the hook exists to push work TO the server, so
+  #    refusing the way there would invert its purpose.
+  pay="{\"session_id\":\"sid-nlc-3\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ssh root@203.0.113.10 'systemctl status x'\"}}"
+  run_hook "$proj" "sid-nlc-3" "$pay"
+  expect_rc 0 "marked project: ssh to the remote server is ALLOWED"
+
+  # 4. MUST ALLOW - governance plumbing, the exemption added 2026-09-06 after blocking it
+  #    deadlocked a session (governance-guard wanted a token only a local script could issue).
+  pay="{\"session_id\":\"sid-nlc-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"bash .claude/hooks/governance/commit-task-success.sh\"}}"
+  run_hook "$proj" "sid-nlc-4" "$pay"
+  expect_rc 0 "marked project: governance plumbing is ALLOWED (the 2026-09-06 deadlock fix)"
 }
 
 # --- canonical-cwd-check.sh ------------------------------------------------------------------

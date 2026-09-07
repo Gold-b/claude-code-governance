@@ -302,6 +302,15 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 (v1.3.1) — `no-local-compute.sh` states the limit it hit within an hour of being armed.**
+  The marker search starts at the shell's CURRENT directory, and PreToolUse sees that directory
+  **before** any `cd` inside the command itself. So `cd /unmarked/project && ./build.sh`, issued
+  from a marked project, is judged as still being inside the marked one and is blocked. It fails
+  in the safe direction — a false block, never a false allow — and it is loud, so it is now a
+  **stated limit in the file** rather than a bug papered over: guessing which `cd` in an arbitrary
+  shell command wins is exactly the parsing that makes a gate unreliable, and an unreliable gate
+  gets switched off. Move the shell first, in its own call, then run the command.
+
 - **2026-09-07 (v1.3.0) — a negative claim now has a tool behind it, because a filtered search proved nothing.**
   Asked whether a retired tree was safe to delete, a session filtered the machine's Scheduled Tasks
   for one project name, found three, and reported that no vector remained. **Five more existed** —

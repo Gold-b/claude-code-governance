@@ -15,6 +15,14 @@ try:
     d=json.load(sys.stdin); print(d.get("tool_input",{}).get("command",""))
 except Exception: print("")' 2>/dev/null)"
 [ -z "$CMD" ] && exit 0
+# STATED LIMIT (2026-09-07, hit within an hour of arming this): the marker search starts at the
+# shell's CURRENT directory, which PreToolUse sees BEFORE any `cd` inside the command itself. So
+#     cd /some/unmarked/project && ./build.sh
+# issued from a MARKED project is judged as still being inside the marked one, and is blocked.
+# It fails in the SAFE direction (a false block, never a false allow) and it is loud, so it is a
+# stated limit rather than a bug to paper over: guessing which `cd` in an arbitrary shell command
+# will win is exactly the kind of parsing that makes a gate unreliable. Work around it by moving
+# the shell first, in its own call, and then running the command.
 ROOT="$(pwd)"
 MARK=""
 while [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; do

@@ -201,6 +201,26 @@ When a project has a remote server, **every monitor, cron, routine, self-check a
 
 ---
 
+## Enumerate Before You Claim
+
+**A filtered search proves what MATCHED. It can never prove "there is nothing else."**
+
+Before any sentence of the form *"there are no others"*, *"nothing else references it"*,
+*"it cannot come back"* or *"it is safe to delete"*:
+
+1. **List the whole surface first, then narrow.** Never answer a question about existence from
+   a query you scoped by a guessed keyword.
+2. **Resolve the target.** For anything pointing at a file, check the file still exists. An
+   entry whose target is gone is either already failing or about to.
+3. **Search for what RE-CREATES it,** not just for what exists now.
+4. **Then say what you measured, not what you infer.**
+
+Tool: `~/.claude/hooks/governance/enumerate-before-claiming.sh` (read-only; `--broken`,
+`--creators <dir>`). Full rationale and the incident behind it:
+`~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §21.
+
+---
+
 ## Strict File Concurrency & Integrity Protocol
 
 Assume multiple parallel Claude Code sessions are active. To prevent race conditions and data loss:

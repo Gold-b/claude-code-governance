@@ -310,6 +310,40 @@ case_fn_for() {
   esac
 }
 
+# --- enumerate-before-claiming.sh ---------------------------------------------------------------
+case_enumerate_before_claiming() {
+  # A NEGATIVE CLAIM NEEDS AN ENUMERATION. This tool exists because a session filtered the
+  # Scheduled Tasks for one project name, found three, and reported that nothing else existed.
+  # Five more did; one carried the pre-rebranding name and had been failing daily for months.
+  # The case asserts BOTH directions - a tree that registers a task is reported, and a tree that
+  # does not is reported as 'none'. Asserting only the first would pass a tool that reports
+  # everything, which is the same blindness one layer up.
+  local tool="$GOV_DIR/enumerate-before-claiming.sh"
+  if [ ! -f "$tool" ]; then
+    _bad "enumerate-before-claiming.sh is installed" "absent at $tool - the control cannot run"
+    return 0
+  fi
+  local withtask="$SBX/enum-with" without="$SBX/enum-without"
+  mkdir -p "$withtask" "$without" 2>/dev/null
+  printf '%s
+' 'schtasks /Create /F /TN "X-Selftest-Task" /SC DAILY /ST 03:00 /TR "echo hi"' > "$withtask/setup.bat"
+  printf '%s
+' 'echo this file registers nothing' > "$without/plain.bat"
+
+  CUR_SCRIPT="$tool (--creators)"
+  local out
+  out=$(bash "$tool" --creators "$withtask" 2>&1)
+  case "$out" in
+    *X-Selftest-Task*) _ok "--creators names the task a script registers" ;;
+    *) _bad "--creators names the task a script registers" "expected X-Selftest-Task in: $(_snip "$out")" ;;
+  esac
+  out=$(bash "$tool" --creators "$without" 2>&1)
+  case "$out" in
+    *none*) _ok "--creators reports 'none' for a tree that registers nothing" ;;
+    *) _bad "--creators reports 'none' for a tree that registers nothing" "expected 'none' in: $(_snip "$out")" ;;
+  esac
+}
+
 # --- no-local-compute.sh ----------------------------------------------------------------------
 case_no_local_compute() {
   # Registered on PreToolUse(Bash) since v1.1.7 and executed by nothing until now: it was the
@@ -1116,6 +1150,8 @@ EOF
       close-report.sh)             echo "invoked-by:settings.json" ;;
       sync-governance.sh)          echo "invoked-by:end-session.sh" ;;
       file-collision-ack.sh)       echo "invoked-by:file-collision-guard.sh" ;;
+      enumerate-before-claiming.sh) echo "TOOL: operator-invoked, not a hook — enumerates the machine's scheduled tasks / startup / run keys and flags entries whose target is missing; covered by case_enumerate_before_claiming" ;;
+      enumerate-tasks.ps1)         echo "TOOL: the PowerShell half of enumerate-before-claiming.sh — a separate file on purpose, because escapes do not survive being embedded (gotcha #359)" ;;
       render-gate.sh)              echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
       render-rules-read.sh)        echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
@@ -1174,6 +1210,17 @@ EOF
     printf '  [ORPHANED, declared and still open] %s\n' "$orph_list"
     printf '      Registered in no event and called by nothing. Named here on every run so the\n'
     printf '      decision (register or delete) cannot go quiet again. Task B11.\n'
+  fi
+
+  # ── Operator tools: not hooks, so the registration loop above never reaches them ────────────
+  # A tool that no case executes is exactly the state that made no-local-compute.sh ship an inert
+  # exemption for a day (v1.2.1). Call it explicitly.
+  if command -v case_enumerate_before_claiming >/dev/null 2>&1; then
+    printf '
+  [tool] %s
+' "$GOV_DIR/enumerate-before-claiming.sh"
+    CUR_ORIG="$GOV_DIR/enumerate-before-claiming.sh"
+    case_enumerate_before_claiming
   fi
 
   # ── COPY PARITY ─────────────────────────────────────────────────────────────────────────────

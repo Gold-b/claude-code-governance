@@ -702,3 +702,68 @@ There is no automatic install, by design (see above). On each machine: `git pull
 ---
 
 **End of Agent Guide. Follow these rules in every session, on every project.**
+
+---
+
+## 21. Negative Claims Require an Enumeration (2026-09-07)
+
+**A filtered search proves what MATCHED. It can never support the sentence "there is nothing
+else."** Before writing *"there are no others"*, *"nothing references it"*, *"it cannot come
+back"* or *"it is safe to delete"*, do three things in this order:
+
+1. **Enumerate, then narrow.** List the complete surface first. Never answer a question about
+   existence from a query you scoped with a guessed keyword.
+2. **Resolve the target.** For every entry that points at a file — a scheduled task, a service,
+   a hook registration, a mount — check that the file still exists. An entry whose target is
+   gone is either already failing or about to.
+3. **Search for what RE-CREATES it.** "It cannot come back" is a claim about installers and
+   setup scripts. It needs its own search, and it is not answered by looking at what exists now.
+
+Only then state what you measured, not what you inferred.
+
+### The incident this is made of
+
+A session was asked whether a retired project tree was safe to delete. It filtered the machine's
+Scheduled Tasks for one project name, found **three**, handled them, and reported that no vector
+remained.
+
+- **Five more existed.** One carried the project's *pre-rebranding* name, so no filter for the
+  current name could ever have matched it.
+- **That task had been failing every morning for months.** It pointed at a script a rebranding
+  commit had renamed; git records the rename explicitly. Nobody updated the task, and its
+  non-zero result code was never looked at.
+- **"Nothing can recreate these" was asserted, never measured.** The Startup folder and the Run
+  keys were checked; scripts that *create* tasks were not searched for at all. There were six,
+  and one of them registered six task names by itself.
+
+Asked afterwards to extract those names by hand, the same session found five of the six. The
+tool below found all six on its first run. **That gap is the argument for the tool: a human or a
+model reading a file skims; a command does not.**
+
+### The tool
+
+`hooks/governance/enumerate-before-claiming.sh` — **read-only**, operator-invoked, not a hook.
+
+| Mode | What it answers |
+|---|---|
+| *(none)* | Every scheduled task, startup entry and Run key, with each target resolved `ok` / `MISSING`, missing first |
+| `--broken` | Only entries whose target file is gone — the line that surfaces a job failing in silence |
+| `--creators <dir>` | Which scripts under that tree register tasks, and the task names each one registers |
+
+Two design points worth keeping:
+
+- **It refuses to filter.** The unfiltered listing is the product, not a fallback.
+- **When a task name is built dynamically it says so** (`<name built dynamically — READ THE
+  FILE>`) rather than printing nothing. Silence was the original bug; a tool that reproduces it
+  is worse than no tool.
+
+Its PowerShell half lives in a separate `enumerate-tasks.ps1` **on purpose** — see §19 and gotcha
+#359: escapes do not survive being embedded and written through several layers, and this failed
+four times in the session that wrote it. **Code that must survive being written should contain no
+escapes at all.**
+
+### Generalise past scheduled tasks
+
+The same shape applies to hooks, cron entries, registry keys, environment variables, mounted
+volumes, mirrors and skills. Enumerate, resolve, then claim. Related: §3 (evidence before rank),
+gotchas #348, #351, #358, #359, #361.

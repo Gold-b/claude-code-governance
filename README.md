@@ -302,6 +302,28 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 (v1.3.0) — a negative claim now has a tool behind it, because a filtered search proved nothing.**
+  Asked whether a retired tree was safe to delete, a session filtered the machine's Scheduled Tasks
+  for one project name, found three, and reported that no vector remained. **Five more existed** —
+  one carrying the project's *pre-rebranding* name, so no filter for the current name could ever
+  have matched it, and it had been **failing every morning for months** against a script a
+  rebranding commit had renamed. The same session asserted "nothing can recreate these" without
+  ever searching for scripts that *create* tasks; there were six, and one registered six task names
+  by itself. Asked to extract those names by hand it found five of the six — the new tool found all
+  six on its first run.
+  **`enumerate-before-claiming.sh`** (read-only, operator-invoked) refuses to filter: it lists every
+  scheduled task, startup entry and Run key, resolves each target and marks it `ok` / `MISSING` with
+  the missing ones first. `--broken` shows only the entries whose target is gone — the line that
+  surfaces a job failing in silence. `--creators <dir>` answers *"can it come back?"* by naming the
+  scripts that register tasks and the names each registers, and says
+  `<name built dynamically — READ THE FILE>` rather than printing nothing, because silence was the
+  original bug. Its PowerShell half is a **separate `.ps1` on purpose**: escapes did not survive
+  being embedded and written, for the fourth time in one session (#359). Covered by a selftest case
+  asserting **both** directions — a tree that registers a task is named, a tree that does not
+  reports `none` — since asserting only the first would pass a tool that reports everything.
+  Rule written into `GOVERNANCE-AGENT-GUIDE.md` §21 and `CLAUDE.md.template`, so new projects
+  inherit it.
+
 - **2026-09-07 (v1.2.3) — the close now notes protected documents that were changed outside the guard.**
   `governance-guard.sh` is registered on `Edit|Write|MultiEdit|NotebookEdit` and not on `Bash`, so a
   protected document rewritten with `python`, `sed` or a heredoc never meets the success-token

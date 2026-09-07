@@ -302,6 +302,19 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 (v1.2.2) — the copy diff now runs at every session close, because a Bash-written edit syncs nowhere.**
+  `sync-governance-copies.sh` is registered on `Edit|Write|MultiEdit|NotebookEdit` and **not on
+  `Bash`**. A session that edits a governance file with `python`, `sed` or a heredoc therefore
+  triggers no sync at all: the edit never reaches the installer bundle, never enters the push
+  queue, and is silently lost at the next `install.sh --force`. That — not a leak — is the real
+  cost of the gap; `end-session.sh` scans the STAGED SET before pushing and the repo's own
+  `pre-commit`/`pre-push` gates scan too, so nothing reaches GitHub unscanned however it was
+  written. `close-completeness.sh` now diffs the live hooks against the bundle at every `Stop` and
+  names any file that diverged. It **warns without blocking**, because which side is right is a
+  human decision. One diff, measured at 2.4 s — deliberately not a PII scan after every shell
+  command, which would cost hundreds of runs a session, and *a slow gate gets switched off*.
+  Proven in both directions with a planted divergence; it caught two real ones while being written.
+
 - **2026-09-07 (v1.2.1) — the v1.1.7 governance-plumbing exemption never worked, and only a test found it.**
   `no-local-compute.sh` ends its exemption pattern with a word boundary. The two characters were
   consumed when the file was written on 2026-09-06 and landed as a **single 0x08 backspace byte**,

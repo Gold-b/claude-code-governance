@@ -126,6 +126,51 @@ if [ -d "$_cc_mem" ]; then
   fi
 fi
 
+# ── COPY PARITY AT CLOSE (2026-09-07) ───────────────────────────────────────
+#
+# WHAT THIS CATCHES, and why it is not the PII gate. `sync-governance-copies.sh` is registered
+# PostToolUse on Edit|Write|MultiEdit|NotebookEdit - NOT on Bash. A session that edits a
+# governance file with `python`, `sed` or a heredoc (which this machine's bypass mode actively
+# prefers) therefore triggers NO sync: the edit never reaches the installer bundle, never enters
+# the push queue, and never travels to any other copy. It just sits in the live tree and is lost
+# the next time `install.sh --force` copies the bundle back over it.
+#
+# That is the real cost of the Bash gap. It is NOT a publication risk - end-session.sh scans the
+# STAGED SET before pushing and the repo's own pre-commit/pre-push gates scan too, so nothing
+# reaches GitHub unscanned however it was written. The cost is a silent NON-propagation, and the
+# only thing that sees it is a copy diff. Open-Problem #130.
+#
+# WHY HERE rather than a PreToolUse(Bash) scanner: parsing arbitrary shell to guess which
+# commands write is unreliable, and paying a PII scan after every shell call would cost hundreds
+# of runs per session - and a slow gate gets switched off, which is how the original leak
+# happened. This is ONE diff at the close. Measured: 2.4 s.
+#
+# It WARNS, it does not block: a divergence can legitimately be work in progress, and the
+# direction it should be resolved in is a human decision (gotcha #350, #360).
+_cc_live="$HOME/.claude/hooks/governance"
+_cc_bundle="$HOME/.claude/governance-installer/bundle/hooks/governance"
+if [ -d "$_cc_live" ] && [ -d "$_cc_bundle" ]; then
+  _cc_div=""; _cc_n=0
+  for _cc_hf in "$_cc_live"/*.sh; do
+    [ -f "$_cc_hf" ] || continue
+    _cc_bn=$(basename "$_cc_hf")
+    [ -f "$_cc_bundle/$_cc_bn" ] || continue   # live-only file: not distributed, not a divergence
+    _cc_n=$((_cc_n + 1))
+    diff -q "$_cc_hf" "$_cc_bundle/$_cc_bn" >/dev/null 2>&1 || _cc_div="$_cc_div $_cc_bn"
+  done
+  if [ "$_cc_n" -eq 0 ]; then
+    _cc_warn "copy parity: compared 0 shared hook(s) - the check ran but examined nothing, which is
+        not agreement. Verify \$HOME and the installer bundle path."
+  elif [ -n "$_cc_div" ]; then
+    _cc_warn "the live hooks and the installer bundle DIVERGE on:$(printf '%s' "$_cc_div" | tr ' ' '
+' | sed '/^$/d' | sed 's|^|
+        |')
+        Sync is live -> installer -> repo, and a Bash-written edit triggers NO sync at all, so this
+        is most likely an edit that will be LOST at the next 'install.sh --force'. Diff them, decide
+        which side is right, and copy deliberately. (Open-Problem #130, gotchas #350 / #360.)"
+  fi
+fi
+
 # ── The check no hook can perform (added 2026-09-01, at the owner's instruction) ─────────────
 #
 # On 2026-09-01 the owner asked "is everything recorded?" SIX times at the close of one session.

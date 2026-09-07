@@ -126,6 +126,49 @@ if [ -d "$_cc_mem" ]; then
   fi
 fi
 
+# ── PROTECTED DOCS WRITTEN OUTSIDE THE GUARD (2026-09-07) ───────────────────
+#
+# governance-guard.sh is registered PreToolUse on Edit|Write|MultiEdit|NotebookEdit and NOT on
+# Bash, so a protected document rewritten with `python`, `sed` or a heredoc never meets the
+# success-token requirement. This reports that, once, at the close. Open-Problem #130.
+#
+# DELIBERATELY CONSERVATIVE - the failure mode to avoid here is a false alarm, not a miss. A
+# noisy check gets switched off, and the framework has already lost controls that way. So:
+#   * it WARNS, it never blocks (a blocking close-gate is how the 2026-09-06 deadlock happened);
+#   * it reports only documents whose mtime is NEWER than the session-start marker AND which the
+#     PostToolUse change log did not record - i.e. changed, but not through a guarded tool;
+#   * with no session-start marker it says so and checks NOTHING, rather than guessing a window;
+#   * it names `git pull` and a parallel session as ordinary explanations, because they are.
+# It is a note for the human, not an accusation.
+_cc_startf="${GOV_SESSION_START_FILE:-$(gov_state_file .gov-session-start)}"
+_cc_chlog="$(gov_state_file .gov-session-changes)"
+if [ -n "${PROJECT_ROOT:-}" ] && [ -f "$_cc_startf" ]; then
+  _cc_unguarded=""
+  while IFS= read -r _cc_pat; do
+    [ -n "$_cc_pat" ] || continue
+    for _cc_pd in "$PROJECT_ROOT/$_cc_pat"*; do
+      [ -f "$_cc_pd" ] || continue
+      # newer than the session-start marker?
+      [ "$_cc_pd" -nt "$_cc_startf" ] || continue
+      # recorded by the PostToolUse log => it went through a guarded tool => not our case
+      if [ -f "$_cc_chlog" ] && grep -qF "$(basename "$_cc_pd")" "$_cc_chlog" 2>/dev/null; then
+        continue
+      fi
+      _cc_unguarded="$_cc_unguarded ${_cc_pd#$PROJECT_ROOT/}"
+    done
+  done <<EOF
+$(gov_protected_patterns)
+EOF
+  if [ -n "$_cc_unguarded" ]; then
+    _cc_warn "protected document(s) changed this session WITHOUT passing governance-guard:$(printf '%s' "$_cc_unguarded" | tr ' ' '
+' | sed '/^$/d' | sort -u | sed 's|^|
+        |')
+        The guard only sees Edit/Write, so a shell-written edit bypasses it. This is a NOTE, not a
+        finding: a git pull, a rebase or a parallel session produces the same signal. If the change
+        was yours and intended, nothing needs doing. (Open-Problem #130.)"
+  fi
+fi
+
 # ── COPY PARITY AT CLOSE (2026-09-07) ───────────────────────────────────────
 #
 # WHAT THIS CATCHES, and why it is not the PII gate. `sync-governance-copies.sh` is registered

@@ -302,6 +302,20 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 (v1.2.3) — the close now notes protected documents that were changed outside the guard.**
+  `governance-guard.sh` is registered on `Edit|Write|MultiEdit|NotebookEdit` and not on `Bash`, so a
+  protected document rewritten with `python`, `sed` or a heredoc never meets the success-token
+  requirement. `close-completeness.sh` now says so once, at `Stop`. **It is built to be
+  conservative, because the failure mode to avoid here is a false alarm, not a miss** — a noisy
+  check gets switched off, and this framework has lost controls that way before. It warns and never
+  blocks (a blocking close-gate is what caused the 2026-09-06 deadlock); with no session-start
+  marker it checks nothing and says so, rather than guessing a window; it subtracts anything the
+  PostToolUse change log recorded, so an edit that did pass a guarded tool is never reported; and
+  the message names `git pull`, a rebase and a parallel session as ordinary explanations, because
+  they produce the same signal. It is a note for the human, not an accusation. Four cases proven:
+  silent with no marker, silent with no change, names a shell-written edit, silent again once that
+  same file is recorded in the change log. Selftest `pass=157 fail=0 uncovered=0`.
+
 - **2026-09-07 (v1.2.2) — the copy diff now runs at every session close, because a Bash-written edit syncs nowhere.**
   `sync-governance-copies.sh` is registered on `Edit|Write|MultiEdit|NotebookEdit` and **not on
   `Bash`**. A session that edits a governance file with `python`, `sed` or a heredoc therefore

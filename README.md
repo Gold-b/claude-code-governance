@@ -280,6 +280,19 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 — a project's own `.claude/docs/` could publish itself, and the sync now says so.**
+  Every branch of `sync-governance-copies.sh` rebuilds its source from `$HOME` except one: the
+  docs branch copied **the edited file itself** into the publishable bundle. So a
+  `.claude/docs/*.md` inside ANY project checkout would have crossed into the public artifact. It
+  now requires the `$HOME` copy explicitly, proven in both directions with a planted project file.
+  The comparison needed a path normaliser, because the hook payload gives `C:/Users/<user>/...` while
+  every `$HOME`-built path is `/c/Users/<user>/...` and a raw compare would have refused every legitimate
+  edit. That normaliser is written in pure shell with **no sed backreference and no backslash
+  literal**: the first version lost its escaped capture group in transit and failed in the
+  looks-correct direction, silently dropping the drive letter so that the HOME path compared as
+  foreign. Editing a project's governance (`docs/context/`, `Plans/`, `MDs/`, its `CLAUDE.md`) was
+  never in scope - none of it lives under `.claude/`.
+
 - **2026-09-07 — the private-to-public pipe is closed by construction, not by detection.**
   Five skills shipped in `bundle/skills/` that `install.sh` never installed - `wa-cc-bridge`,
   `wa-cc-poll`, `whatsapp`, `whatsapp-checkpoints`, `end-session`. They are machine- and

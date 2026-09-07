@@ -65,6 +65,25 @@ fi
 # --- Normalize path (Windows backslash -> forward slash) ---
 FILE_PATH=$(echo "$FILE_PATH" | tr '\\' '/')
 
+# gov_same_file: are two paths the same file, across the forms this hook receives?
+# The payload gives `C:/Users/<user>/.claude/...` while every SOURCE this script builds is
+# `$HOME/...` = `/c/Users/<user>/.claude/...`. A raw string compare therefore says "different"
+# for a legitimate HOME edit and would disable syncing entirely. Fold `C:/` -> `/c/`, drop a
+# trailing slash, and compare case-insensitively (Windows paths are case-insensitive).
+gov_norm_path() {
+  # Pure shell on purpose: no sed backreference and no backslash literal. An escaped capture
+  # group did not survive being written into this file, and it failed in the LOOKS-CORRECT
+  # direction - it silently dropped the drive letter, so a legitimate HOME edit compared as a
+  # foreign path and was refused. FILE_PATH is already slash-normalised above.
+  _p=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$_p" in
+    [a-z]:/*) _p="/${_p%%:*}/${_p#*:/}" ;;
+  esac
+  while [ "${_p%/}" != "$_p" ]; do _p="${_p%/}"; done
+  printf '%s' "$_p"
+}
+gov_same_file() { [ "$(gov_norm_path "$1")" = "$(gov_norm_path "$2")" ]; }
+
 # ---------------------------------------------------------------------------
 # PRIVATE -> PUBLIC BOUNDARY GATE (armed 2026-09-01)
 #
@@ -501,6 +520,14 @@ case "$FILE_PATH" in
     # Governance docs (agent/human guides) -> installer bundle only (mirrors carry hooks/skills)
     DOC_REL=$(echo "$FILE_PATH" | sed "s|.*/.claude/docs/||")
     DEST="$HOME/.claude/governance-installer/bundle/docs/$DOC_REL"
+    # This branch is the ONE that copies the EDITED file itself into the publishable bundle
+    # (every other branch rebuilds its source from $HOME). So a `.claude/docs/*.md` inside ANY
+    # project checkout would publish that project's content. Require the HOME copy explicitly.
+    if ! gov_same_file "$FILE_PATH" "$HOME/.claude/docs/$DOC_REL"; then
+      echo "[GOVERNANCE-SYNC] $FILE_PATH is a PROJECT doc, not the framework doc at ~/.claude/docs/$DOC_REL - nothing synced, nothing queued for GitHub."
+      gov_log "sync-copies" "project-scoped doc refused at the private->public crossing: $FILE_PATH"
+      exit 0
+    fi
     if [ -f "$FILE_PATH" ]; then
       if gov_dry; then echo "[GOVERNANCE DRY-RUN] sync-copies: would copy $FILE_PATH -> $DEST"; exit 0; fi
       # GATED. A guide is the likeliest carrier of a real value - guides quote real paths,

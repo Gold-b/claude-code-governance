@@ -280,6 +280,20 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-07 — the private-to-public pipe is closed by construction, not by detection.**
+  Five skills shipped in `bundle/skills/` that `install.sh` never installed - `wa-cc-bridge`,
+  `wa-cc-poll`, `whatsapp`, `whatsapp-checkpoints`, `end-session`. They are machine- and
+  deployment-specific tooling carrying group names, server addresses, operator phones and client
+  names, and `sync-governance-copies.sh` copied them into the bundle on every edit. That is the
+  pipe, and every leak this repo has had came down it. They are removed, and a **never-distribute
+  block sits at the private->public crossing itself** - deleting the directories is not enough,
+  because `_bundle_copy` does `mkdir -p` and the next edit recreates the path. Proven in both
+  directions: a `wa-cc-bridge` edit is refused and leaves no bundle directory, a `bootstrapper`
+  edit still syncs. `bundle/skills/` now holds exactly the 14 skills the installer installs.
+  Overridable with `GOV_NEVER_DISTRIBUTE_SKILLS`. The class this closes is the one no scanner can
+  close: an identity with no shape (a group name, a client name) is invisible to every rule, so the
+  fix is to stop the file carrying it from reaching the public artifact at all.
+
 - **2026-09-07 — a real WhatsApp group name is gone from the bundle, sanitised at the SOURCE.**
   The name was an identity with no shape: not phone-, path- or token-shaped, so the 20-rule
   scanner scored it 0 and it survived four sanitisation rounds and five certifications (gotcha

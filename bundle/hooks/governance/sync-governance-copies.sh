@@ -601,6 +601,22 @@ if [ $IS_SKILL -eq 1 ] && [ -n "$SKILL_REL_PATH" ]; then
 $(gov_mirror_roots)
 EOF
 
+  # NEVER-DISTRIBUTED skills. These are machine- and deployment-specific tooling (WhatsApp bridge
+  # internals, a retired skill): they carry group names, server addresses, operator phones and
+  # client names, and `install.sh` does not install ANY of them - CORE_SKILLS/EXTENDED_SKILLS omit
+  # them entirely, so nobody who installs the framework ever received them. They were nonetheless
+  # copied into the public bundle on every edit, which is the pipe that leaked a real WhatsApp
+  # group name into the published repo (2026-09-07). Deleting them from the bundle is NOT enough:
+  # _bundle_copy does `mkdir -p "$(dirname "$dest")"`, so the very next edit recreates the path.
+  # The block has to be here, at the crossing.
+  case " ${GOV_NEVER_DISTRIBUTE_SKILLS:-wa-cc-bridge wa-cc-poll whatsapp whatsapp-checkpoints end-session} " in
+    *" $SKILL_NAME "*)
+      echo "[GOVERNANCE-SYNC] '$SKILL_NAME' is a never-distributed skill - NOT copied into the public bundle. Local copies are untouched."
+      gov_log "sync-copies" "skill '$SKILL_NAME' blocked at the private->public crossing (never-distributed list)"
+      exit 0
+      ;;
+  esac
+
   # Target 3: Installer bundle - THIS IS THE PRIVATE->PUBLIC CROSSING. Gated (see above).
   if [ -d "$INSTALLER_SKILLS" ]; then
     TARGET3="$INSTALLER_SKILLS/$SKILL_REL_PATH"

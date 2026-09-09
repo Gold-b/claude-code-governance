@@ -382,6 +382,18 @@ verifies clean. Freshness is the version marker's job, not this gate's.
   every real repo, reviewer and channel lives in `~/.claude/pr-follow-through/config.local.json`,
   outside every repo. Selftest case with both directions; the hook's two `gh` calls have selftest
   seams honoured only under `GOV_SELFTEST_SBX`.
+  Shipped in the same version: a **Prerequisites** section at the top of this README, because none
+  of this was written where a new user would look — the installer's one hard dependency (`node`),
+  the guards' preference for `python`, which features need `gh` or a claude.ai connector, and above
+  all the three machine-local files that must hold your real values before the first session, since
+  a `PostToolUse` hook mirrors this tree into a bundle a `Stop` hook can push publicly. It also
+  records the GitHub-from-a-cloud-routine trap measured the same day: connecting GitHub on claude.ai
+  authorises the app on *your* account, a foreign repository declared as a routine source is refused
+  with `HTTP 403`, the sandbox has no `gh`, and the way through is a custom connector to GitHub's
+  remote MCP server with a bearer header — its server offers no dynamic client registration, so the
+  OAuth-client fields on that dialog are the wrong road. Plus the detail that costs an hour on its
+  own: a custom connector is invisible to the connector list a session sees, and its id is recovered
+  by creating a disabled routine with no `mcp_connections`.
 - **2026-09-09 (v1.3.3) — the two Bash-tool guards no longer switch themselves off in silence when `python` is absent.**
   Both `deny-git-bypass.sh` and `no-local-compute.sh` read the tool payload with a one-line
   `python -c`. With no `python` on PATH that yields an empty command, and the very next line exited 0:

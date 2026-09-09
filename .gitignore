@@ -78,3 +78,25 @@ tmp/
 # Verified with: git check-ignore -v .governance-pii-denylist
 .governance-pii-denylist
 **/.governance-pii-denylist
+
+# --- Appended 2026-09-09: this repo's OWN governance journal is LOCAL ---------
+# The framework is now governed by itself (/init-governance, 2026-09-09), which raises a
+# question the other governed projects never face: this repo is PUBLIC and DISTRIBUTED.
+#
+# Two reasons its journal stays out of git, not one:
+#   1. Content. PLAN/MEMORY/HANDOFF record the OWNER's working state and session history.
+#      That is data about the operator, not part of the product, and the product is exactly
+#      install.sh + bundle/ + README.md + verify.sh.
+#   2. The canonical-path guard. `canonical_working_copy` must be a LITERAL path for
+#      canonical-cwd-check.sh to compare against (it has no env-lookup form, measured
+#      2026-09-09). Committing a literal path would put a machine-local path in a public
+#      file AND fire a false "WRONG WORKING COPY" alarm at every person who clones this repo.
+#      Keeping the file untracked removes both problems at the source rather than papering
+#      over either.
+#
+# Consequence, stated so nobody rediscovers it as a bug: a fresh clone of this repo is
+# UNGOVERNED by design. Whoever wants a journal here runs /init-governance themselves and
+# gets their own local one, with their own path.
+CLAUDE.md
+docs/context/
+Plans/

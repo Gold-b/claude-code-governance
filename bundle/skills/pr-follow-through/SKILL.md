@@ -108,6 +108,26 @@ file, then `RemoteTrigger update` with the FULL `job_config.ccr` (partial event 
 merged). The session watcher and the routines share the state block, so a reminder sent by one
 is seen by the other.
 
+## Who does what: a routine notices, a session answers
+
+A cloud routine runs an agent with **no knowledge of the project**. So the split is not negotiable:
+
+| the routine may | the routine may never |
+|---|---|
+| read PR and Slack state | reply to a reviewer, or acknowledge on the owner's behalf |
+| relay facts to the owner | explain a change, promise a fix, or give a timeline |
+| post a **factual** one-line reminder (number, title, age, CI state, link, and the ask copied from the PR title) | write anything that requires understanding the code |
+
+Substance always waits for a session that has the repository. An acknowledgement the routine
+cannot back up is worse than silence.
+
+**Coverage follows who is WAITING, not who owns the repo.** The obvious split — "repos I own get
+the in-session watcher, repos I don't get the routine" — loses real coverage, because an
+in-session watcher exists only while a session is open. A PR on your own repo that is waiting on
+another person needs cloud coverage just as much. Where an owned repo's PRs routinely ask a third
+party for a decision, give the routine a **mechanical** rule it can apply without judgement (match
+on the PR title, say) rather than asking it to infer who is blocked.
+
 ## Hard constraints
 
 - Never merge a PR on a repo you do not own. Never force-push. Never delete branches.

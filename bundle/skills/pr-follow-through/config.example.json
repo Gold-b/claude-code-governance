@@ -1,0 +1,34 @@
+{
+  "_comment": "PLACEHOLDERS ONLY. Copy to ~/.claude/pr-follow-through/config.local.json and fill in real values there. That file must never be committed or synced.",
+  "owner": {
+    "name": "<Your Name>",
+    "github": "<your-github-login>",
+    "slack_user_id": "U0EXAMPLE01"
+  },
+  "signature": "— written by Claude on behalf of <Your Name>",
+  "defaults": {
+    "check_interval_sec": 90,
+    "reminder_interval_hours": 3,
+    "working_hours": { "tz": "Area/City", "start_hour": 8, "end_hour": 20, "days": ["Sun", "Mon", "Tue", "Wed", "Thu"] }
+  },
+  "repos": {
+    "<org>/<repo-you-do-not-own>": {
+      "mode": "non-owned",
+      "reviewer": { "name": "<Reviewer Name>", "github": "<reviewer-login>", "slack_user_id": "U0EXAMPLE02", "slack_dm": "<reviewer-dm-channel-id>" },
+      "team_channel": { "id": "C0EXAMPLE01", "thread_ts": "<thread-ts-or-empty>" },
+      "also_notify": { "<pr-number-or-title-regex>": "<github-login-of-area-owner>" },
+      "notes": { "<pr-number>": "<one-line ask specific to this PR>" },
+      "last_reminder_seed": "1970-01-01T00:00:00Z",
+      "local_clone": "<absolute-path-of-your-clone>"
+    },
+    "<you>/<repo-you-own>": {
+      "mode": "owned",
+      "reviewer": { "name": "<bot reviewer>", "github": "<bot-login>" }
+    }
+  },
+  "cloud_routines": {
+    "ids": ["<trig_...>", "<trig_...>"],
+    "prompt_file": "~/.claude/pr-follow-through/routine-prompt.local.md",
+    "environment_id": "<env_...>"
+  }
+}

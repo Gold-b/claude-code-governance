@@ -20,15 +20,17 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (19 scripts, all registered in `~/.claude/settings.json`)
+### Hooks (20 scripts, all registered in `~/.claude/settings.json`)
 
 Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
-is registered on two events, so the table has 20 rows over 19 distinct scripts.
+is registered on two events and `pr-watch-guard.sh` on three, so the table has 23 rows over 20
+distinct scripts.
 
 | Event | Script | Purpose |
 |---|---|---|
 | SessionStart | `canonical-cwd-check.sh` | Refuses a session opened on a stale or duplicate checkout |
 | SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update |
+| SessionStart | `pr-watch-guard.sh` | If the repo has open PRs of yours and no live watcher: one context line with the exact `pr-watch.sh` command to arm (v1.4.0) |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
 | UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
 | UserPromptSubmit | `parallel-import.sh` | Detects pasted output from another session |
@@ -38,6 +40,7 @@ is registered on two events, so the table has 20 rows over 19 distinct scripts.
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
 | PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
 | PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
+| PostToolUse (Bash, PowerShell) | `pr-watch-guard.sh` | After `gh pr …` / `git push`: asks the session (JSON `decision: block`) to arm the PR watcher when open PRs of yours have none; cool-down while it arms. Kill switch `GOV_PR_WATCH=0` (v1.4.0) |
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
 | PostToolUse (Edit/Write) | `sync-governance-copies.sh` | Mirrors a governance edit to the other copies; **the private-to-public crossing**, and gated as one |
 | PostToolUse (Edit/Write) | `file-collision-record.sh` | Records this session's view of a file it just wrote |
@@ -48,12 +51,19 @@ is registered on two events, so the table has 20 rows over 19 distinct scripts.
 | Stop | `close-completeness.sh` | Integrity warnings a closing summary cannot produce for itself |
 | Stop | `close-report.sh` | Generates the closing summary **from the canonical files**, so an unrecorded claim cannot appear in it |
 | Stop | `selftest-advisory-stop.sh` | Reports that the framework is unverified since the last selftest |
+| Stop | `pr-watch-guard.sh` | Holds the stop ONCE per repo+session when open PRs of yours have no live watcher, so it gets armed before the session goes idle; the next stop passes (v1.4.0) |
 
 Not registered on any event, and named on every selftest run so the decision cannot go quiet:
 `render-gate.sh`, `render-rules-read.sh`, `gov-notify.ps1`. Helpers called by other hooks
 (`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
 `file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
 `sync-governance.sh`) are installed but are not themselves hook entry points.
+`pr-watch.sh` (v1.4.0) is a tool, not a hook: the session arms it through the Monitor tool and
+it prints one line per PR change (comment, review, +1, CI, merge) for the caller's own open PRs on
+one repo, fast-forwards the clone on merge, and exits when none remain. `pr-watch.sh --selftest`
+runs its offline controls. The flow that uses both is the `pr-follow-through` skill; every real
+value it needs (repos, reviewers, channels) lives in `~/.claude/pr-follow-through/config.local.json`,
+never in the skill — `config.example.json` ships placeholders only.
 
 ### Core Skills (9)
 - **bootstrapper** — Loads relevant project context for session briefing
@@ -303,6 +313,22 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-09 (v1.4.0) — PR follow-through: your own open PRs are watched until they merge, by a
+  tool the session cannot forget to arm.** Three pieces, all generic. `pr-watch.sh` polls `gh` for
+  the caller's open PRs on one repo and prints one line per change (comment, review, +1, CI rollup,
+  merge state, merged/closed); on merge it fast-forwards the clone's base branch; it exits when no
+  open PR remains, and `--selftest` runs its offline controls (a reviewer comment, an approval, a +1
+  and a merge must fire; the caller's own comment and identical snapshots must not). `pr-watch-guard.sh`
+  is the hook that keeps it armed: after any `gh pr …` / `git push`, at session start, and once at
+  stop, it checks for a live heartbeat for this repo+session and otherwise hands the session the
+  exact Monitor command (JSON `decision: block`, with a cool-down so it does not repeat while the
+  watcher starts). The `pr-follow-through` skill is the flow around them — owned repos defer the
+  merge to `/pr-to-git`; repos you do not own get a reviewer reminder cadence (Slack + PR mention,
+  working hours, batched, state kept in a hidden block in the PR body shared with an optional cloud
+  routine) and are never self-merged. **Placeholders only:** the skill ships `config.example.json`;
+  every real repo, reviewer and channel lives in `~/.claude/pr-follow-through/config.local.json`,
+  outside every repo. Selftest case with both directions; the hook's two `gh` calls have selftest
+  seams honoured only under `GOV_SELFTEST_SBX`.
 - **2026-09-09 (v1.3.3) — the two Bash-tool guards no longer switch themselves off in silence when `python` is absent.**
   Both `deny-git-bypass.sh` and `no-local-compute.sh` read the tool payload with a one-line
   `python -c`. With no `python` on PATH that yields an empty command, and the very next line exited 0:

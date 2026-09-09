@@ -307,6 +307,7 @@ case_fn_for() {
     close-completeness.sh)      echo case_close_completeness ;;
     no-local-compute.sh)        echo case_no_local_compute ;;
     deny-git-bypass.sh)         echo case_deny_git_bypass ;;
+    pr-watch-guard.sh)          echo case_pr_watch_guard ;;
     *) echo "" ;;
   esac
 }
@@ -411,6 +412,64 @@ case_deny_git_bypass() {
   pay="{\"session_id\":\"sid-dgb-5\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git config core.hooksPath .githooks\"}}"
   run_hook "$proj" "sid-dgb-5" "$pay"
   expect_rc 0 "wiring core.hooksPath is ALLOWED"
+}
+
+# --- pr-watch-guard.sh --------------------------------------------------------------------------
+case_pr_watch_guard() {
+  # Keeps a PR watcher armed for the caller's open PRs (v1.4.0). Offline: the two gh calls are
+  # replaced by seams the hook honours only under GOV_SELFTEST_SBX. Both directions asserted -
+  # it fires (JSON block naming pr-watch.sh) after a PR command with open PRs and no heartbeat,
+  # and stays silent on a live heartbeat, a non-PR command, zero PRs, and the kill switch.
+  local proj="$SBX/prw-proj" st="$SBX/prw-state"
+  mkdir -p "$proj" "$st" 2>/dev/null; rm -f "$st"/* 2>/dev/null
+  export PR_WATCH_GUARD_REPO="acme/widgets" PR_WATCH_STATE_DIR="$st"
+  local pay
+  # 1. MUST FIRE - gh pr create, 2 open PRs, no watcher
+  export PR_WATCH_GUARD_OPEN=2
+  pay="{\"session_id\":\"sid-prw-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"gh pr create --title t --body b\"}}"
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_rc 0 "PostToolUse never fails the tool"
+  expect_has '"decision": "block"' "a PR command with open PRs and no watcher asks the session to arm"
+  expect_has 'pr-watch.sh --repo acme/widgets' "the ask names the exact watcher command"
+  # 2. MUST NOT FIRE - the same again inside the cool-down
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_quiet "a second PR command inside the cool-down is silent"
+  # 3. MUST NOT FIRE - a live heartbeat (fresh watcher) for this repo+session
+  rm -f "$st"/*.nag; date +%s > "$st/acme__widgets__sid-prw-1.heartbeat"
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_quiet "a live watcher heartbeat keeps the guard silent"
+  # 4. MUST FIRE - a stale heartbeat (10 minutes old) counts as no watcher
+  printf '%s' "$(( $(date +%s) - 600 ))" > "$st/acme__widgets__sid-prw-1.heartbeat"; rm -f "$st"/*.nag
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_has '"decision": "block"' "a stale heartbeat is treated as no watcher"
+  # 5. MUST NOT FIRE - a command that is not about PRs
+  rm -f "$st"/*
+  pay="{\"session_id\":\"sid-prw-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls -la && git status\"}}"
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_quiet "a non-PR command is ignored"
+  # 6. MUST NOT FIRE - zero open PRs
+  export PR_WATCH_GUARD_OPEN=0
+  pay="{\"session_id\":\"sid-prw-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\"}}"
+  run_hook "$proj" "sid-prw-1" "$pay"
+  expect_quiet "no open PR of the caller means nothing to arm"
+  # 7. Stop is held ONCE, then passes
+  export PR_WATCH_GUARD_OPEN=1
+  pay="{\"session_id\":\"sid-prw-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"Stop\"}"
+  run_hook "$proj" "sid-prw-2" "$pay"
+  expect_has '"decision": "block"' "the first stop with open PRs and no watcher is held"
+  run_hook "$proj" "sid-prw-2" "$pay"
+  expect_quiet "the second stop passes (held once only)"
+  # 8. SessionStart prints one context line (plain text, not JSON)
+  pay="{\"session_id\":\"sid-prw-3\",\"cwd\":\"$proj\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+  run_hook "$proj" "sid-prw-3" "$pay"
+  expect_has '[pr-watch] acme/widgets has 1 open PR' "session start announces the open PRs and the arm command"
+  expect_not '"decision"' "session start context is plain text"
+  # 9. MUST NOT FIRE - the kill switch
+  rm -f "$st"/*
+  pay="{\"session_id\":\"sid-prw-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"PowerShell\",\"tool_input\":{\"command\":\"git push -u origin x\"}}"
+  GOV_PR_WATCH=0 run_hook "$proj" "sid-prw-4" "$pay"
+  expect_quiet "GOV_PR_WATCH=0 silences the guard"
+  unset PR_WATCH_GUARD_REPO PR_WATCH_GUARD_OPEN PR_WATCH_STATE_DIR
 }
 
 # --- canonical-cwd-check.sh ------------------------------------------------------------------
@@ -1185,6 +1244,7 @@ EOF
       file-collision-ack.sh)       echo "invoked-by:file-collision-guard.sh" ;;
       enumerate-before-claiming.sh) echo "TOOL: operator-invoked, not a hook — enumerates the machine's scheduled tasks / startup / run keys and flags entries whose target is missing; covered by case_enumerate_before_claiming" ;;
       enumerate-tasks.ps1)         echo "TOOL: the PowerShell half of enumerate-before-claiming.sh — a separate file on purpose, because escapes do not survive being embedded (gotcha #359)" ;;
+      pr-watch.sh)                 echo "TOOL: the PR watcher the session arms through the Monitor tool (pr-follow-through skill) - not a hook; pr-watch-guard.sh hands the session its exact command, and 'pr-watch.sh --selftest' runs its offline must-fire/must-not-fire controls (v1.4.0)" ;;
       render-gate.sh)              echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
       render-rules-read.sh)        echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;

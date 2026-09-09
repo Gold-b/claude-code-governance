@@ -15,6 +15,11 @@
             "command": "~/.claude/hooks/governance/pre-session.sh",
             "timeout": 10,
             "statusMessage": "Context Governance: pre-session check..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
+            "timeout": 15
           }
         ]
       }
@@ -120,6 +125,16 @@
             "statusMessage": "Context Governance: recording the file state we just left..."
           }
         ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "TaskCompleted": [
@@ -181,6 +196,11 @@
             "command": "~/.claude/hooks/governance/close-report.sh",
             "timeout": 90,
             "statusMessage": "Context Governance: generating the closing report from the record..."
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
+            "timeout": 15
           }
         ]
       }

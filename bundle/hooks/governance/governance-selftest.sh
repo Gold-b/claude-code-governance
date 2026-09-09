@@ -200,6 +200,7 @@ expect_quiet(){ if [ -z "$(printf '%s' "$OUT" | tr -d '[:space:]')" ]; then _ok 
 expect_file() { if [ -f "$1" ]; then _ok "$2"; else _bad "$2" "expected file to exist: $1"; fi; }
 expect_nofile(){ if [ ! -f "$1" ]; then _ok "$2"; else _bad "$2" "file must NOT exist: $1"; fi; }
 expect_grep() { if grep -qF "$1" "$2" 2>/dev/null; then _ok "$3"; else _bad "$3" "expected [$1] inside $2; actual: $(_snip "$(cat "$2" 2>/dev/null)")"; fi; }
+expect_nogrep() { if grep -qF "$1" "$2" 2>/dev/null; then _bad "$3" "[$1] must NOT appear inside $2; actual: $(_snip "$(cat "$2" 2>/dev/null)")"; else _ok "$3"; fi; }
 
 # ── Hook runner ──────────────────────────────────────────────────────────────────────────────
 # $1 script, $2 cwd, $3 session id, $4 stdin payload
@@ -469,6 +470,73 @@ case_pr_watch_guard() {
   pay="{\"session_id\":\"sid-prw-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"PowerShell\",\"tool_input\":{\"command\":\"git push -u origin x\"}}"
   GOV_PR_WATCH=0 run_hook "$proj" "sid-prw-4" "$pay"
   expect_quiet "GOV_PR_WATCH=0 silences the guard"
+  # --- cold gh (2026-09-10 Sniper handoff) ------------------------------------------------------
+  # These drop the PR_WATCH_GUARD_OPEN seam so the REAL gh call path runs, against a fake `gh` on
+  # the sandbox PATH. The bug: an empty/failed gh was read as "no open PRs" and exited 0 with NO
+  # log line, so a cold gh at SessionStart silently disarmed monitoring. Both directions matter -
+  # a broken gh must be LOUD, and a genuine zero must stay SILENT. Asserting only the first would
+  # pass against a hook that logs "gh not ready" on every quiet repo.
+  local glog="$SBX_HOME/.claude/logs/governance.log" ghdir="$SBX/prw-gh"
+  mkdir -p "$ghdir" 2>/dev/null; rm -f "$st"/* 2>/dev/null
+  unset PR_WATCH_GUARD_OPEN
+
+  # 10. MUST RECOVER - the reported scenario: first gh call cold (fails), second one warm.
+  #     Before the fix this session got no prompt at all and left no trace.
+  rm -f "$ghdir/tries"
+  cat > "$SBX_BIN/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+n=$(cat "$GOV_SELFTEST_SBX/prw-gh/tries" 2>/dev/null || echo 0)
+n=$((n+1)); printf '%s' "$n" > "$GOV_SELFTEST_SBX/prw-gh/tries"
+[ "$n" -le 1 ] && exit 1      # cold: fails on the first call only
+echo 2
+FAKEGH
+  chmod +x "$SBX_BIN/gh" 2>/dev/null
+  : > "$glog"
+  pay="{\"session_id\":\"sid-prw-cold1\",\"cwd\":\"$proj\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+  run_hook "$proj" "sid-prw-cold1" "$pay"
+  expect_has '[pr-watch] acme/widgets has 2 open PR' "a cold first gh call is retried, not read as zero - the arm prompt still reaches the session"
+  expect_grep "recovered on try 2" "$glog" "the recovery is recorded, so a cold gh is visible instead of invisible"
+
+  # 11. MUST LOG - gh never comes back. Silence on stdout is right (we do not know), silence in the
+  #     log is the actual defect: it erases the difference between "quiet" and "not answered".
+  cat > "$SBX_BIN/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+exit 1
+FAKEGH
+  chmod +x "$SBX_BIN/gh" 2>/dev/null
+  : > "$glog"; rm -f "$st"/*
+  pay="{\"session_id\":\"sid-prw-cold2\",\"cwd\":\"$proj\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+  PR_WATCH_GH_TRIES=1 run_hook "$proj" "sid-prw-cold2" "$pay"
+  expect_quiet "an unanswered gh does not fabricate an arm prompt"
+  expect_grep "gh not ready" "$glog" "a gh that never answers is LOGGED, not swallowed"
+  expect_grep "NOT 'no open PRs'" "$glog" "the log says explicitly that this is not a zero"
+
+  # 12. MUST NOT LOG - the positive control. gh answers "0": a real quiet repo. Without this, a
+  #     hook that logged "gh not ready" unconditionally would pass case 11 and be worse than the bug.
+  cat > "$SBX_BIN/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+echo 0
+FAKEGH
+  chmod +x "$SBX_BIN/gh" 2>/dev/null
+  : > "$glog"; rm -f "$st"/*
+  pay="{\"session_id\":\"sid-prw-cold3\",\"cwd\":\"$proj\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+  run_hook "$proj" "sid-prw-cold3" "$pay"
+  expect_quiet "zero open PRs stays quiet"
+  expect_nogrep "gh not ready" "$glog" "a genuine zero is NOT reported as a cold gh"
+
+  # 13. MUST LOG - rc=0 but a non-numeric answer is gh malfunctioning, not an empty repo.
+  cat > "$SBX_BIN/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+echo "gh: could not determine current branch"
+FAKEGH
+  chmod +x "$SBX_BIN/gh" 2>/dev/null
+  : > "$glog"; rm -f "$st"/*
+  pay="{\"session_id\":\"sid-prw-cold4\",\"cwd\":\"$proj\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+  run_hook "$proj" "sid-prw-cold4" "$pay"
+  expect_quiet "a garbled gh answer does not fabricate an arm prompt"
+  expect_grep "not read as zero open PRs" "$glog" "a non-numeric answer is classified, not silently treated as zero"
+
+  rm -f "$SBX_BIN/gh" "$ghdir/tries" 2>/dev/null   # the fake must not leak into other cases
   unset PR_WATCH_GUARD_REPO PR_WATCH_GUARD_OPEN PR_WATCH_STATE_DIR
 }
 

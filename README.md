@@ -367,6 +367,28 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-10 (v1.4.1) — a cold `gh` no longer reads as "no open PRs", and a skipped check is no
+  longer a silent one.** `pr-watch-guard.sh` asks `gh` two questions at session start; both answers
+  used to be tested for emptiness and both empty branches `exit 0`ed **without a log line**. The
+  first `gh` call after a long idle is cold, can return empty inside the 8s timeout, and was
+  therefore read as "nothing to watch" — the watcher went unarmed and left no trace of the decision.
+  Three changes, all in that one hook. **(1)** Both calls now go through one wrapper that reads the
+  exit status rather than inferring from the output: a `timeout` kill is reported as a timeout, and
+  since both commands print something on every success (`owner/name`, or a count with `0` spelled
+  out), empty is treated as *unanswered* rather than as zero. **(2)** SessionStart — the cold moment
+  — retries inside a wall-clock budget (`PR_WATCH_GH_TIMEOUT`, `PR_WATCH_GH_TRIES`,
+  `PR_WATCH_GH_BUDGET_SEC`; defaults 8s / 3 tries / 20s, and 1 try elsewhere, so a machine with an
+  unauthenticated `gh` does not pay a retry on every `git push`). **(3)** Every give-up is
+  `gov_log`ged with its reason and says what it is not — `gh not ready - this is NOT 'no open PRs'`.
+  The Stop-hold backstop that made this survivable is unchanged and is still what catches a missed
+  session-start prompt at the first turn-end. Four new selftest cases, deliberately paired: a gh
+  that fails once then answers must still produce the arm prompt; a gh that never answers must be
+  logged; a gh that answers `0` must log **nothing**; a non-numeric answer must be classified, not
+  swallowed. The third is the one that matters — without it, a hook that logged `gh not ready` on
+  every quiet repo would pass and be worse than the bug. Both mutants were run; each is killed by
+  exactly one assertion. Reported from a parallel project, which is the only reason it was found at
+  all: the failure's whole signature was the *absence* of a prompt nobody was waiting for.
+
 - **2026-09-09 (v1.4.0) — PR follow-through: your own open PRs are watched until they merge, by a
   tool the session cannot forget to arm.** Three pieces, all generic. `pr-watch.sh` polls `gh` for
   the caller's open PRs on one repo and prints one line per change (comment, review, +1, CI rollup,

@@ -1305,6 +1305,81 @@ EOF
     printf '      decision (register or delete) cannot go quiet again. Task B11.\n'
   fi
 
+  # ── Every skill in the bundle is actually DISTRIBUTED, and every distributed skill exists ───
+  #
+  # WHY THIS EXISTS. The loop above proves a hook nobody decided about cannot hide. Skills had no
+  # such check, and the gap has now bitten twice. Five skills sat in `bundle/skills/` that
+  # `install.sh` never installed (2026-09-07) — they were also carrying private values into a
+  # public repo, which is how they were finally noticed, not by anyone auditing distribution. Then
+  # `pr-follow-through` shipped at v1.4.0 in neither `CORE_SKILLS` nor `EXTENDED_SKILLS`
+  # (2026-09-09), so the installer copied 14 of 15 and skipped it in silence.
+  #
+  # Both times the same thing was true and misleading: the file WAS in the bundle. **A bundle is
+  # not a manifest.** Presence proves a copy happened; whether anyone receives it lives in a
+  # different file and needs its own measurement. And it is invisible on the machine that built
+  # it, because there the skill is already installed.
+  #
+  # Checked in BOTH directions, because each failure is silent in its own way:
+  #   bundle -> lists : a skill nobody receives (the 2026-09-09 bug)
+  #   lists -> bundle : a skill the installer will look for and not find
+  _sk_inst="$HOME/.claude/governance-installer/install.sh"
+  _sk_dir="$HOME/.claude/governance-installer/bundle/skills"
+  CUR_SCRIPT="bundle/skills (distribution coverage)"
+  if [ ! -f "$_sk_inst" ] || [ ! -d "$_sk_dir" ]; then
+    _bad "every bundled skill is distributed" \
+         "installer not found (install.sh=$_sk_inst, skills=$_sk_dir) — this check examined nothing, which is not agreement"
+  else
+    _sk_core="$(sed -n 's/^CORE_SKILLS="\(.*\)"$/\1/p' "$_sk_inst" 2>/dev/null)"
+    _sk_ext="$(sed -n 's/^EXTENDED_SKILLS="\(.*\)"$/\1/p' "$_sk_inst" 2>/dev/null)"
+    _sk_never=" ${GOV_NEVER_DISTRIBUTE_SKILLS:-wa-cc-bridge wa-cc-poll whatsapp whatsapp-checkpoints end-session} "
+    _sk_listed=" $_sk_core $_sk_ext "
+    _sk_n_bundle=0; _sk_n_listed=0; _sk_unshipped=""; _sk_missing=""; _sk_leaked=""
+    for _sk_p in "$_sk_dir"/*/; do
+      [ -d "$_sk_p" ] || continue
+      _sk_b="$(basename "$_sk_p")"
+      _sk_n_bundle=$((_sk_n_bundle + 1))
+      case "$_sk_listed" in
+        *" $_sk_b "*) ;;
+        *)
+          # Distinguish the two ways a bundled skill can be in no list: forgotten, or one the
+          # private->public crossing was supposed to refuse entry to. Different bug, different fix.
+          case "$_sk_never" in
+            *" $_sk_b "*) _sk_leaked="$_sk_leaked $_sk_b" ;;
+            *)            _sk_unshipped="$_sk_unshipped $_sk_b" ;;
+          esac
+          ;;
+      esac
+    done
+    for _sk_b in $_sk_core $_sk_ext; do
+      _sk_n_listed=$((_sk_n_listed + 1))
+      [ -d "$_sk_dir/$_sk_b" ] || _sk_missing="$_sk_missing $_sk_b"
+    done
+    # Sizes are part of the verdict: "0 unshipped" is producible by a loop that examined nothing.
+    printf '\n  skills in bundle: %s · listed by install.sh: %s (core+extended) · unshipped: %s · listed-but-absent: %s\n' \
+      "$_sk_n_bundle" "$_sk_n_listed" "$(printf '%s' "$_sk_unshipped" | wc -w | tr -d ' ')" \
+      "$(printf '%s' "$_sk_missing" | wc -w | tr -d ' ')"
+    GF_SKILLS_BUNDLE=$_sk_n_bundle; GF_SKILLS_LISTED=$_sk_n_listed
+    if [ "$_sk_n_bundle" -eq 0 ] || [ "$_sk_n_listed" -eq 0 ]; then
+      _bad "every bundled skill is distributed" \
+           "bundle=$_sk_n_bundle listed=$_sk_n_listed — one of them is empty, so this check examined nothing"
+    elif [ -n "$_sk_unshipped" ]; then
+      _bad "every bundled skill is distributed" \
+           "in bundle/skills but in NEITHER CORE_SKILLS nor EXTENDED_SKILLS:$_sk_unshipped — install.sh copies the rest and skips these in silence, and you cannot see it on the machine that built them"
+    else
+      _ok "all $_sk_n_bundle bundled skill(s) are in CORE_SKILLS or EXTENDED_SKILLS"
+    fi
+    if [ -n "$_sk_missing" ]; then
+      _bad "every listed skill exists in the bundle" \
+           "install.sh will look for and not find:$_sk_missing — the reverse gap, equally silent"
+    else
+      _ok "all $_sk_n_listed listed skill(s) exist in bundle/skills"
+    fi
+    if [ -n "$_sk_leaked" ]; then
+      _bad "no never-distributed skill reached the bundle" \
+           "the private->public crossing should have refused these:$_sk_leaked — they carry machine- and client-specific values, and being in no install list is NOT the control that keeps them out"
+    fi
+  fi
+
   # ── Operator tools: not hooks, so the registration loop above never reaches them ────────────
   # A tool that no case executes is exactly the state that made no-local-compute.sh ship an inert
   # exemption for a day (v1.2.1). Call it explicitly.
@@ -1394,6 +1469,8 @@ part_b() {
   gf "hooks_scripts_on_disk: ${GF_HOOKS_DISK:-<not measured>}"
   gf "hooks_registered_in_settings: ${GF_HOOKS_REG:-<not measured>}"
   gf "hooks_orphaned_declared: ${GF_HOOKS_ORPH:-<not measured>}"
+  gf "skills_in_bundle: ${GF_SKILLS_BUNDLE:-<not measured>}"
+  gf "skills_listed_by_installer: ${GF_SKILLS_LISTED:-<not measured>}"
   gf "hooks_undeclared: ${GF_HOOKS_UNDECL:-<not measured>}"
   gf "generated_by: ~/.claude/hooks/governance/governance-selftest.sh"
   gf "project_root: $PROJECT"

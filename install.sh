@@ -24,7 +24,7 @@
 #
 # What gets installed:
 #   ~/.claude/hooks/                 11 governance hook scripts
-#   ~/.claude/skills/                9 core + 5 extended skills
+#   ~/.claude/skills/                10 core + 5 extended skills
 #   ~/.claude/docs/                  3 governance documents (2 guides + handover protocol)
 #   ~/.claude/CLAUDE.md              User-level instructions (if missing or --force)
 #   ~/.claude/settings.json          Hooks merged into existing settings
@@ -141,7 +141,7 @@ gov_read_version_local() { { cat "$CLAUDE_HOME/.governance-version" 2>/dev/null 
 # NEXT-SESSION-HANDOVER.md and its default Definition of Done, which names /pr-to-git as a
 # mandatory bullet — while the skill itself would be absent. A doc that ships in core may only
 # mandate skills that ship in core.
-CORE_SKILLS="bootstrapper context-governance evidence-debugger impact-safe-executor init-governance live-state-orchestrator parallel-session-merge pre-close-check pr-to-git"
+CORE_SKILLS="bootstrapper context-governance evidence-debugger impact-safe-executor init-governance live-state-orchestrator parallel-session-merge pre-close-check pr-to-git pr-follow-through"
 EXTENDED_SKILLS="plan-and-execute qa-sec multi-agents full-finish enable-remote-code"
 
 # ── Uninstall mode ───────────────────────────────────────────────────────────

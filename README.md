@@ -65,7 +65,7 @@ bash ~/.claude/governance-installer/install.sh
 
 | Flag | Effect |
 |---|---|
-| `--core-only` | Install only the 9 core governance skills (skip the 5 extended toolkit skills) |
+| `--core-only` | Install only the 10 core governance skills (skip the 5 extended toolkit skills) |
 | `--force` | Overwrite existing files without prompting |
 | `--dry-run` | Preview what would be installed (no changes) |
 | `--no-claude-md` | Skip CLAUDE.md — keep your existing user instructions |
@@ -118,7 +118,7 @@ runs its offline controls. The flow that uses both is the `pr-follow-through` sk
 value it needs (repos, reviewers, channels) lives in `~/.claude/pr-follow-through/config.local.json`,
 never in the skill — `config.example.json` ships placeholders only.
 
-### Core Skills (9)
+### Core Skills (10)
 - **bootstrapper** — Loads relevant project context for session briefing
 - **context-governance** — Audits context file hygiene (lite + full modes)
 - **evidence-debugger** — Root-cause analysis with confidence grading
@@ -128,6 +128,7 @@ never in the skill — `config.example.json` ships placeholders only.
 - **parallel-session-merge** — Reconciles multi-agent parallel work
 - **pre-close-check** — Parallel-session + drift scan; MANDATORY before any handoff write
 - **pr-to-git** — Review-gate PR loop. Core, not extended, because `bundle/docs/` installs unconditionally and `NEXT-SESSION-HANDOVER.md`'s default Definition of Done names it: a doc that ships in core may only mandate skills that ship in core.
+- **pr-follow-through** — Drives your own open PRs to merge: relays each response, reminds the reviewer on a sane cadence, never self-merges a repo you do not own. Core for the same reason as `pr-to-git`, one step stronger: `pr-watch-guard.sh` is registered **unconditionally** in `settings-hooks.json`, and the text it hands the session names this skill. A hook that ships to everyone may only point at a skill that ships to everyone — otherwise the guard fires on a machine where the flow it names does not exist. It shipped in `bundle/skills/` at v1.4.0 while being in neither list, which is exactly the ship-but-never-install gap described below; caught by measuring the bundle against the two lists rather than trusting either.
 
 ### Extended Skills (5, skipped with `--core-only`)
 - **plan-and-execute** — Multi-agent planning pipeline
@@ -394,6 +395,15 @@ verifies clean. Freshness is the version marker's job, not this gate's.
   OAuth-client fields on that dialog are the wrong road. Plus the detail that costs an hour on its
   own: a custom connector is invisible to the connector list a session sees, and its id is recovered
   by creating a disabled routine with no `mcp_connections`.
+  **Fixed before release, and worth naming because the framework is built to catch exactly it:**
+  `pr-follow-through` shipped in `bundle/skills/` while appearing in neither `CORE_SKILLS` nor
+  `EXTENDED_SKILLS`, so `install.sh` would never have installed it — the same ship-but-never-install
+  gap as the five skills removed on 2026-09-07, and invisible on the machine that built it because
+  the skill was already in `~/.claude/skills`. Found by measuring `bundle/skills/` against the two
+  lists instead of trusting either. It is now core (10 core + 5 extended = 15), for the reason given
+  in the Core Skills list above. The lesson generalises: **a bundle is not a manifest.** Presence in
+  the bundle proves only that a file was copied; whether anyone receives it is a different fact, in
+  a different file, and it needs its own measurement.
 - **2026-09-09 (v1.3.3) — the two Bash-tool guards no longer switch themselves off in silence when `python` is absent.**
   Both `deny-git-bypass.sh` and `no-local-compute.sh` read the tool payload with a one-line
   `python -c`. With no `python` on PATH that yields an empty command, and the very next line exited 0:
@@ -535,7 +545,9 @@ verifies clean. Freshness is the version marker's job, not this gate's.
   block sits at the private->public crossing itself** - deleting the directories is not enough,
   because `_bundle_copy` does `mkdir -p` and the next edit recreates the path. Proven in both
   directions: a `wa-cc-bridge` edit is refused and leaves no bundle directory, a `bootstrapper`
-  edit still syncs. `bundle/skills/` now holds exactly the 14 skills the installer installs.
+  edit still syncs. `bundle/skills/` held exactly the 14 skills the installer installed at the time
+  of this entry — 15 as of v1.4.0, when `pr-follow-through` joined core (see that entry; the count
+  is left as it stood rather than rewritten, because a changelog records what was true then).
   Overridable with `GOV_NEVER_DISTRIBUTE_SKILLS`. The class this closes is the one no scanner can
   close: an identity with no shape (a group name, a client name) is invisible to every rule, so the
   fix is to stop the file carrying it from reaching the public artifact at all.

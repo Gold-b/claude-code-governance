@@ -2,6 +2,59 @@
 
 Portable installer that sets up the full Context Governance architecture at the user level (`~/.claude/`).
 
+## Prerequisites
+
+**To install and run the framework you need only the first row.** Everything below it is optional
+and buys you one specific feature; nothing else degrades when it is absent. The installer refuses
+to run without `node` and says so; the rest is listed here so you can decide before you start
+rather than discover it from a hook at an awkward moment.
+
+| You need | For what | If it is missing |
+|---|---|---|
+| `bash`, `git`, `node` | the framework itself: every hook is bash, 17 hooks shell out to `git`, and `install.sh` merges your `settings.json` with `node` | **install.sh exits.** On Windows use the Git Bash that ships with Git for Windows |
+| `python` (3.x, on `PATH`) | the JSON payload parsing inside the guards | They fall back to a parser-free extraction; if that also fails they print `MALFUNCTION` and exit 1 rather than passing your write through unchecked. Working but noisy — install python |
+| `gh`, authenticated (`gh auth login`) | the `pr-follow-through` skill and its PR watcher | The watcher exits with a message. Nothing else notices |
+| A Slack connector on claude.ai | Slack notifications from a **cloud routine** you create | Routines run; they just cannot post |
+| A GitHub connector on claude.ai | a **cloud routine** acting on repos you do not own | See "GitHub from a cloud routine" below — this one has a real trap in it |
+
+### Secrets and machine-local values — set these up BEFORE your first session
+
+This framework publishes: a `PostToolUse` hook mirrors every edit under `~/.claude/hooks/governance/`
+and `~/.claude/skills/` into the installer bundle, and a `Stop` hook can push that bundle to a public
+repository. **So no tracked file may ever contain a real value.** Three files exist to hold yours,
+all at the `~/.claude` root, which the sync cannot reach by construction:
+
+| File | Holds | Created by |
+|---|---|---|
+| `~/.claude/.governance-local.env` | your governance repo path, your commit identity, any API key or token a hook needs | you — copy the `.example` the installer drops beside it |
+| `~/.claude/.pii-names` | names, client names, group names and codenames the scanner must catch | installer creates it empty; **an empty file means the name scan passes everything** |
+| a skill's own `config.local.json` | per-skill real values (repos, reviewers, channel ids) | you, when a skill asks for one |
+
+`.pii-names` deserves a sentence of its own. A shape-matching scanner cannot detect a name — a
+group name or a client codename scores zero and the scan prints `PASS`. That is how two real leaks
+reached a published repo. Fill this file on day one with every name that must never ship, and treat
+`PASS` as "clean of what I modelled", never as "clean".
+
+### GitHub from a cloud routine (the trap)
+
+Connecting GitHub in the claude.ai connector list authorises the **Claude GitHub App on your own
+account**. A cloud routine can then reach repositories the app is installed on — typically yours,
+not a client organisation's. Declaring a foreign repository as a routine source is refused with
+`HTTP 403 You don't have access to a repository this routine uses`, and there is no `gh` CLI in the
+routine sandbox to work around it.
+
+To reach a repository in an organisation you do not administer, add GitHub's remote MCP server as a
+**custom connector** instead: `https://api.githubcopilot.com/mcp/`, Authentication = **None**, and one
+Additional request header `Authorization: Bearer <your token>`. GitHub's server does not support
+dynamic client registration, so a token is the documented path for third-party hosts — the OAuth
+client fields on that dialog are the wrong road. Use a fine-grained token limited to the one
+repository. The alternative, if you can get it, is for that organisation to install the Claude
+GitHub App.
+
+One more thing worth knowing before you look for it: **a custom connector does not appear in the
+connector list a session sees.** To recover its id, create a disabled routine with no
+`mcp_connections` — the API attaches every connector on the account and returns their ids.
+
 ## Quick Install
 
 ```bash

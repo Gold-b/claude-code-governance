@@ -20,10 +20,10 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (18 scripts, all registered in `~/.claude/settings.json`)
+### Hooks (19 scripts, all registered in `~/.claude/settings.json`)
 
 Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
-is registered on two events, so the table has 19 rows over 18 distinct scripts.
+is registered on two events, so the table has 20 rows over 19 distinct scripts.
 
 | Event | Script | Purpose |
 |---|---|---|
@@ -36,6 +36,7 @@ is registered on two events, so the table has 19 rows over 18 distinct scripts.
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
 | PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
+| PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
 | PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
 | PostToolUse (Edit/Write) | `sync-governance-copies.sh` | Mirrors a governance edit to the other copies; **the private-to-public crossing**, and gated as one |
@@ -301,6 +302,24 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-07 (v1.3.2) — a guard that existed for weeks and ran nowhere is now shipped, registered and tested.**
+  `deny-git-bypass.sh` was written after Fable review #3 to stop `git push --no-verify`,
+  `-c core.hooksPath=`, `HUSKY=0`, and the policed env tokens `GOVERNANCE_HOOKS=0` /
+  `NO_LOCAL_COMPUTE=0` from skipping the committed pre-commit / pre-push scans — and it sat in the
+  live tree **registered in no `settings.json` and absent from the bundle**, so it never ran for
+  anyone. A parallel session found it on 2026-09-09; every claim verified before acting. It is now in
+  the bundle, registered under `PreToolUse` with its own `Bash|PowerShell` matcher (`no-local-compute`
+  is Bash-only, which is the gap this guard closes), covered by a selftest case asserting both
+  directions plus the flag-without-a-git-action case, and **it deliberately does not honour
+  `GOVERNANCE_HOOKS=0` as a disable** — that token is one of the bypasses it polices. Owner override:
+  `DENY_GIT_BYPASS=0`. Added at the same time: a **warning, never a block**, when a repo ships
+  `.githooks/` but `core.hooksPath` is not set — the fresh-clone case, where no flag is needed to
+  skip the scans because they are simply not wired. Nine direct cases plus the advisory in both
+  states, all green. **Stated limit:** it is a regex over the whole command string, so a
+  command that merely *mentions* a policed token beside an action verb (an `echo`, a `printf`
+  building a fixture) is blocked too - it stopped its own author's test command within minutes
+  of going live. Safe direction, loud, override named; kept that way rather than parsing shell.
 
 - **2026-09-07 (v1.3.1) — `no-local-compute.sh` states the limit it hit within an hour of being armed.**
   The marker search starts at the shell's CURRENT directory, and PreToolUse sees that directory

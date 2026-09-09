@@ -306,6 +306,7 @@ case_fn_for() {
     close-report.sh)            echo case_close_report ;;
     close-completeness.sh)      echo case_close_completeness ;;
     no-local-compute.sh)        echo case_no_local_compute ;;
+    deny-git-bypass.sh)         echo case_deny_git_bypass ;;
     *) echo "" ;;
   esac
 }
@@ -378,6 +379,38 @@ case_no_local_compute() {
   pay="{\"session_id\":\"sid-nlc-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"bash .claude/hooks/governance/commit-task-success.sh\"}}"
   run_hook "$proj" "sid-nlc-4" "$pay"
   expect_rc 0 "marked project: governance plumbing is ALLOWED (the 2026-09-06 deadlock fix)"
+}
+
+# --- deny-git-bypass.sh -------------------------------------------------------------------------
+case_deny_git_bypass() {
+  # Existed live since Fable review #3, registered nowhere, shipped nowhere - a police officer at
+  # home. Found by a parallel session 2026-09-09. Both directions asserted: the bypass is blocked,
+  # the clean command and the flag-without-a-git-action are allowed, and the owner override works.
+  local proj="$SBX/dgb-proj"
+  mkdir -p "$proj" 2>/dev/null
+  local pay
+  # 1. MUST BLOCK - push with the bypass flag
+  pay="{\"session_id\":\"sid-dgb-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push --no-verify\"}}"
+  run_hook "$proj" "sid-dgb-1" "$pay"
+  expect_rc 2 "git push --no-verify is BLOCKED"
+  expect_has "BLOCKED" "block names itself so the agent knows what refused"
+  # 2. MUST BLOCK - a policed env token placed inline
+  pay="{\"session_id\":\"sid-dgb-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"GOVERNANCE_HOOKS=0 git commit -m x\"}}"
+  run_hook "$proj" "sid-dgb-2" "$pay"
+  expect_rc 2 "GOVERNANCE_HOOKS=0 inline with git commit is BLOCKED"
+  # 3. MUST ALLOW - the same push with no flag
+  pay="{\"session_id\":\"sid-dgb-3\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\"}}"
+  run_hook "$proj" "sid-dgb-3" "$pay"
+  expect_rc 0 "a clean git push is ALLOWED"
+  # 4. MUST ALLOW - a bypass-shaped token with NO hook-bearing git action. Without this the case
+  #    would pass just as well against a hook that blocks every mention of the token.
+  pay="{\"session_id\":\"sid-dgb-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git status --no-verify\"}}"
+  run_hook "$proj" "sid-dgb-4" "$pay"
+  expect_rc 0 "a bypass token with no push/commit/merge is ALLOWED"
+  # 5. MUST ALLOW - wiring the hooks (no '=' after hooksPath) is exactly what we want people to do
+  pay="{\"session_id\":\"sid-dgb-5\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git config core.hooksPath .githooks\"}}"
+  run_hook "$proj" "sid-dgb-5" "$pay"
+  expect_rc 0 "wiring core.hooksPath is ALLOWED"
 }
 
 # --- canonical-cwd-check.sh ------------------------------------------------------------------

@@ -303,6 +303,20 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-09 (v1.3.3) — the two Bash-tool guards no longer switch themselves off in silence when `python` is absent.**
+  Both `deny-git-bypass.sh` and `no-local-compute.sh` read the tool payload with a one-line
+  `python -c`. With no `python` on PATH that yields an empty command, and the very next line exited 0:
+  the guard was OFF, for that user, for every command, with no message. **Measured, not
+  inferred:** rc=0 on a python-less PATH against a bypass, rc=2 with python. Same class as the B1
+  incident (parser missing means gate open). Fixed the way `pii-gate-pretooluse.sh` already handles
+  it: a python-free fallback that extracts the command from the JSON (no backslashes in the
+  pattern, on purpose - gotcha #359), and if that yields nothing, a **loud `MALFUNCTION` on
+  stderr and exit 1** - advisory-open, never silent, and never exit 2 (blocking every shell command
+  on a python-less machine is how a hook gets disabled). Eight direct assertions green across both
+  hooks and all three tiers, including the fallback still blocking the bypass without python.
+  Found while answering "will it work for every user with certainty" - the answer was no until
+  this landed.
+
 - **2026-09-07 (v1.3.2) — a guard that existed for weeks and ran nowhere is now shipped, registered and tested.**
   `deny-git-bypass.sh` was written after Fable review #3 to stop `git push --no-verify`,
   `-c core.hooksPath=`, `HUSKY=0`, and the policed env tokens `GOVERNANCE_HOOKS=0` /

@@ -100,3 +100,6 @@ tmp/
 CLAUDE.md
 docs/context/
 Plans/
+
+# Google Drive sync scratch dir. Appears at the root of any repo Drive is syncing.
+.tmp.driveupload/

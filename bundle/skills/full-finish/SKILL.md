@@ -462,7 +462,23 @@ Add one-line entries to MEMORY.md for each new/updated memory file.
 
 > **Do NOT render a continuation prompt in this part — it is deferred to Phase 9.1, the last phase.** PART D runs inside Phase 3, i.e. BEFORE Phase 4 commits, Phase 5 releases and Phase 6 deploys. A `/goal` whose Definition of Done includes "merged", "released" or "deployed" is *necessarily* unsatisfied at this point, so rendering here always produces a prompt saying the release is still pending — and nothing later in the pipeline refreshes it, so Phase 7 would display that stale prompt after a successful release. Invoke `/live-state-orchestrator` for the PLAN/MEMORY/OPEN-PROBLEMS/HANDOFF updates as above, and tell it the session is **not ending yet**, so its Step 6.1 skips (`skipped — session not ending`). **Phase 9.1 — the last phase, after the blocking hermetic close — makes the call**, not Phase 7: Phase 8 can still touch a tracked file and Phase 9 can still refuse the close, so any earlier decision is taken before the outcome is final. Phase 9.1 branches on the Phase 9 verdict — PASS + goal met → nothing; BLOCK **while the user is still choosing a recovery** → nothing yet, apply the recovery and re-run Phase 9 (a BLOCK is not automatically a session end); BLOCK **and the session actually ends** (user stopped, or the blocker cannot be resolved here) → `persist` (rewrite `docs/context/NEXT-SESSION-PROMPT.md`); PASS + goal still open → `render-only`, chat only.
 
-Generate a self-contained handoff document in this format:
+Generate a self-contained handoff document in this format.
+
+**The YAML frontmatter is REQUIRED and must come first.** Added 2026-09-13: this template emitted
+handoffs with no lifecycle field, and 22 of 115 handoff files ended up carrying no status at all —
+invisible to every detector, because `close-report.sh` and `pre-close-check` read a frontmatter
+`status:` inside `head -n 12`. A prose `**Status:**` line buys ZERO detector coverage; it must be
+frontmatter. `status` is one of `active | consumed | superseded | archived | parked`, and exactly
+ONE handoff may be `active` at a time (the fixed-path pointer `docs/context/HANDOFF.md` is also
+`active`, as a pointer — that pair is the correct state, not a dual handoff).
+
+```
+---
+status: active
+created_at: [YYYY-MM-DD]
+supersedes: [path to the handoff this one replaces, or omit]
+---
+```
 
 # Session Handoff — [DATE]
 ## TL;DR
@@ -718,6 +734,11 @@ Compile a **Hebrew** summary from all agent outputs:
 If the Docs+Handoff Agent saved it to a memory file, read it with the Read tool and output it verbatim. If not saved to a file, reconstruct it from the agent's output using this template:
 
 ```markdown
+---
+status: active
+created_at: [YYYY-MM-DD]
+supersedes: [path to the handoff this one replaces, or omit]
+---
 # Session Handoff — [DATE]
 **Branch**: [branch] | **Version**: [version] | **Duration**: [estimate]
 

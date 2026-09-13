@@ -31,6 +31,61 @@ gov_disabled && exit 0
 GOV_SYNC_ALL=0
 case "${1:-}" in --sync-all) GOV_SYNC_ALL=1 ;; esac
 
+# --sync-if-drifted (2026-09-14): THE RECONCILER NOW HAS A CALLER.
+# The block further down has correctly described this hook's own blind spot since 2026-09-01 —
+# "PostToolUse does NOT fire for Bash, so a file changed with sed, python, a heredoc, cp or a
+# script is never synced at all" — and it ends by saying drift "needs a reconciler". The
+# reconciler was then written, and NOTHING EVER CALLED IT. A documented gap with a working fix
+# nobody invokes is still an open gap; measured twice in two days, once in this very session:
+# two hooks edited through the Edit tool mirrored instantly, a third edited through a shell
+# splice did not, and no signal was produced at any point.
+#
+# So this mode is registered on Stop. It is cheap on the happy path ON PURPOSE: a `cmp` per file
+# against the installer bundle, stopping at the FIRST difference, no PII scan, no copying. Only
+# when drift actually exists does it fall through to the full --sync-all reconcile, which is the
+# expensive-but-rare path. Session close is the right moment because it is the last instant
+# before a publish can consume the queue.
+# Deliberately NOT a new script: a new script needs its own registration and its own selftest in
+# both directions, and this invariant already belongs to this file. One owner per invariant.
+if [ "${1:-}" = "--sync-if-drifted" ]; then
+  _sid_live_h="$HOME/.claude/hooks/governance"
+  _sid_live_s="$HOME/.claude/skills"
+  _sid_inst="$HOME/.claude/governance-installer/bundle"
+  _sid_drift=""
+  if [ -d "$_sid_inst" ]; then
+    while IFS= read -r _sid_f; do
+      [ -n "$_sid_f" ] || continue
+      _sid_rel="${_sid_f#"$_sid_live_h"/}"
+      _sid_dst="$_sid_inst/hooks/governance/$_sid_rel"
+      # A file the bundle has never carried is NOT drift: the sync is deliberately
+      # "MIRROR, NEVER RESURRECT", so absence there is a decision, not a stale copy.
+      [ -f "$_sid_dst" ] || continue
+      cmp -s "$_sid_f" "$_sid_dst" || { _sid_drift="$_sid_rel"; break; }
+    done <<SIDEOF
+$(find "$_sid_live_h" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) 2>/dev/null | sort)
+SIDEOF
+  fi
+  if [ -z "$_sid_drift" ] && [ -d "$_sid_inst/skills" ]; then
+    while IFS= read -r _sid_f; do
+      [ -n "$_sid_f" ] || continue
+      _sid_rel="${_sid_f#"$_sid_live_s"/}"
+      _sid_dst="$_sid_inst/skills/$_sid_rel"
+      [ -f "$_sid_dst" ] || continue
+      cmp -s "$_sid_f" "$_sid_dst" || { _sid_drift="skills/$_sid_rel"; break; }
+    done <<SIDSEOF
+$(find "$_sid_live_s" -type f -name 'SKILL.md' 2>/dev/null | sort)
+SIDSEOF
+  fi
+  if [ -z "$_sid_drift" ]; then
+    gov_log "sync-governance-copies" "Stop drift check: live and installer bundle agree - nothing to reconcile"
+    exit 0
+  fi
+  gov_log "sync-governance-copies" "Stop drift check: DRIFT at $_sid_rel - a copy was changed outside Edit/Write (Bash, sed, cp, a script). Running the full reconcile."
+  echo "[sync-governance] Drift detected ($_sid_drift). A governance file was changed outside the Edit/Write tools, which this hook cannot see. Reconciling all copies now." >&2
+  GOV_SYNC_ALL=1
+  set -- --sync-all
+fi
+
 # --- Read tool result from stdin (JSON with file_path) ---
 INPUT=$(gov_hook_input)
 if [ -z "$INPUT" ] && [ "$GOV_SYNC_ALL" = "0" ]; then

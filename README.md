@@ -100,6 +100,7 @@ distinct scripts.
 | TaskCompleted | `check-full-finish.sh` | Warns about uncommitted changes |
 | TaskCompleted | `pre-done.sh` | Verification-gate checklist before a task counts as done |
 | TaskCompleted | `check-docs-updated.sh` | Warns when code changed and the docs did not |
+| Stop | `sync-governance-copies.sh --sync-if-drifted` | Runs **first**, before the gated push can consume the queue: one `cmp` per governance file against the installer bundle, silent when they agree. On drift — the shape a `sed`/`cp`/script edit leaves, which the PostToolUse mirror cannot see — it reconciles every copy and says so (v1.5.0) |
 | Stop | `end-session.sh` | Session-end handoff, and the gated push of the framework bundle |
 | Stop | `close-completeness.sh` | Integrity warnings a closing summary cannot produce for itself |
 | Stop | `close-report.sh` | Generates the closing summary **from the canonical files**, so an unrecorded claim cannot appear in it |
@@ -366,6 +367,47 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-14 (v1.5.0) - a guard that could be talked out of it, a reconciler nobody called, and
+  a verdict that outlived its tree.** Five defects, four of them the same shape: a control that
+  reported health it had not measured.
+  **(1) `no-local-compute.sh` could be bypassed by appending a harmless token.** Its allow-list was
+  an OR over the whole command string, unanchored, evaluated before the deny test, so
+  `python tools/x.py && bash -n /dev/null` matched `bash -n` and ran. Four bypass shapes were
+  measured against the old hook: all four allowed, while the plain blocked command still returned
+  rc=2 - every existing test passed. The decision is now made **per shell segment**: an allow token
+  excuses only the segment it sits in, one denied segment denies the line, and the split
+  deliberately over-splits because an extra segment can only cause a false block.
+  **(2) `sync-governance-copies.sh` now has a caller.** It is PostToolUse on `Edit|Write`, so a file
+  changed by `sed`, `python`, `cp` or a heredoc was never mirrored, silently. The file has described
+  that gap since 2026-09-01 and ends "it needs a reconciler"; the reconciler was written and nothing
+  invoked it for thirteen days. New `--sync-if-drifted` mode, registered **first on `Stop`**: one
+  `cmp` per file, stopping at the first difference, silent when clean, falling through to the full
+  reconcile only when drift exists.
+  **(3) `governance-selftest.result` no longer outlives the tree it describes.** Only the Stop hook
+  wrote it, so a manual run left the previous evening's `verdict=GREEN` on disk beside a fresh red
+  log. A direct run now **invalidates** rather than certifies (`verdict=UNKNOWN` plus the observed
+  counts under a name no reader mistakes for a verdict), and every verdict carries a
+  `hooks_fingerprint` with the project HEAD and dirty flag, so "is this about the current tree?" is
+  a string comparison instead of an inference from a timestamp.
+  **(4) `canonical-cwd-check.sh` cleans cloud-sync artefacts out of `.git`.** On a OneDrive / Google
+  Drive / Dropbox folder, the client writes a `desktop.ini` into every directory including `.git`,
+  where `.gitignore` cannot reach. Measured here: 241 of them, one under `.git/refs`, and the effect
+  was `fatal: bad object` on every fetch while `git rev-list origin/master...HEAD` kept answering
+  `0 0` from the stale ref - which reads as "already pushed". Removing them is safe by construction:
+  git never creates a file by that name.
+  **(5) `full-finish` handoff templates now require YAML frontmatter with `status`.** A prose
+  `**Status:**` line buys zero detector coverage - `close-report.sh` and `pre-close-check` read a
+  frontmatter `status:` inside `head -n 12` - and 22 of 115 handoffs in one project carried no
+  lifecycle field at all because the template never emitted one.
+  Also in: `selftest-advisory-stop.sh` stopped suppressing the GENERATED-FACTS write for an
+  *explicit* project root (an ambiguous root must never be written to; an explicit one is not
+  ambiguous, and the file had been frozen for days while declaring itself authoritative), plus four
+  repaired extractors in the suite. Fourteen new selftest assertions, each paired with its opposite:
+  every bypass token is asserted to still work on its own, the drift check is asserted to stay
+  **silent** when clean, and a clean `.git` is asserted to print nothing. Suite: pass=229 fail=0
+  uncovered=0. Defects 1, 2, 3 and 5 were found and handed over by a parallel session on another
+  project; 4 was found by this one, four days after a push it had verified.
 
 - **2026-09-10 (v1.4.1) — a cold `gh` no longer reads as "no open PRs", and a skipped check is no
   longer a silent one.** `pr-watch-guard.sh` asks `gh` two questions at session start; both answers

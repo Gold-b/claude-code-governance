@@ -206,9 +206,14 @@ expect_nogrep() { if grep -qF "$1" "$2" 2>/dev/null; then _bad "$3" "[$1] must N
 # $1 script, $2 cwd, $3 session id, $4 stdin payload
 _run() {
   local script="$1" cwd="$2" sid="${3:-selftest-sid}" payload="$4"
+  # Args 5+ are passed THROUGH to the script (2026-09-14). Some hooks branch on a CLI flag as well
+  # as on the payload — sync-governance-copies.sh has `--sync-all` and `--sync-if-drifted` — and a
+  # runner that silently dropped them would run the default path while the case name claimed
+  # otherwise: a green with no relation to the thing named in it.
+  local extra=(); [ "$#" -gt 4 ] && { shift 4; extra=("$@"); }
   : > "$IO_OUT"; : > "$IO_ERR"
-  local runner=(bash "$script")
-  [ "$HAVE_TIMEOUT" = 1 ] && runner=(timeout 60 bash "$script")
+  local runner=(bash "$script" ${extra[@]+"${extra[@]}"})
+  [ "$HAVE_TIMEOUT" = 1 ] && runner=(timeout 60 bash "$script" ${extra[@]+"${extra[@]}"})
   ( cd "$cwd" 2>/dev/null || exit 97
     printf '%s' "$payload" | env \
       HOME="$SBX_HOME" USERPROFILE="$SBX_HOME" \
@@ -381,6 +386,28 @@ case_no_local_compute() {
   pay="{\"session_id\":\"sid-nlc-4\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"bash .claude/hooks/governance/commit-task-success.sh\"}}"
   run_hook "$proj" "sid-nlc-4" "$pay"
   expect_rc 0 "marked project: governance plumbing is ALLOWED (the 2026-09-06 deadlock fix)"
+
+  # --- THE BYPASS (2026-09-14) -----------------------------------------------------------------
+  # The allow-list used to be an OR over the WHOLE command string, evaluated BEFORE the deny test,
+  # with most alternatives unanchored. So one innocuous token anywhere on the line excused
+  # everything else on it, and cases 1-4 above all still passed. A guard is not tested by the
+  # commands people mean to run; it is tested by the ones they can smuggle. Both directions here:
+  # the smuggling must fail, and each of the smuggled-in tokens must still work ON ITS OWN --
+  # otherwise the fix would just be a blanket block wearing a fix's clothes.
+  local c
+  for c in "node run-analysis.js && bash -n /dev/null" \
+           "ssh root@203.0.113.10 true && node run-analysis.js" \
+           "git status; python scripts/pull.py" \
+           "echo starting && bash tools/build.sh"; do
+    pay="{\"session_id\":\"sid-nlc-b\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$c\"}}"
+    run_hook "$proj" "sid-nlc-b" "$pay"
+    expect_rc 2 "an allowed token on the same line does NOT unlock project compute: $c"
+  done
+  for c in "bash -n /dev/null" "git status" "pytest -q" "cat a.txt | grep x | wc -l"; do
+    pay="{\"session_id\":\"sid-nlc-a\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$c\"}}"
+    run_hook "$proj" "sid-nlc-a" "$pay"
+    expect_rc 0 "the same token ALONE is still allowed (the fix is per-segment, not a blanket block): $c"
+  done
 }
 
 # --- deny-git-bypass.sh -------------------------------------------------------------------------
@@ -568,6 +595,32 @@ case_canonical_cwd() {
   run_hook "$good" "sid-cwd-3" "$(pl_session_win "$good" sid-cwd-3)"
   expect_rc 0 "canonical copy: allowed"
   expect_quiet "canonical copy: prints nothing"
+
+  # --- SIGNAL 4: cloud-sync artefacts inside .git (2026-09-14) ---------------------------------
+  # A `desktop.ini` under .git/refs makes every fetch fail while ahead/behind keeps answering
+  # from the stale ref — i.e. it reads as "already pushed". Both directions, and the second one
+  # is the one that matters: a clean .git must stay SILENT, or the alarm becomes background noise
+  # on every Windows machine and gets ignored exactly when it is real.
+  # ITS OWN DIRECTORY, not $SBX/proj. Learned the hard way while writing this case: $SBX/proj is a
+  # SHARED fixture, and case_collision_record guards its setup with `[ -d "$repo/.git" ] || git
+  # init`. Creating a hollow .git here (directories, no repo) therefore made that case skip its
+  # init, so the collision hooks saw no git repo, recorded no claim, and FOUR unrelated assertions
+  # went red in two other cases. A fixture that another case reuses is shared state; treat writing
+  # into it exactly as you would treat a global.
+  local cwdgit="$SBX/cwd-gitprobe"
+  rm -rf "$cwdgit" 2>/dev/null; mkdir -p "$cwdgit/.git/refs/heads" "$cwdgit/.git/objects/ab" 2>/dev/null
+  fx_project "$cwdgit" SOURCE "$(_winform "$cwdgit")"
+  printf '[.ShellClassInfo]\n' > "$cwdgit/.git/refs/desktop.ini"
+  printf '[.ShellClassInfo]\n' > "$cwdgit/.git/objects/ab/desktop.ini"
+  run_hook "$cwdgit" "sid-cwd-4" "$(pl_session_win "$cwdgit" sid-cwd-4)"
+  expect_rc 0 "cloud-sync artefacts: advisory, never blocks the session"
+  expect_has "CLOUD-SYNC ARTEFACTS IN .git" "a sync client writing into .git is REPORTED"
+  expect_nofile "$cwdgit/.git/refs/desktop.ini" "the artefact under .git/refs is removed (git never creates one)"
+  expect_nofile "$cwdgit/.git/objects/ab/desktop.ini" "artefacts deeper in .git are removed too"
+
+  run_hook "$cwdgit" "sid-cwd-5" "$(pl_session_win "$cwdgit" sid-cwd-5)"
+  expect_not "CLOUD-SYNC ARTEFACTS IN .git" "a clean .git says NOTHING — the alarm must not fire on every run"
+  rm -rf "$cwdgit" 2>/dev/null
 }
 
 # --- pre-session.sh ---------------------------------------------------------------------------
@@ -761,6 +814,27 @@ case_sync_copies() {
   run_hook "$src" "sid-sc-2" "$(pl_post "$src" sid-sc-2 "$proj_js")"
   expect_rc 0 "project file: allowed"
   expect_nofile "$other" "project file is NOT mirrored into the bundle"
+
+  # --- --sync-if-drifted, the Stop caller (2026-09-14) -----------------------------------------
+  # This hook is PostToolUse on Edit|Write, so a file changed by a SCRIPT (sed, python, cp, a
+  # heredoc) is never mirrored and nothing says so. The file's own comment has described that
+  # since 2026-09-01 and ends "it needs a reconciler"; the reconciler was then written and
+  # NOTHING CALLED IT. This mode is the caller, registered on Stop.
+  # Both directions, and the clean one is load-bearing: a Stop hook that speaks on every close
+  # trains the operator to skip its output, which is how a real drift goes unread.
+  local live_h="$SBX_HOME/.claude/hooks/governance"
+  local inst_h="$SBX_HOME/.claude/governance-installer/bundle/hooks/governance"
+  mkdir -p "$live_h" "$inst_h" 2>/dev/null
+  printf 'echo same\n' > "$live_h/drift-probe.sh"
+  cp "$live_h/drift-probe.sh" "$inst_h/drift-probe.sh"
+
+  _run "$CUR_SCRIPT" "$src" "sid-sc-3" '{"hook_event_name":"Stop"}' --sync-if-drifted
+  expect_quiet "no drift: the Stop check is SILENT (it must not speak on every close)"
+
+  printf 'echo CHANGED BY A SCRIPT, not by Edit/Write\n' > "$live_h/drift-probe.sh"
+  _run "$CUR_SCRIPT" "$src" "sid-sc-4" '{"hook_event_name":"Stop"}' --sync-if-drifted
+  expect_has "Drift detected" "a copy changed outside Edit/Write IS detected at Stop"
+  expect_grep "CHANGED BY A SCRIPT" "$inst_h/drift-probe.sh" "and the stale copy is reconciled, not merely reported"
 }
 
 # --- file-collision-record.sh -----------------------------------------------------------------
@@ -1518,7 +1592,7 @@ gf() { printf '%s\n' "$1" >> "$BLOCK"; }
 claim_check() {  # $1 label, $2 measured, $3 claimed (may be empty), $4 where
   CUR_SCRIPT="$4"
   if [ -z "$3" ]; then
-    _ok "$1: no claim found in $4 (nothing to contradict)"
+    _bad "$1" "NO-CLAIM: nothing extracted from $4 - an empty input is not a pass. Either the document states this claim and the extractor is broken, or the claim was removed and this check must be deleted. Measured value: $2"
   elif [ "$2" = "$3" ]; then
     _ok "$1: $4 claims $3, measured $2"
   else
@@ -1624,12 +1698,32 @@ part_b() {
   op_lines=$(wc -l < "$PROJECT/MDs/Open-Problems.md" 2>/dev/null | tr -d ' ')
   gf "claude_md_lines: ${cm_lines:-0}"
   gf "open_problems_lines: ${op_lines:-0}"
-  # The manifest states Open-Problems.md as "~409 lines" / "409 lines". Compare against the
-  # measured value; a stale size claim is how a reader mis-budgets a selective context load.
-  local op_claim
-  op_claim=$(grep -oE 'Open-Problems\.md[^|]*—?[[:space:]]*~?[0-9]+ lines' "$PROJECT/docs/context/CONTEXT-MANIFEST.md" 2>/dev/null \
-             | grep -oE '[0-9]+ lines' | head -1 | tr -dc '0-9')
-  claim_check "MDs/Open-Problems.md line count" "${op_lines:-0}" "$op_claim" "docs/context/CONTEXT-MANIFEST.md"
+  # Every hand-written size claim about Open-Problems.md, in the manifest AND in the pointer.
+  # Three bugs were fixed here on 2026-09-13, each of which produced a GREEN over a real drift:
+  #  (1) the pointer was never in the input set, so it carried "~409 lines" against 3,162 for months;
+  #  (2) the em dash was written as one optional character under a BYTE-oriented ERE, so the `?`
+  #      quantified only the last byte of a 3-byte sequence and the pattern demanded bytes that
+  #      cannot appear - the extraction returned empty and claim_check rendered empty as _ok;
+  #  (3) `head -1` over a single file let a correct number in one place mask a wrong one in another.
+  local _sz_scanned=0 _sz_found=0 _szf _szclaims _szc
+  for _szf in "$PROJECT/docs/context/CONTEXT-MANIFEST.md" "$PROJECT/docs/context/OPEN-PROBLEMS.md"; do
+    [ -f "$_szf" ] || continue
+    _sz_scanned=$((_sz_scanned+1))
+    # A markdown table row puts the filename and its size in DIFFERENT cells, so a [^|] gap can
+    # never cross the cell boundary — manifest line 72 was invisible to the first repair of this
+    # check. Select the LINE, then extract every size claim on it; grep is already line-scoped.
+    _szclaims=$(grep -E 'Open-Problems\.md' "$_szf" 2>/dev/null | grep -oE '[0-9][0-9,]* lines' | tr -d "," | grep -oE '[0-9]+')
+    for _szc in $_szclaims; do
+      _sz_found=$((_sz_found+1))
+      claim_check "Open-Problems.md size claim $_sz_found" "${op_lines:-0}" "$_szc" "${_szf#$PROJECT/}"
+    done
+  done
+  CUR_SCRIPT="docs/context/CONTEXT-MANIFEST.md"
+  if [ "$_sz_found" -eq 0 ]; then
+    _bad "Open-Problems.md size claims" "NO-CLAIM: scanned $_sz_scanned file(s) and extracted 0 size claims - an empty input set is never a pass"
+  else
+    _ok "Open-Problems.md size claims: scanned $_sz_scanned file(s), found $_sz_found claim(s), measured ${op_lines:-0} lines"
+  fi
 
   # --- God Mode tool count ------------------------------------------------------------------
   local gm_measured=""
@@ -1643,12 +1737,20 @@ part_b() {
   else
     _ok "God Mode tool count measured by execution: $gm_measured"
     local c
-    c=$(grep -oE 'getToolNames\(\)\.length` = [0-9]+' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '[0-9]+$' | head -1)
+    # CLAUDE.md writes this as: admin processes with **93 tools** (source of truth = getToolNames().length).
+    # The old pattern required the literal "getToolNames().length` = N", which the document has never
+    # written - it extracted nothing, and the empty result was rendered as a PASS over an unchecked number.
+    c=$(grep -oE '\*\*[0-9]+ tools\*\*' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '[0-9]+' | head -1)
     claim_check "God Mode tools (self-declaring claim)" "$gm_measured" "$c" "CLAUDE.md"
     c=$(grep -oE '[0-9]+ God Mode tools reference' "$PROJECT/CLAUDE.md" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
     claim_check "God Mode tools (doc map)" "$gm_measured" "$c" "CLAUDE.md Documentation Map"
-    c=$(grep -oE '[0-9]+ God Mode tools reference' "$PROJECT/docs/context/CONTEXT-MANIFEST.md" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
-    claim_check "God Mode tools (manifest)" "$gm_measured" "$c" "docs/context/CONTEXT-MANIFEST.md"
+    # The manifest row for God-Mode-Capabilities.md deliberately states NO number: it reads
+    # "(see file for current count)" and says in the same cell "Do NOT hard-code the tool count
+    # here - it has gone stale twice (this row said 65, CLAUDE.md said 84)". That is the correct
+    # pattern, so there is nothing here to contradict and this call site was DELETED on 2026-09-13.
+    # It is not an oversight: once claim_check stopped rendering an empty extraction as a PASS,
+    # a check aimed at a document that is deliberately silent could only ever report a false red.
+    # If a number is ever reintroduced into that row, restore a check for it in the same commit.
   fi
 
   # --- admin/lib module inventory vs FILE-ROLES.md -------------------------------------------
@@ -1732,6 +1834,37 @@ part_b() {
     _ok "all $_ctl_n canonical document(s) are free of control bytes"
   fi
 
+  # --- a version-bearing line must carry exactly ONE version literal -------------------------
+  # WHY (2026-09-13). sync-governance.sh Steps 4a-4d rewrite an ANCHORED LEADING TOKEN with sed:
+  # `**Project version:** v1.2.3` and `Project version: **v1.2.3**`. The expression terminates at
+  # that token, so it structurally CANNOT reach a second version literal later on the same line.
+  # Measured: PLAN.md line 10 read "**Project version:** v1.4.206 - `version.json` reads **1.4.205**"
+  # and MEMORY.md's twin had a body frozen at a v1.4.194 measurement while its header had been
+  # rewritten twelve times. A prior TEXT-ONLY repair (fd4364f, "release consistency") re-drifted
+  # inside one day, which is why this is a check that FAILS and not another warning: the prose must
+  # carry one maintained literal and no unmaintained ones, or the hook will contradict it again at
+  # the next release. The fix when this goes red is to DELETE the extra literal, never to hand-edit
+  # it to today's value - a literal no mechanism maintains is the same defect with a later date.
+  local _vl_file _vl_line _vl_n _vl_checked=0
+  for _vl_file in "$PROJECT/Plans/PLAN.md" "$PROJECT/docs/context/MEMORY.md"; do
+    [ -f "$_vl_file" ] || continue
+    _vl_line=$(grep -m1 -E '(\*\*)?Project version:' "$_vl_file" 2>/dev/null)
+    [ -n "$_vl_line" ] || continue
+    _vl_checked=$((_vl_checked+1))
+    _vl_n=$(printf '%s' "$_vl_line" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | sort -u | wc -l | tr -d ' ')
+    CUR_SCRIPT="${_vl_file#$PROJECT/}"
+    if [ "$_vl_n" = "1" ]; then
+      _ok "${_vl_file#$PROJECT/} Project-version line carries exactly one version literal (the one the hook maintains)"
+    else
+      _bad "${_vl_file#$PROJECT/} Project-version line carries exactly one version literal" \
+           "found $_vl_n distinct version literals on that line: $(printf '%s' "$_vl_line" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ')- sync-governance.sh maintains only the leading token, so every other literal on this line is frozen and will contradict it"
+    fi
+  done
+  CUR_SCRIPT="Project-version lines"
+  if [ "$_vl_checked" -eq 0 ]; then
+    _bad "Project-version lines were found to check" "scanned 2 file(s) and found NO Project-version line - an empty input set is never a pass"
+  fi
+
   # --- release identity: version.json vs the tag on HEAD -------------------------------------
   local vj tag
   vj=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$PROJECT/version.json" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')
@@ -1784,6 +1917,51 @@ printf '  project:  %s\n' "$PROJECT"
 printf '  sandbox:  %s (HOME is redirected here for every hook run)\n' "$SBX"
 printf '  mutation: %s\n' "$([ "$DO_MUTATION" = 1 ] && echo on || echo off)"
 
+# ── .result: a DIRECT run invalidates it, it never writes a verdict ──────────────────────────
+# Fixed 2026-09-14 (was Gold-B Open-Problem #133). `~/.claude/logs/governance-selftest.result` is
+# the artifact a reader treats AS the verdict, and only selftest-advisory-stop.sh used to write it.
+# So a manual run left the previous evening's `verdict=GREEN` sitting on disk next to a fresh red
+# log — measured: a run finishing pass=239 fail=3 beside a .result reading pass=242 fail=0, while
+# GENERATED-FACTS.md HAD been refreshed by that same run. One invocation, two artifacts, and the
+# one shaped like a verdict was the wrong one. A manual run is what you do right after changing
+# something, which is exactly when a stale green is most convincing.
+#
+# The fix is deliberately asymmetric: a direct run INVALIDATES, it does not certify. Writing
+# `verdict=UNKNOWN` can never accidentally report a pass, whereas writing a real verdict from here
+# could — a direct run may be scoped (--no-mutation, a different GOV_SELFTEST_PROJECT) and its
+# counts are not comparable to the hook's. The observed summary is still recorded, as data under a
+# name no reader mistakes for a verdict. Ownership stays with the hook.
+#
+# Invalidation happens BEFORE the suite runs, on purpose: if this run crashes half way, .result is
+# UNKNOWN rather than a stale GREEN. Failing toward "I do not know" is the whole point.
+_gov_tree_id() {   # three identity lines; answers "is this verdict even about the current tree?"
+  local hf ph pd
+  hf=$(find "$HOOKS_ROOT" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) 2>/dev/null \
+       | LC_ALL=C sort | xargs cat 2>/dev/null | sha256sum 2>/dev/null | cut -c1-12)
+  [ -n "$hf" ] || hf=unknown
+  if [ -n "${PROJECT:-}" ] && [ -d "$PROJECT/.git" ]; then
+    ph=$("$REAL_GIT" -C "$PROJECT" rev-parse --short HEAD 2>/dev/null); [ -n "$ph" ] || ph=none
+    if [ -n "$("$REAL_GIT" -C "$PROJECT" status --porcelain 2>/dev/null)" ]; then pd=yes; else pd=no; fi
+  else ph=none; pd=unknown; fi
+  printf 'hooks_fingerprint=%s\nproject_head=%s\nproject_dirty=%s\n' "$hf" "$ph" "$pd"
+}
+_gov_write_result() {   # $1 = state word, $2 = summary line
+  local rf="$HOME/.claude/logs/governance-selftest.result" tmp
+  [ -n "${GOV_SELFTEST_SBX:-}" ] && return 0    # a sandboxed run must never touch the real file
+  mkdir -p "$(dirname "$rf")" 2>/dev/null
+  tmp="$rf.tmp.$$"
+  {
+    printf 'verdict=UNKNOWN\n'
+    printf 'reason=%s\n' "$1"
+    printf 'written_by=governance-selftest.sh (direct run — invalidates, does not certify)\n'
+    printf 'finished=%s\n' "$(date +%s)"
+    printf 'project=%s\n' "${PROJECT:-<none>}"
+    _gov_tree_id
+    printf 'direct_run_summary=%s\n' "$2"
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$rf" 2>/dev/null
+}
+_gov_write_result "a direct run started; any previous verdict is void" "(run in progress)"
+
 part_a
 part_b
 
@@ -1795,6 +1973,14 @@ if [ -n "$UNCOV_LOG" ]; then
   printf 'UNCOVERED (executed nowhere — NOT green)\n%s\n\n' "$UNCOV_LOG"
 fi
 printf '[governance-selftest] pass=%s fail=%s uncovered=%s\n' "$PASS" "$FAIL" "$UNCOV"
+
+# A DIRECT RUN OF THIS SUITE INVALIDATES ~/.claude/logs/governance-selftest.result — it does not
+# write a verdict there. See the long note beside `_gov_write_result` above for why the asymmetry
+# is deliberate. The line printed just above, and the log, are this run's real output; .result now
+# says UNKNOWN and carries the tree fingerprint, so the next reader can see that the last real
+# verdict (owned by selftest-advisory-stop.sh) is older than the tree it claimed to describe.
+_gov_write_result "last run was direct, not the Stop hook; no verdict is claimed" \
+  "[governance-selftest] pass=$PASS fail=$FAIL uncovered=$UNCOV"
 
 if [ "$FAIL" -gt 0 ] || [ "$UNCOV" -gt 0 ]; then exit 1; fi
 exit 0

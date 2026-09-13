@@ -47,25 +47,45 @@ while [ -n "$ROOT" ] && [ "$ROOT" != "/" ]; do
 done
 [ -z "$MARK" ] && exit 0
 SERVERS="$(grep -vE '^\s*#|^\s*$' "$MARK" | tr '\n' ' ')"
-if printf '%s' "$CMD" | grep -qE '^\s*(ssh|scp)\b' ; then
-  # scp from a server's data/research dir to a local path = a local data pull -> block
-  if printf '%s' "$CMD" | grep -qE 'scp .*@[^ ]+:[^ ]*/(var/lib|research)[^ ]* +("?\$HOME|~|/c/|[A-Za-z]:|\.)' ; then
+# PER-SEGMENT EVALUATION (2026-09-14). This replaces three whole-string tests that ran in sequence,
+# and it closes a real bypass in this guard. The allow test used to be an OR over the ENTIRE command
+# string with most alternatives unanchored, and it ran BEFORE the deny test, so any harmless-looking
+# token anywhere in the line excused everything else on it:
+#     python tools/backfill.py && bash -n /dev/null     -> matched `bash -n`,   whole command allowed
+#     ssh box && python tools/backfill.py               -> matched `^\s*ssh`,   whole command allowed
+# An allow-list satisfied by any substring anywhere is not a guard. The command is now split on shell
+# separators and EVERY segment is judged on its own: ONE segment of project compute blocks the whole
+# command, whatever the other segments look like, and an allow token excuses only the segment it sits
+# in. Order inside a segment preserves the original semantics exactly - data-pull first (it must beat
+# the ssh/scp allowance), then allow, then deny.
+# The split is deliberately naive about quoting, and that is the SAFE direction: a separator inside a
+# quoted string yields extra segments, and an extra segment can only ever cause a false BLOCK, never
+# a false ALLOW. Same stance as the `cd` limit stated above - fail toward refusing.
+ALLOW_GOV='(^|[;&| /])(commit-task-success|end-session|pre-session|pre-task|post-milestone|governance-guard|close-completeness|check-full-finish)\.sh\b'
+# `hooks/governance/` is allowed by INTENT, not as an exception: this hook exists to stop PROJECT
+# compute, and a governance hook is not project compute - it lives in ~/.claude, reads the repo, and
+# writes only to logs and governance docs. Naming scripts one at a time was the wrong shape; it took
+# two rounds (governance-selftest.sh on 2026-09-13, close-report.sh at a session close on 2026-09-14)
+# to see that the category, not the filename, is what belongs here.
+ALLOW_GEN='pytest|--selftest|hooks/governance/|unittest|ast\.parse|py_compile|bash -n|^[[:space:]]*(ssh|scp)\b|^[[:space:]]*(git|gh|ls|cat|grep|sed|awk|head|tail|wc|du|rm|mkdir|cp|mv|echo|date|stat|find|diff|node [^ ]*send\.js|timeout [0-9]+ bash )'
+DENY_PULL='scp .*@[^ ]+:[^ ]*/(var/lib|research)[^ ]* +("?\$HOME|~|/c/|[A-Za-z]:|\.)'
+DENY_COMPUTE='(^|[;&| ])(python[0-9.]*|node|bash|sh)[[:space:]]+[^ ]*(tools/|strategies/|scripts/|\.py\b|\.js\b|\.sh\b)'
+
+# The while loop reads from a HERE-DOC, not a pipe, so it runs in THIS shell and `exit 2` really
+# exits. A `cmd | while ...` here would block nothing at all: the exit would leave the subshell only.
+while IFS= read -r SEG; do
+  case "$SEG" in *[![:space:]]*) ;; *) continue ;; esac
+  if printf '%s' "$SEG" | grep -qE "$DENY_PULL" ; then
     echo "[no-local-compute] BLOCKED: pulling server data to the PC. Process it on the server and bring back only the report. Servers: $SERVERS" >&2
     exit 2
   fi
-  exit 0
-fi
-# .claude/hooks/governance/* are governance plumbing, NOT project compute. Blocking them once
-# deadlocked a session: governance-guard demanded a re-issued success token, and the only way to
-# issue one is a local governance script this hook refused to run (2026-09-06, owner approved).
-if printf '%s' "$CMD" | grep -qE '(^|[;&| /])(commit-task-success|end-session|pre-session|pre-task|post-milestone|governance-guard|close-completeness|check-full-finish)\.sh\b' ; then
-  exit 0
-fi
-if printf '%s' "$CMD" | grep -qE 'pytest|--selftest|unittest|ast\.parse|py_compile|bash -n|^\s*(git|gh|ls|cat|grep|sed|awk|head|tail|wc|du|rm|mkdir|cp|mv|echo|date|stat|find|diff|node [^ ]*send\.js|timeout [0-9]+ bash )' ; then
-  exit 0
-fi
-if printf '%s' "$CMD" | grep -qE '(^|[;&| ])(python[0-9.]*|node|bash|sh)\s+[^ ]*(tools/|strategies/|scripts/|\.py\b|\.js\b|\.sh\b)' ; then
-  echo "[no-local-compute] BLOCKED: this project runs scripts ONLY on its remote servers (owner rule 2026-09-06). Allowed locally: pytest / --selftest / syntax checks / git / ssh. Re-route to: $SERVERS" >&2
-  exit 2
-fi
+  printf '%s' "$SEG" | grep -qE "$ALLOW_GOV" && continue
+  printf '%s' "$SEG" | grep -qE "$ALLOW_GEN" && continue
+  if printf '%s' "$SEG" | grep -qE "$DENY_COMPUTE" ; then
+    echo "[no-local-compute] BLOCKED: this project runs scripts ONLY on its remote servers (owner rule 2026-09-06). Allowed locally: pytest / --selftest / syntax checks / git / ssh. The block is per-segment, so adding an allowed command to this line will NOT unlock it. Re-route to: $SERVERS" >&2
+    exit 2
+  fi
+done <<SEGMENTS
+$(printf '%s' "$CMD" | tr ';&|' '\n\n\n')
+SEGMENTS
 exit 0

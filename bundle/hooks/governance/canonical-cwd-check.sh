@@ -158,4 +158,26 @@ if [ -f "$MANIFEST" ] && [ -f "$ROOT_DIR/CLAUDE.md" ]; then
     fi
   fi
 fi
+
+# ── SIGNAL 4: a cloud-sync client is writing INSIDE .git (2026-09-14) ─────────────────────────
+# GOTCHAS #11 already warns that a working copy on a cloud-sync mount may be a stale duplicate.
+# This is the same mount, doing something worse and much quieter: OneDrive / Google Drive /
+# Dropbox drop a `desktop.ini` into every folder they touch, and `.git/` is a folder like any
+# other. `.gitignore` cannot help — git never applies it inside `.git`.
+# Measured here 2026-09-14: 241 of them under `.git/`, one of them at `.git/refs/desktop.ini`,
+# and the effect was `fatal: bad object refs/desktop.ini` on every fetch. What makes it dangerous
+# is not the breakage, it is the SHAPE of the breakage: `git fetch` failed, `git rev-list
+# origin/master...HEAD` then answered "0 0" from the STALE local ref, and that "0 0" reads exactly
+# like "everything is pushed". A broken sync that answers confidently is worse than one that hangs.
+# The clean-up is safe by construction: git itself never creates a file called desktop.ini, so
+# every one of them is foreign. Remove them, say how many, and let the run continue.
+if [ -d "$ROOT_DIR/.git" ]; then
+  CS_N=$(find "$ROOT_DIR/.git" -name 'desktop.ini' -type f 2>/dev/null | wc -l | tr -d ' ')
+  case "$CS_N" in ''|*[!0-9]*) CS_N=0 ;; esac
+  if [ "$CS_N" -gt 0 ]; then
+    find "$ROOT_DIR/.git" -name 'desktop.ini' -type f -delete 2>/dev/null
+    CS_LEFT=$(find "$ROOT_DIR/.git" -name 'desktop.ini' -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "[CANONICAL-CWD-CHECK] ⚠️ CLOUD-SYNC ARTEFACTS IN .git — removed $CS_N desktop.ini file(s) from '$ROOT_DIR/.git' (${CS_LEFT:-?} left). A sync client (OneDrive/Google Drive/Dropbox) is writing into this repository's git metadata; one under .git/refs makes EVERY fetch fail while ahead/behind still answers from the stale ref, which reads as 'already pushed'. This will come back until the repository is moved off the synced folder or excluded from sync. Verify remote state against the pushed ref, not the local one, until then. (GOTCHAS #11.)"
+  fi
+fi
 exit 0

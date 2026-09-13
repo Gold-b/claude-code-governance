@@ -166,6 +166,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "~/.claude/hooks/governance/sync-governance-copies.sh --sync-if-drifted",
+            "timeout": 120
+          },
+          {
+            "type": "command",
             "command": "echo '[MEMORY MAINTENANCE] Before ending: (1) Verify MEMORY.md < 200 lines (2) No duplicate/stale memory files (3) Completed projects archived (4) Open-Problems.md updated (5) Old handoffs archived (6) All MEMORY.md + CLAUDE.md references valid.'",
             "timeout": 5
           },

@@ -88,7 +88,19 @@ do_run() {
   # including a retired duplicate. Better to audit nothing and SAY SO than to audit the wrong
   # tree and call it fact.
   cd "$HOME" 2>/dev/null
-  GOV_NOTIFY=0 GOV_WHATSAPP=0 GOV_SELFTEST_NO_WRITE=1 \
+  # The write used to be suppressed UNCONDITIONALLY, which froze docs/context/GENERATED-FACTS.md
+  # for days while that file declared itself authoritative over all prose. Measured 2026-09-13:
+  # it published godmode_tool_count 86 against a live 93, version_json 1.4.195 against a live
+  # 1.4.206, and git_tag_on_head <none> while HEAD carried a tag. The reason for suppressing was
+  # sound but broader than the rule it enforces: an AMBIGUOUS root -- one discovered by walking up
+  # from a detached job's inherited cwd -- must never be written to. An EXPLICIT root is not
+  # ambiguous. So suppress only when no root was configured on purpose.
+  _gov_nowrite=1
+  if [ -n "${GOV_SELFTEST_PROJECT:-}" ] || \
+     grep -qE '^[[:space:]]*GOV_SELFTEST_PROJECT=' "$HOME/.claude/.governance-local.env" 2>/dev/null; then
+    _gov_nowrite=0
+  fi
+  GOV_NOTIFY=0 GOV_WHATSAPP=0 GOV_SELFTEST_NO_WRITE="$_gov_nowrite" \
     bash "$SUITE" > "$RUNLOG" 2>&1
   rc=$?
   end="$(now)"
@@ -109,13 +121,32 @@ do_run() {
   esac
   [ "$verdict" = "GREEN" ] && [ "$partial" = "1" ] && verdict="GREEN-PARTIAL"
 
+  # WHICH TREE IS THIS A VERDICT ABOUT? (2026-09-14). A verdict used to carry only a unix
+  # timestamp, so "is this still current?" could only be INFERRED — compare a number to the mtime
+  # of whatever you suspected had changed, and hope you suspected the right file. That inference
+  # failed in practice: a GREEN sat here for a day while hooks were edited underneath it. These
+  # three lines make the question readable instead: the fingerprint changes the moment ANY hook
+  # changes, so a reader compares two strings rather than reasoning about clocks.
+  _hooks_root="$(dirname "$SUITE")"
+  hf="$(find "$_hooks_root" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) 2>/dev/null \
+        | LC_ALL=C sort | xargs cat 2>/dev/null | sha256sum 2>/dev/null | cut -c1-12)"
+  [ -n "$hf" ] || hf=unknown
+  if [ -n "$proj" ] && [ -d "$proj/.git" ]; then
+    ph="$(git -C "$proj" rev-parse --short HEAD 2>/dev/null)"; [ -n "$ph" ] || ph=none
+    if [ -n "$(git -C "$proj" status --porcelain 2>/dev/null)" ]; then pd=yes; else pd=no; fi
+  else ph=none; pd=unknown; fi
+
   tmp="$RESULT.tmp.$$"
   {
     printf 'verdict=%s\n' "$verdict"
     printf 'rc=%s\n' "$rc"
+    printf 'written_by=selftest-advisory-stop.sh (the owner of this verdict)\n'
     printf 'finished=%s\n' "$end"
     printf 'seconds=%s\n' "$(( end - start ))"
     printf 'project=%s\n' "${proj:-<none>}"
+    printf 'hooks_fingerprint=%s\n' "$hf"
+    printf 'project_head=%s\n' "$ph"
+    printf 'project_dirty=%s\n' "$pd"
     printf 'summary=%s\n' "$tail_line"
   } > "$tmp" 2>/dev/null && mv -f "$tmp" "$RESULT" 2>/dev/null
   exit 0

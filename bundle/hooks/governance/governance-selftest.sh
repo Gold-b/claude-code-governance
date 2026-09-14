@@ -747,6 +747,20 @@ case_governance_guard() {
   run_hook "$dep" "sid-gg-5" "$(pl_pre "$dep" sid-gg-5 "$dep/docs/context/GOTCHAS.md")"
   expect_rc 2 "governance edit on a DEPLOYMENT node: BLOCKED even with a valid token"
   expect_has "DEPLOYMENT" "deployment block: names the node role"
+
+  # --- fail-closed trap (2026-09-14) -----------------------------------------------------------
+  # governance.log showed 16 "protected target" lines across its full history with no ALLOW or
+  # BLOCK ever following - some runs died or hung between the role check and the token check and
+  # silently fell through to allow (settings-hooks.json gives this hook a 10s timeout; the two
+  # measurable gaps were 7-12s after their last log line, consistent with the harness killing a
+  # hung run). The trap armed right after the "protected target" log must convert ANY exit past
+  # that point into a BLOCK unless a legitimate path explicitly clears it first.
+  fx_token 300
+  export GOV_TEST_UNEXPECTED_EXIT=1
+  run_hook "$src" "sid-gg-6" "$(pl_pre "$src" sid-gg-6 "$prot")"
+  unset GOV_TEST_UNEXPECTED_EXIT
+  expect_rc 2 "unexpected exit after protected-target log: fail-closed BLOCKS instead of falling through"
+  expect_grep "fail-closed" "$SBX_HOME/.claude/logs/governance.log" "fail-closed block: names itself so the gap is never silent again"
   fx_token
 }
 
@@ -1964,6 +1978,27 @@ _gov_write_result "a direct run started; any previous verdict is void" "(run in 
 
 part_a
 part_b
+
+# ── Live invariant: does the real governance.log account for every protected-file decision? ────
+# Not a sandboxed case - this reads the ACTUAL machine-wide log, which is production history, not
+# something this run can control or reset. Reported as data, the same way Part (b) reports doc
+# drift: a human decides what a mismatch means, this tool only refuses to stay quiet about one.
+# This is the exact check that would have caught the 2026-09-14 fail-open gap on day one instead
+# of 16 invocations (and an unknown number of months) later.
+_real_log="$CHOME/logs/governance.log"
+if [ -f "$_real_log" ]; then
+  _lp=$(grep -c 'protected target' "$_real_log" 2>/dev/null || echo 0)
+  _la=$(grep -c 'ALLOW: token valid' "$_real_log" 2>/dev/null || echo 0)
+  _lb=$(grep -cE 'BLOCK:' "$_real_log" 2>/dev/null || echo 0)
+  _lgap=$((_lp - _la - _lb))
+  if [ "$_lgap" -ne 0 ]; then
+    printf '\n[live invariant] %s: protected-target=%s allow=%s block=%s gap=%s  <-- NOT ZERO: some protected-file invocations never reached a decision\n' \
+      "$_real_log" "$_lp" "$_la" "$_lb" "$_lgap"
+  else
+    printf '\n[live invariant] %s: protected-target=%s allow=%s block=%s  (balanced)\n' \
+      "$_real_log" "$_lp" "$_la" "$_lb"
+  fi
+fi
 
 printf '\n============================================================\n'
 if [ -n "$FAIL_LOG" ]; then

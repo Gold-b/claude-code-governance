@@ -85,6 +85,22 @@ fi
 
 gov_log "governance-guard" "protected target: $FILE_PATH (pattern: $MATCHED_PATTERN)"
 
+# Fail-closed safety net (2026-09-14). Measured against the full history of governance.log:
+# "protected target" was logged 2083 times, but only 2067 runs went on to log an explicit
+# ALLOW or BLOCK - 16 writes to protected governance docs completed with no decision ever
+# recorded. Two of the three reproduced cases got as far as logging the resolved role, then
+# nothing - death or a hang between the role check and the token check (leading candidate:
+# the python3 subprocess below, contended when several Claude Code sessions fire this hook
+# at the same time - see the `timeout` added around it). From here on the only way out is an
+# explicit decision: a crash, a hang killed by the harness's own hook timeout, or a future
+# edit that adds an early return all now default to BLOCK instead of silently falling
+# through to allow.
+trap 'gov_log "governance-guard" "BLOCK: guard exited without an explicit decision (fail-closed)"; exit 2' EXIT
+
+# Test-only seam for governance-selftest.sh (case_governance_guard): forces the unexpected
+# exit above to prove the trap actually converts it into a BLOCK.
+[ -n "${GOV_TEST_UNEXPECTED_EXIT:-}" ] && exit 17
+
 # Node-role gate (Framework v2.1): governance files on DEPLOYMENT/FROZEN are
 # mirrors, not sources. Direct edits from Claude would be overwritten by
 # UPDATE.bat anyway — and can cause governance drift in the interim window.
@@ -137,6 +153,7 @@ To make governance changes:
 
 Kill switch (not recommended): GOV_ROLE_FRAMEWORK=0 disables role awareness.
 ERRMSG
+  trap - EXIT
   exit 2
 fi
 
@@ -163,6 +180,7 @@ memory: feedback_auto_document_changes.md
 To disable this guard for an emergency, set GOVERNANCE_HOOKS=0 in the
 environment and retry the edit.
 ERRMSG
+  trap - EXIT
   exit 2
 fi
 
@@ -170,7 +188,7 @@ fi
 # Read the token file via cat + pipe to Python — avoids Git-Bash /c/... path
 # issues that occur when Python tries to open the path directly on Windows.
 NOW_EPOCH=$(date +%s)
-EXPIRES_EPOCH=$(cat "$TOKEN_FILE" 2>/dev/null | python3 -c '
+EXPIRES_EPOCH=$(cat "$TOKEN_FILE" 2>/dev/null | timeout 5 python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -188,6 +206,7 @@ Token file: $TOKEN_FILE
 Re-issue by running:
   bash .claude/hooks/governance/commit-task-success.sh "<task description>"
 ERRMSG
+  trap - EXIT
   exit 2
 fi
 
@@ -200,10 +219,12 @@ Token file: $TOKEN_FILE
 Re-confirm success with the user, then re-issue by running:
   bash .claude/hooks/governance/commit-task-success.sh "<task description>"
 ERRMSG
+  trap - EXIT
   exit 2
 fi
 
 # Token is valid — allow the write.
 REMAINING=$(($EXPIRES_EPOCH - $NOW_EPOCH))
 gov_log "governance-guard" "ALLOW: token valid, ${REMAINING}s remaining"
+trap - EXIT
 exit 0

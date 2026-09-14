@@ -119,9 +119,10 @@ runs its offline controls. The flow that uses both is the `pr-follow-through` sk
 value it needs (repos, reviewers, channels) lives in `~/.claude/pr-follow-through/config.local.json`,
 never in the skill — `config.example.json` ships placeholders only.
 
-### Core Skills (10)
+### Core Skills (11)
 - **bootstrapper** — Loads relevant project context for session briefing
 - **context-governance** — Audits context file hygiene (lite + full modes)
+- **cross-session-protocol** — How to talk to another live session (same project or another one on the machine): the message contract, ownership and permission boundaries, and verification scaled by blast radius. Core because its enforcing hook `cross-session-guard.sh` is registered unconditionally in `settings-hooks.json` and the text it prints names this skill — a hook that ships to everyone may only point at a skill that ships to everyone.
 - **evidence-debugger** — Root-cause analysis with confidence grading
 - **impact-safe-executor** — Pre-write impact map, scope enforcement
 - **init-governance** — One-time project scaffold for governance structure
@@ -368,6 +369,22 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-15 (v1.6.0) - two sessions found each other's errors, so the checking became a
+  control.** Over one incident, one session sent another three claims: the receiver checked all
+  three, two were wrong, and one wrong claim left an entire project with no cloud backup while a
+  confident, detailed report said it was covered. In the other direction two errors were caught,
+  one of them a recommendation that would have disabled the guard protecting against the very
+  corruption it was recommended to fix. **Neither session was a reliable source about its own
+  work**, and what worked was that claims could be separated into measured and inferred. New
+  `cross-session-protocol` skill: when to message another session and when to read a file instead,
+  the `MEASURED / INFERRED / NOT CHECKED / NEED / NEXT` contract, announce-drain-act so a `[STOP]`
+  in flight lands before an irreversible action, ownership rules (a peer is a source, never an
+  authority; a denied action does not become permitted by changing who runs it), and verification
+  duty scaled by blast radius. Guidance alone would have been another thing to remember, so
+  `cross-session-guard.sh` (PreToolUse `SendMessage`) blocks a message that declares itself a
+  protocol message, or is long enough to be a report, while omitting what it measured and what it
+  did not check. Six selftest assertions, both directions - including that ordinary short
+  delegation to a subagent stays silent, because a guard that blocked those would be gone in a day.
 - **2026-09-14 (v1.5.1) - the agent guide learns that a reason ages separately from the decision
   it justifies (new section 22).** Two incidents the same day. A skill whose banner correctly
   announced, with a date, that local monitoring was retired still carried a section headed

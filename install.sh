@@ -141,7 +141,7 @@ gov_read_version_local() { { cat "$CLAUDE_HOME/.governance-version" 2>/dev/null 
 # NEXT-SESSION-HANDOVER.md and its default Definition of Done, which names /pr-to-git as a
 # mandatory bullet — while the skill itself would be absent. A doc that ships in core may only
 # mandate skills that ship in core.
-CORE_SKILLS="bootstrapper context-governance evidence-debugger impact-safe-executor init-governance live-state-orchestrator parallel-session-merge pre-close-check pr-to-git pr-follow-through"
+CORE_SKILLS="bootstrapper context-governance cross-session-protocol evidence-debugger impact-safe-executor init-governance live-state-orchestrator parallel-session-merge pre-close-check pr-to-git pr-follow-through"
 EXTENDED_SKILLS="plan-and-execute qa-sec multi-agents full-finish enable-remote-code"
 
 # ── Uninstall mode ───────────────────────────────────────────────────────────

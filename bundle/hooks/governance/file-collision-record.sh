@@ -41,7 +41,7 @@ PAYLOAD=$(gov_hook_input)
 # view -- the protection is then absent while both hooks appear to be running normally. That is
 # not hypothetical: print() on Windows emits "\r\n", which briefly left the recorder's path
 # carrying a trailing carriage return that the guard's did not.
-_PARSED=$(printf '%s' "$PAYLOAD" | python3 -c '
+_PARSED=$(printf '%s' "$PAYLOAD" | timeout 5 python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)

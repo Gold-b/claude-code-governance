@@ -52,9 +52,13 @@ echo ""
 
 # Skills (core)
 echo "Core Skills:"
-for skill in bootstrapper context-governance evidence-debugger impact-safe-executor \
-             init-governance live-state-orchestrator parallel-session-merge pre-close-check \
-             pr-to-git; do
+# Keep this list equal to CORE_SKILLS in install.sh. It drifted twice: pr-follow-through shipped
+# at v1.4.0 and was never added here, and cross-session-protocol at v1.6.0 - so verify.sh reported
+# a clean install while two core skills went unchecked. The selftest compares the BUNDLE against
+# install.sh; nothing compared install.sh against this loop.
+for skill in bootstrapper context-governance cross-session-protocol evidence-debugger \
+             impact-safe-executor init-governance live-state-orchestrator parallel-session-merge \
+             pre-close-check pr-to-git pr-follow-through; do
   check "  $skill" "[ -f ~/.claude/skills/$skill/SKILL.md ]"
 done
 echo ""

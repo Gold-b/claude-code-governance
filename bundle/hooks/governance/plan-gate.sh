@@ -43,7 +43,7 @@ fi
 # Extract only the user's typed message from the JSON payload.
 # Without this, metadata (session_id, transcript_path, cwd) inflates the length.
 # Use exit code to distinguish "extraction failed" from "prompt is empty".
-INPUT=$(echo "$RAW_INPUT" | python3 -c "
+INPUT=$(echo "$RAW_INPUT" | timeout 5 python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)

@@ -18,7 +18,7 @@ INPUT=""
 INPUT=$(gov_hook_input)
 [ -z "$INPUT" ] && exit 0
 
-FILE=$(printf '%s' "$INPUT" | python3 -c "
+FILE=$(printf '%s' "$INPUT" | timeout 5 python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)

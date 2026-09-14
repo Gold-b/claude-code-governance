@@ -26,7 +26,7 @@ if [ -z "$PAYLOAD" ]; then
 fi
 
 # Extract file path
-FILE_PATH=$(printf '%s' "$PAYLOAD" | python3 -c '
+FILE_PATH=$(printf '%s' "$PAYLOAD" | timeout 5 python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)

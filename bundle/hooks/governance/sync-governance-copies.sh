@@ -97,7 +97,7 @@ fi
 # Older format had file_path at top-level. Handle both.
 FILE_PATH=""
 if command -v python3 &>/dev/null; then
-  FILE_PATH=$(echo "$INPUT" | python3 -c "
+  FILE_PATH=$(echo "$INPUT" | timeout 5 python3 -c "
 import sys, json
 try:
   d = json.load(sys.stdin)

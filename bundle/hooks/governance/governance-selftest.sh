@@ -314,6 +314,7 @@ case_fn_for() {
     no-local-compute.sh)        echo case_no_local_compute ;;
     deny-git-bypass.sh)         echo case_deny_git_bypass ;;
     pr-watch-guard.sh)          echo case_pr_watch_guard ;;
+    cross-session-guard.sh)     echo case_cross_session_guard ;;
     *) echo "" ;;
   esac
 }
@@ -565,6 +566,59 @@ FAKEGH
 
   rm -f "$SBX_BIN/gh" "$ghdir/tries" 2>/dev/null   # the fake must not leak into other cases
   unset PR_WATCH_GUARD_REPO PR_WATCH_GUARD_OPEN PR_WATCH_STATE_DIR
+}
+
+# --- cross-session-guard.sh -------------------------------------------------------------------
+case_cross_session_guard() {
+  # Enforces the /cross-session-protocol message contract on PreToolUse(SendMessage). The danger it
+  # exists for is a confident report another session ACTS on: two sessions measured it on 2026-09-14
+  # when two of three claims were wrong and one wrong claim left a project unbacked while the report
+  # said otherwise. Both directions matter more than usual here, because this hook fires on EVERY
+  # SendMessage - including ordinary delegation to an in-process subagent. A guard that blocked
+  # those would be removed within a day, and then it would protect nothing.
+  local proj="$SBX/xsession"
+  mkdir -p "$proj" 2>/dev/null
+  local long short pay
+  # >= 400 chars, the length at which a message is a report rather than a note
+  long="Here is what I found while auditing your backup script this evening across every project on the machine, with the counts and the paths, so that you can decide what to do about the ones that are missing and how to proceed from here without breaking anything else in the process today."
+  long="$long $long"
+  short="starting task 3 now"
+
+  _pl_msg() { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"to":"peer","message":"%s"}}' "$2" "$1" "$3"; }
+
+  # 1. MUST BLOCK - a long report with neither field.
+  pay=$(_pl_msg "$proj" sid-xs-1 "$long")
+  run_hook "$proj" "sid-xs-1" "$pay"
+  expect_rc 2 "a 400+ char report with no MEASURED/NOT CHECKED is BLOCKED"
+  expect_has "BLOCKED" "block names itself"
+  expect_has "MEASURED:" "block names the field that is missing"
+
+  # 2. MUST BLOCK - short, but it declared itself a protocol message by carrying a tag.
+  pay=$(_pl_msg "$proj" sid-xs-2 "[FYI] the roots table is empty now")
+  run_hook "$proj" "sid-xs-2" "$pay"
+  expect_rc 2 "a tagged message without the contract is BLOCKED even when short"
+
+  # 3. MUST ALLOW - the same long report, with the contract present.
+  pay=$(_pl_msg "$proj" sid-xs-3 "[FYI] audit result. MEASURED: 9 repos, via git log --oneline, 22:10. NOT CHECKED: whether the remote agrees. $long")
+  run_hook "$proj" "sid-xs-3" "$pay"
+  expect_rc 0 "the same report WITH MEASURED and NOT CHECKED is allowed"
+
+  # 4. MUST ALLOW - ordinary short delegation. Without this case the hook could block everything
+  #    and still pass cases 1-2, which is how a guard becomes a blanket refusal wearing a fix's name.
+  pay=$(_pl_msg "$proj" sid-xs-4 "$short")
+  run_hook "$proj" "sid-xs-4" "$pay"
+  expect_rc 0 "a short untagged operational note is allowed"
+  expect_quiet "a short untagged note is silent - no nag on ordinary delegation"
+
+  # 5. MUST ALLOW - a different tool entirely must not be policed by this hook.
+  pay="{\"session_id\":\"sid-xs-5\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$proj/x.md\",\"content\":\"$long\"}}"
+  run_hook "$proj" "sid-xs-5" "$pay"
+  expect_rc 0 "a non-SendMessage tool is not this hook's business"
+
+  # 6. MUST ALLOW - the documented kill switch.
+  pay=$(_pl_msg "$proj" sid-xs-6 "$long")
+  GOV_XSESSION_GUARD=0 run_hook "$proj" "sid-xs-6" "$pay"
+  expect_rc 0 "GOV_XSESSION_GUARD=0 bypasses the guard"
 }
 
 # --- canonical-cwd-check.sh ------------------------------------------------------------------

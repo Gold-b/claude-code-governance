@@ -24,7 +24,7 @@ set -u
 [ "${DENY_GIT_BYPASS:-1}" = "0" ] && exit 0
 
 PAYLOAD="$(cat 2>/dev/null || true)"
-CMD="$(printf '%s' "$PAYLOAD" | python -c 'import json,sys
+CMD="$(printf '%s' "$PAYLOAD" | timeout 5 python -c 'import json,sys
 try:
     d=json.load(sys.stdin); print(d.get("tool_input",{}).get("command",""))
 except Exception: print("")' 2>/dev/null)"

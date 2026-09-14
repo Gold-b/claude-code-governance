@@ -153,7 +153,7 @@ gov_payload_root() {
   local input="$1" root p
 
   if [ -n "$input" ] && command -v python3 >/dev/null 2>&1; then
-    root=$(printf '%s' "$input" | python3 -c "
+    root=$(printf '%s' "$input" | timeout 5 python3 -c "
 import sys, json, os
 try:
     d = json.load(sys.stdin)

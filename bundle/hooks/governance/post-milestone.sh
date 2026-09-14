@@ -47,7 +47,7 @@ if [ ! -t 0 ]; then
   INPUT="$GOV_INPUT"; [ -z "$INPUT" ] && INPUT="{}"
   # Prefer python3 JSON parsing (handles nesting correctly)
   if command -v python3 &>/dev/null; then
-    FILE_CHANGED=$(echo "$INPUT" | python3 -c "
+    FILE_CHANGED=$(echo "$INPUT" | timeout 5 python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)

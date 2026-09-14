@@ -75,7 +75,7 @@ fi
 
 # Token exists — verify TTL
 NOW_EPOCH=$(date +%s)
-EXPIRES_EPOCH=$(cat "$TOKEN_FILE" 2>/dev/null | python3 -c '
+EXPIRES_EPOCH=$(cat "$TOKEN_FILE" 2>/dev/null | timeout 5 python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)

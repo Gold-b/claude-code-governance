@@ -61,7 +61,7 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/governance-guard.sh",
-            "timeout": 10,
+            "timeout": 60,
             "statusMessage": "Context Governance: checking protected-doc write guard..."
           },
           {
@@ -98,6 +98,17 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/deny-git-bypass.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/cross-session-guard.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: checking the cross-session message contract..."
           }
         ]
       }

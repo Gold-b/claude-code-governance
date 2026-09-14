@@ -69,7 +69,7 @@ cat > "$TOKEN_FILE" <<JSON
   "created_at": "$NOW_ISO",
   "created_at_epoch": $NOW_EPOCH,
   "expires_at_epoch": $EXPIRES_EPOCH,
-  "task_description": $(printf '%s' "$TASK_DESC" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
+  "task_description": $(printf '%s' "$TASK_DESC" | timeout 5 python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))'),
   "protected_files_allowed_source": "$PROTECTED_SOURCE",
   "protected_files_allowed": [
 $PROTECTED_JSON

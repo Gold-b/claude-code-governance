@@ -267,7 +267,7 @@ if [ -d "$_GOV_ROOT/.git" ]; then
   # earlier session's close is then measured against commits it never made. That is not
   # hypothetical: on 2026-07-28 a parallel session stamped its own SHA at 18:01, and the first
   # session's close was blocked for "changing code" that belonged entirely to the other one.
-  _GOV_SID=$(printf '%s' "${_GOV_HOOK_INPUT:-}" | python3 -c "
+  _GOV_SID=$(printf '%s' "${_GOV_HOOK_INPUT:-}" | timeout 5 python3 -c "
 import sys, json
 try: print((json.load(sys.stdin) or {}).get('session_id',''))
 except Exception: print('')

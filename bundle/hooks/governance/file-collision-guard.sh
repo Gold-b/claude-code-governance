@@ -99,7 +99,7 @@ PAYLOAD=$(gov_hook_input)
 # trailing \r while the guard's did not, which meant the two hooks hashed DIFFERENT KEYS for the
 # same file: separate claims, separate views, no protection at all. Writing bytes disables the
 # translation. The ${VAR%$'\r'} strips below are belt and braces for any other producer.
-_PARSED=$(printf '%s' "$PAYLOAD" | python3 -c '
+_PARSED=$(printf '%s' "$PAYLOAD" | timeout 5 python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -376,7 +376,7 @@ EOF
         gov_log "file-collision-guard" "WARN stale-view-self $FILE_PATH ($TOOL allowed, record re-synced)"
         MSG="NOTE from file-collision-guard: $FILE_PATH changed since the last write this guard recorded, and that write was yours. No other session has ever claimed this file, so the change was most likely a shell command from this session (sed/python/heredoc) -- a write path this guard cannot see. The $TOOL is allowed: it is surgical, and its old_string fails on its own if the region moved. The record has been re-synced to what is on disk now. If you did NOT make that change yourself, stop and re-read the file before continuing."
         printf '%s\n' "$MSG" >&2
-        printf '%s' "$MSG" | python3 -c '
+        printf '%s' "$MSG" | timeout 5 python3 -c '
 import sys, json
 print(json.dumps({
   "systemMessage": "[collision-guard] stale view re-synced to disk - see note",

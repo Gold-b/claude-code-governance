@@ -368,6 +368,21 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-14 (v1.5.1) - the agent guide learns that a reason ages separately from the decision
+  it justifies (new section 22).** Two incidents the same day. A skill whose banner correctly
+  announced, with a date, that local monitoring was retired still carried a section headed
+  "Activation (normally AUTOMATIC)" fifty lines below, naming two pointers that had been dead for
+  weeks: an instruction is read where it sits, not where its caveat sits. And a project's CLAUDE.md
+  named a path canonical *because* it was "not cloud-synced", when that location was itself a sync
+  root holding 63,067 artefacts - the migration had moved from one synced folder to another and
+  recorded "not synced" as the reason the destination was safe. Section 3 already prefers a dated
+  claim over an undated one; section 22 covers the half it does not reach. Date the justification
+  separately from the decision, state what would falsify it, correct in place and visibly, and
+  remember that a caveat protects only the text below it - grep the document for its own subject
+  before calling a retirement done. The point is not tidiness: a stale decision usually fails
+  loudly, while a stale reason fails silently and then STEERS the repair, sending the next session
+  to pick another bad destination.
+
 - **2026-09-14 (v1.5.0) - a guard that could be talked out of it, a reconciler nobody called, and
   a verdict that outlived its tree.** Five defects, four of them the same shape: a control that
   reported health it had not measured.

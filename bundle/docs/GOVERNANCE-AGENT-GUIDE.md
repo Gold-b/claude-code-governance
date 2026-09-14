@@ -767,3 +767,49 @@ escapes at all.**
 The same shape applies to hooks, cron entries, registry keys, environment variables, mounted
 volumes, mirrors and skills. Enumerate, resolve, then claim. Related: §3 (evidence before rank),
 gotchas #348, #351, #358, #359, #361.
+
+## 22. A Document That Justifies a Choice Must Date the Justification (2026-09-14)
+
+§3 already tells you to prefer a **dated** claim over an undated one. This section is about the
+half that rule does not reach: the *reason* a document gives for a decision, which ages
+independently of the decision and is almost never dated at all.
+
+### The two incidents
+
+**A retired mechanism still reading as a mandate.** A skill's banner said, correctly and with a
+date, that local monitoring was retired on 2026-08-20. Fifty lines below, a section headed
+"Activation (normally AUTOMATIC)" still told the reader that a SessionStart hook arms the bridge
+silently. Both pointers it named had been dead for weeks — the hook `exit 0`s at line 18 and is
+registered on no event. **An instruction is read where it sits, not where its caveat sits.** A
+reader who jumps to "Activation" never passes the banner.
+
+**A canonical path justified by a fact that had just died.** A project's `CLAUDE.md` named
+`C:\dev\<project>` as the canonical working copy **because** it was "clean `.git`, on a local
+disk, NOT cloud-synced" — contrasted with an earlier copy on a cloud drive that had been
+corrupted and deleted. Measured the day this was written: the new location was itself a sync root
+of the same client, with 63,067 sync artefacts under it and 298 inside that repository's `.git`.
+The migration had moved from one synced location to another and recorded "not synced" as the
+reason the destination was safe. The *choice* was still defensible; the *reason* was false, and
+nothing in the document could show that.
+
+### The rule
+
+1. **Date the justification separately from the decision.** "Canonical since 2026-08-30 **because,
+   as measured on 2026-08-30**, this disk is not cloud-synced." The next reader can then check the
+   reason's age without reverse-engineering it from the choice's age.
+2. **State what would falsify it.** A reason worth writing down is worth one clause saying what
+   would make it stop being true. It converts a re-check from an investigation into a lookup.
+3. **Correct in place, visibly.** When you fix an aged claim, say inside the document that it was
+   corrected and when. The next reader has no diff to consult — the same rule as gotcha #6.
+4. **A caveat protects only the text below it.** If a banner retires a mechanism, edit every
+   section that still instructs someone to use it. Grep the document for its own subject before
+   calling the retirement done; both incidents above survived a banner that was already correct.
+
+### Why this is not just tidiness
+
+A stale *decision* usually fails loudly — the path does not exist, the command errors. A stale
+*reason* fails silently and then misdirects the repair: the obvious next step for a corrupted
+working copy is "move it somewhere clean", and a document asserting that the current location is
+already clean sends the next session to pick another bad destination. **A wrong reason does not
+merely fail to help; it steers.** Related: §3 (evidence and recency before rank), §21 (enumerate
+before claiming), gotcha #6.

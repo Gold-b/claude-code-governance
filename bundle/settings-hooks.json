@@ -98,6 +98,12 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/deny-git-bypass.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/render-gate.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: render gate..."
           }
         ]
       },
@@ -144,6 +150,17 @@
             "type": "command",
             "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
             "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/render-rules-read.sh",
+            "timeout": 10,
+            "statusMessage": "Context Governance: render-rules token..."
           }
         ]
       }

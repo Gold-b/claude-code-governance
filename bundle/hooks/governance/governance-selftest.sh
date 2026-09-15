@@ -315,6 +315,8 @@ case_fn_for() {
     deny-git-bypass.sh)         echo case_deny_git_bypass ;;
     pr-watch-guard.sh)          echo case_pr_watch_guard ;;
     cross-session-guard.sh)     echo case_cross_session_guard ;;
+    render-gate.sh)             echo case_render_gate ;;
+    render-rules-read.sh)       echo case_render_rules_read ;;
     *) echo "" ;;
   esac
 }
@@ -441,6 +443,71 @@ case_deny_git_bypass() {
   pay="{\"session_id\":\"sid-dgb-5\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git config core.hooksPath .githooks\"}}"
   run_hook "$proj" "sid-dgb-5" "$pay"
   expect_rc 0 "wiring core.hooksPath is ALLOWED"
+}
+
+# --- render-gate.sh -------------------------------------------------------------------------------
+case_render_gate() {
+  # Blocks a render command until the project's Read_Before_Every_Render.md has been read THIS
+  # session (render-rules-read.sh mints the token; this gate spends it). Built 2026-07-27 after a
+  # dead catbox link reached a CEO. Registered in no event until 2026-09-15 (task B11) - both
+  # directions asserted here, plus the two properties that make it safe to register GLOBALLY: it
+  # is a total no-op in any project without the rules file, and the token is one-shot (spent per
+  # render, not per session).
+  local proj="$SBX/rg-proj" noproj="$SBX/rg-noproj"
+  mkdir -p "$proj" "$noproj" 2>/dev/null
+  fx_project "$proj" "SOURCE" "$proj"
+  fx_project "$noproj" "SOURCE" "$noproj"
+  printf '# Read before every render\n\nUse the CLI for avatar looks. Verify catbox bytes before sending a link.\n' > "$proj/Read_Before_Every_Render.md"
+  local marker="$SBX_HOME/.claude/logs/.gov-render-rules-read"
+  local pay
+  # 1. MUST BLOCK - a real render, no token, project HAS the rules file
+  fx_state_reset
+  pay="{\"session_id\":\"sid-rg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"node remotion-cli.js render out.mp4\"}}"
+  run_hook "$proj" "sid-rg-1" "$pay"
+  expect_rc 2 "a render with no token is BLOCKED"
+  expect_has "RENDER-GATE" "the block names itself"
+  # 2. MUST ALLOW - the same render, fresh token present
+  mkdir -p "$SBX_HOME/.claude/logs"
+  printf '2026-09-15T00:00:00Z %s\n' "$proj/Read_Before_Every_Render.md" > "$marker"
+  run_hook "$proj" "sid-rg-1" "$pay"
+  expect_rc 0 "the same render with a fresh token is ALLOWED"
+  # 3. MUST BLOCK - immediately again: the token is one-shot, spent by #2
+  run_hook "$proj" "sid-rg-1" "$pay"
+  expect_rc 2 "a second render right after is BLOCKED - one read buys exactly one render"
+  # 4. MUST ALLOW - no token anywhere, but THIS project has no Read_Before_Every_Render.md at all
+  run_hook "$noproj" "sid-rg-1" "$pay"
+  expect_rc 0 "a project with no render-rules file is a total no-op"
+  # 5. MUST ALLOW - git/gh are never renders, even when the message mentions one
+  pay="{\"session_id\":\"sid-rg-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m 'mentions heygen video create'\"}}"
+  run_hook "$proj" "sid-rg-2" "$pay"
+  expect_rc 0 "git is never a render, even when the message mentions one"
+  # 6. MUST ALLOW - a MENTION inside a heredoc is not an invocation
+  pay="{\"session_id\":\"sid-rg-3\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat <<EOF\\nheygen video create\\nEOF\"}}"
+  run_hook "$proj" "sid-rg-3" "$pay"
+  expect_rc 0 "a mention inside a heredoc is not an invocation"
+}
+
+# --- render-rules-read.sh -------------------------------------------------------------------------
+case_render_rules_read() {
+  # Mints the one-shot token render-gate.sh spends. Matches on basename only (case/slash
+  # insensitive) so it works from any path style; reading anything else is a pure no-op.
+  local proj="$SBX/rrr-proj"
+  mkdir -p "$proj" 2>/dev/null
+  fx_project "$proj" "SOURCE" "$proj"
+  printf '# Read before every render\n' > "$proj/Read_Before_Every_Render.md"
+  local marker="$SBX_HOME/.claude/logs/.gov-render-rules-read"
+  local pay
+  # 1. MUST MINT - reading the canonical file
+  fx_state_reset
+  pay="{\"session_id\":\"sid-rrr-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$proj/Read_Before_Every_Render.md\"}}"
+  run_hook "$proj" "sid-rrr-1" "$pay"
+  expect_rc 0 "reading the render-rules file always succeeds silently"
+  expect_file "$marker" "reading the render-rules file mints the token"
+  # 2. MUST NOT MINT - reading an unrelated file
+  fx_state_reset
+  pay="{\"session_id\":\"sid-rrr-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$proj/CLAUDE.md\"}}"
+  run_hook "$proj" "sid-rrr-2" "$pay"
+  expect_nofile "$marker" "reading an unrelated file does NOT mint a token"
 }
 
 # --- pr-watch-guard.sh --------------------------------------------------------------------------
@@ -1455,8 +1522,6 @@ EOF
       enumerate-before-claiming.sh) echo "TOOL: operator-invoked, not a hook — enumerates the machine's scheduled tasks / startup / run keys and flags entries whose target is missing; covered by case_enumerate_before_claiming" ;;
       enumerate-tasks.ps1)         echo "TOOL: the PowerShell half of enumerate-before-claiming.sh — a separate file on purpose, because escapes do not survive being embedded (gotcha #359)" ;;
       pr-watch.sh)                 echo "TOOL: the PR watcher the session arms through the Monitor tool (pr-follow-through skill) - not a hook; pr-watch-guard.sh hands the session its exact command, and 'pr-watch.sh --selftest' runs its offline must-fire/must-not-fire controls (v1.4.0)" ;;
-      render-gate.sh)              echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
-      render-rules-read.sh)        echo "ORPHAN: registered in no event and called by nothing but its own sibling — task B11, register or delete (owner decision)" ;;
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
       wa-send.js)                  echo "invoked-by:_common.sh" ;;
       gov-notify.ps1)              echo "ORPHAN: nothing in the tree references it. install.sh carries a comment claiming _common.sh gov_notify() calls it to raise the Windows popup - grep says otherwise, and that comment is the only reason anyone would keep the file. Task B11, register/wire or delete (owner decision)" ;;

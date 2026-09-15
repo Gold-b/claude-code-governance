@@ -73,10 +73,10 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (20 scripts, all registered in `~/.claude/settings.json`)
+### Hooks (22 scripts, all registered in `~/.claude/settings.json`)
 
 Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
-is registered on two events and `pr-watch-guard.sh` on three, so the table has 23 rows over 20
+is registered on two events and `pr-watch-guard.sh` on three, so the table has 25 rows over 22
 distinct scripts.
 
 | Event | Script | Purpose |
@@ -92,8 +92,10 @@ distinct scripts.
 | PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
 | PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
+| PreToolUse (Bash, PowerShell) | `render-gate.sh` | Blocks a render/billing command (`remotion-cli render`, `heygen video create`, …) until the project's `Read_Before_Every_Render.md` has been read this session; the read mints a one-shot token this gate spends, so each render needs its own read. No-op in any project without that file. Registered v1.6.1, task B11 |
 | PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
 | PostToolUse (Bash, PowerShell) | `pr-watch-guard.sh` | After `gh pr …` / `git push`: asks the session (JSON `decision: block`) to arm the PR watcher when open PRs of yours have none; cool-down while it arms. Kill switch `GOV_PR_WATCH=0` (v1.4.0) |
+| PostToolUse (Read) | `render-rules-read.sh` | Mints the one-shot token `render-gate.sh` spends, only when the file read is `Read_Before_Every_Render.md` (by basename, case/slash-insensitive). Registered v1.6.1, task B11 |
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
 | PostToolUse (Edit/Write) | `sync-governance-copies.sh` | Mirrors a governance edit to the other copies; **the private-to-public crossing**, and gated as one |
 | PostToolUse (Edit/Write) | `file-collision-record.sh` | Records this session's view of a file it just wrote |
@@ -108,7 +110,8 @@ distinct scripts.
 | Stop | `pr-watch-guard.sh` | Holds the stop ONCE per repo+session when open PRs of yours have no live watcher, so it gets armed before the session goes idle; the next stop passes (v1.4.0) |
 
 Not registered on any event, and named on every selftest run so the decision cannot go quiet:
-`render-gate.sh`, `render-rules-read.sh`, `gov-notify.ps1`. Helpers called by other hooks
+`gov-notify.ps1` (task B11 — its sibling scripts `render-gate.sh` / `render-rules-read.sh` were
+registered v1.6.1; this one has no caller and no incident driving it). Helpers called by other hooks
 (`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
 `file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
 `sync-governance.sh`) are installed but are not themselves hook entry points.
@@ -369,6 +372,16 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-15 (v1.6.1) - two working hooks sat unregistered since the day they were built, one
+  after a dead link reached a CEO.** `render-gate.sh` + `render-rules-read.sh` (task B11) were
+  complete and correct since 2026-07-27 — a one-shot token gate that blocks a render/billing
+  command until the project's `Read_Before_Every_Render.md` has been read this session — but
+  appeared in no `settings.json`, so they protected nothing for seven weeks. Registered now:
+  PreToolUse `Bash|PowerShell` + PostToolUse `Read`. Ten new selftest assertions cover both
+  directions plus the two properties that make it safe to register globally rather than
+  per-project: a total no-op in any project without the trigger file, and the token is one-shot
+  per render, not per session. `gov-notify.ps1`, the third file named in task B11, stays
+  unregistered — no caller and no incident behind it, owner's call.
 - **2026-09-15 (v1.6.0) - two sessions found each other's errors, so the checking became a
   control.** Over one incident, one session sent another three claims: the receiver checked all
   three, two were wrong, and one wrong claim left an entire project with no cloud backup while a

@@ -30,6 +30,7 @@
 #   PR #n MERGED by <login> at <ts> url       terminal; followed by a PULLED / PULL SKIPPED line
 #   PR #n CLOSED (not merged) url             terminal
 #   NO OPEN PRS of <login> on <repo> - watcher exiting
+#   WATCHER MAX RUNTIME (<n>s) REACHED on <repo> - exiting     backstop, see MAX RUNTIME below
 #
 # State (per repo + session key), under $PR_WATCH_STATE_DIR (default ~/.claude/state/pr-watch):
 #   <owner>__<repo>__<session>.snap        last snapshot, one fingerprint line per OPEN PR
@@ -39,9 +40,22 @@
 # Kill switch: GOV_PR_WATCH=0 (exits 0 at once). Needs: bash, gh (authenticated), git, GNU date.
 # Never merges, never comments, never pushes. Reads GitHub, writes only its own state files and
 # a fast-forward of the clone's base branch.
+#
+# MAX RUNTIME (2026-09-15, task B11-followup). This watcher's only self-exit was "zero open PRs
+# remain" - nothing noticed when the SESSION that armed it closed with PRs still open. Found live:
+# 14 such processes across 4 chains, the oldest 5 days old, all still polling, all orphaned (their
+# owning session's own process tree was gone). Per-session state naming means no OTHER session's
+# guard ever sees these heartbeats, so nothing was ever going to reap them. Fix is a flat wall-clock
+# budget, not parent-liveness detection - the same "prefer a budget over a watchdog" call already
+# recorded for governance-guard.sh: detecting "is my session still alive" needs fragile process-tree
+# inference (proven unreliable the same day - a python heredoc's "dead" parent turned out to be
+# alive and mid-wait()), while a bounded lifetime is simple, deterministic, and testable. A session
+# that still cares re-arms via pr-watch-guard.sh at its own next SessionStart/PostToolUse/Stop.
 set -u
 
 REPO=""; CLONE=""; SESSION="default"; INTERVAL=90; ONCE=0; SELFTEST=0
+MAX_RUNTIME="${PR_WATCH_MAX_RUNTIME:-43200}"   # 12h default; backstop for an orphaned watcher, not a normal exit
+START_EPOCH=$(date +%s)
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
@@ -91,6 +105,9 @@ GH_JQ='[
 
 field() { printf '%s' "$1" | cut -d';' -f"$2"; }          # sub-field of "k=v;a;b"
 count() { local v; v=$(field "$1" 1); printf '%s' "${v#*=}"; }
+
+# runtime_exceeded <start_epoch> <max_runtime_s> <now_epoch> -- pure, testable without gh/network.
+runtime_exceeded() { [ $(( $3 - $1 )) -ge "$2" ]; }
 
 # diff_snapshots <old-file> <new-file> <me>
 # Prints event lines. Internal directives start with '@PULL|<n>|<base>' and are consumed by the
@@ -158,6 +175,10 @@ if [ "$SELFTEST" = "1" ]; then
   # a PR never seen before is announced once
   out4=$(diff_snapshots /dev/null "$T/old" "me")
   case "$out4" in *"PR #14 TRACKING [OPEN]"*"PR #15 TRACKING [OPEN]"*) echo "PASS must-fire: new PRs announced" ;; *) echo "FAIL must-fire: new PRs not announced: $out4"; fails=$((fails+1)) ;; esac
+  # runtime_exceeded: pure, no gh/network needed - the orphan-watcher backstop (2026-09-15)
+  if runtime_exceeded 1000 100 1101; then echo "PASS must-fire: 101s elapsed >= 100s max"; else echo "FAIL must-fire: 101s elapsed >= 100s max"; fails=$((fails+1)); fi
+  if runtime_exceeded 1000 100 1100; then echo "PASS must-fire: exactly at the boundary counts as exceeded"; else echo "FAIL must-fire: exactly at the boundary counts as exceeded"; fails=$((fails+1)); fi
+  if runtime_exceeded 1000 100 1050; then echo "FAIL must-not-fire: 50s elapsed < 100s max"; fails=$((fails+1)); else echo "PASS must-not-fire: 50s elapsed < 100s max"; fi
   rm -rf "$T"
   [ "$fails" -eq 0 ] && { echo "pr-watch selftest: ALL GREEN"; exit 0; } || { echo "pr-watch selftest: $fails FAILURE(S)"; exit 1; }
 fi
@@ -203,6 +224,10 @@ pull_base() { # <n> <base>
 consecutive_fail=0
 while :; do
   date +%s > "$HB"
+  if runtime_exceeded "$START_EPOCH" "$MAX_RUNTIME" "$(date +%s)"; then
+    echo "WATCHER MAX RUNTIME (${MAX_RUNTIME}s) REACHED on $REPO - exiting; a live session re-arms if PRs are still open"
+    exit 0
+  fi
   if ! open=$(gh pr list --repo "$REPO" --author "@me" --state open --json number --jq '.[].number' 2>/dev/null); then
     consecutive_fail=$((consecutive_fail+1))
     [ "$consecutive_fail" -eq 3 ] && echo "WARN pr-watch: gh pr list failed 3 times in a row on $REPO (network/auth?) - still watching"

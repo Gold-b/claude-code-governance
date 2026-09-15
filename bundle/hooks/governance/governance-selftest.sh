@@ -1524,7 +1524,6 @@ EOF
       pr-watch.sh)                 echo "TOOL: the PR watcher the session arms through the Monitor tool (pr-follow-through skill) - not a hook; pr-watch-guard.sh hands the session its exact command, and 'pr-watch.sh --selftest' runs its offline must-fire/must-not-fire controls (v1.4.0)" ;;
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
       wa-send.js)                  echo "invoked-by:_common.sh" ;;
-      gov-notify.ps1)              echo "ORPHAN: nothing in the tree references it. install.sh carries a comment claiming _common.sh gov_notify() calls it to raise the Windows popup - grep says otherwise, and that comment is the only reason anyone would keep the file. Task B11, register/wire or delete (owner decision)" ;;
       *.test.sh)                   echo "test: a suite, not a hook" ;;
       *) echo "" ;;
     esac

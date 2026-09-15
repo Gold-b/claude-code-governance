@@ -109,16 +109,18 @@ distinct scripts.
 | Stop | `selftest-advisory-stop.sh` | Reports that the framework is unverified since the last selftest |
 | Stop | `pr-watch-guard.sh` | Holds the stop ONCE per repo+session when open PRs of yours have no live watcher, so it gets armed before the session goes idle; the next stop passes (v1.4.0) |
 
-Not registered on any event, and named on every selftest run so the decision cannot go quiet:
-`gov-notify.ps1` (task B11 — its sibling scripts `render-gate.sh` / `render-rules-read.sh` were
-registered v1.6.1; this one has no caller and no incident driving it). Helpers called by other hooks
+Task B11 is CLOSED (v1.6.2): `render-gate.sh` + `render-rules-read.sh` registered v1.6.1;
+`gov-notify.ps1`, the third file, deleted v1.6.2 — no caller, no incident behind it, and the
+production agent it would have popped a Windows dialog for runs headless on Linux on a remote
+server, so a local Windows popup had no reachable audience. Helpers called by other hooks
 (`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
 `file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
 `sync-governance.sh`) are installed but are not themselves hook entry points.
 `pr-watch.sh` (v1.4.0) is a tool, not a hook: the session arms it through the Monitor tool and
 it prints one line per PR change (comment, review, +1, CI, merge) for the caller's own open PRs on
-one repo, fast-forwards the clone on merge, and exits when none remain. `pr-watch.sh --selftest`
-runs its offline controls. The flow that uses both is the `pr-follow-through` skill; every real
+one repo, fast-forwards the clone on merge, and exits when none remain — or after
+`PR_WATCH_MAX_RUNTIME` seconds (default 12h, v1.6.2) regardless, so a watcher whose owning session
+closed early does not run forever. `pr-watch.sh --selftest` runs its offline controls. The flow that uses both is the `pr-follow-through` skill; every real
 value it needs (repos, reviewers, channels) lives in `~/.claude/pr-follow-through/config.local.json`,
 never in the skill — `config.example.json` ships placeholders only.
 
@@ -372,6 +374,18 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-15 (v1.6.2) - task B11 closed, and a second orphan-process class found the same day
+  got the same treatment as the first.** `gov-notify.ps1` deleted: no caller, no incident behind
+  it, and the production agent it would have popped a Windows dialog for runs headless on Linux on
+  a remote server — a local popup had no reachable audience. Separately: `pr-watch.sh`'s only
+  self-exit was "zero open PRs remain," so nothing noticed when the session that armed it closed
+  first — 14 processes across 4 chains found alive, the oldest 5 days. Fixed with a wall-clock
+  backstop (`PR_WATCH_MAX_RUNTIME`, default 12h) rather than parent-liveness detection, which the
+  same session had just proven unreliable elsewhere that day. `permissions.allow` (786 entries, 0
+  deny) audited on request: ~20 carry a `:*` wildcard and amount to unconditional code execution
+  (local, in containers, over root SSH to a remote server) or admin elevation — recorded in
+  GOTCHAS #16 rather than fixed; the owner reviewed and deferred narrowing it. GOTCHAS #15 covers
+  the watcher fix. All changes user-approved and user-directed via `/loop`.
 - **2026-09-15 (v1.6.1) - two working hooks sat unregistered since the day they were built, one
   after a dead link reached a CEO.** `render-gate.sh` + `render-rules-read.sh` (task B11) were
   complete and correct since 2026-07-27 — a one-shot token gate that blocks a render/billing

@@ -67,7 +67,12 @@ ALLOW_GOV='(^|[;&| /])(commit-task-success|end-session|pre-session|pre-task|post
 # writes only to logs and governance docs. Naming scripts one at a time was the wrong shape; it took
 # two rounds (governance-selftest.sh on 2026-09-13, close-report.sh at a session close on 2026-09-14)
 # to see that the category, not the filename, is what belongs here.
-ALLOW_GEN='pytest|--selftest|hooks/governance/|unittest|ast\.parse|py_compile|bash -n|^[[:space:]]*(ssh|scp)\b|^[[:space:]]*(git|gh|ls|cat|grep|sed|awk|head|tail|wc|du|rm|mkdir|cp|mv|echo|date|stat|find|diff|node [^ ]*send\.js|timeout [0-9]+ bash )'
+# BYPASS FIX (2026-09-17): `timeout [0-9]+ bash ` had no `-n` requirement, so
+# `timeout 30 bash tools/backfill.sh` matched here (allowed, no `continue` past this point)
+# BEFORE DENY_COMPUTE was ever checked - a live bypass letting arbitrary project scripts run
+# locally through a `timeout` wrapper. Intent was only to allow timed syntax checks
+# (`timeout 30 bash -n script.sh`), so the alternative now requires `-n` too.
+ALLOW_GEN='pytest|--selftest|hooks/governance/|unittest|ast\.parse|py_compile|bash -n|^[[:space:]]*(ssh|scp)\b|^[[:space:]]*(git|gh|ls|cat|grep|sed|awk|head|tail|wc|du|rm|mkdir|cp|mv|echo|date|stat|find|diff|node [^ ]*send\.js|timeout [0-9]+ bash -n)'
 DENY_PULL='scp .*@[^ ]+:[^ ]*/(var/lib|research)[^ ]* +("?\$HOME|~|/c/|[A-Za-z]:|\.)'
 DENY_COMPUTE='(^|[;&| ])(python[0-9.]*|node|bash|sh)[[:space:]]+[^ ]*(tools/|strategies/|scripts/|\.py\b|\.js\b|\.sh\b)'
 

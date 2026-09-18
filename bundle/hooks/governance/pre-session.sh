@@ -190,6 +190,56 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
   fi
 fi
 
+# ── STALE PUBLISH QUEUE — one line at session start (4.1, 1.7.0) ───────────────────────────
+#
+# WHAT THIS IS NOT: it is not a step toward auto-publishing. GOV_PUBLISH=1 stays a deliberate,
+# per-close human act, forever — it is the one place a human reviews what leaves the machine,
+# and the publish path does real work unattended (fresh clone, stage, push).
+#
+# THE ACTUAL DEFECT. A HELD queue was announced ONLY at Stop, inside a wall of close output,
+# at the moment attention is lowest. MEASURED 2026-09-18: the queue held 18 distinct files,
+# the oldest entry dated 2026-09-14 — four days of "queued for session end" that no session
+# end ever mentioned twice. A reminder that only fires where nobody reads it is not a
+# reminder; session START is where a decision can still be acted on.
+#
+# Deliberately NOT a server cron, and this is worth writing down so nobody "fixes" it into
+# one: the Server-Only Automation rule sends monitors to the remote host, but this queue
+# exists only on this PC and only a session HERE can publish it. A session-start line is the
+# correct shape for a PC-local, session-actionable fact.
+#
+# Never blocking, once per session, and silenced by GOV_PUBLISH_NAG_DAYS=0.
+_GOV_NAG_DAYS="${GOV_PUBLISH_NAG_DAYS:-7}"
+_GOV_PUSH_FLAG="$HOME/.claude/logs/.governance-push-pending"
+if [ "$_GOV_NAG_DAYS" != "0" ] && [ -s "$_GOV_PUSH_FLAG" ] && ! gov_dry; then
+  # UNIQUE FILES, not lines. The flag is append-only, so one file edited three times is three
+  # lines: the raw count overstated the queue 3x (52 lines / 18 files, MEASURED). A count that
+  # exaggerates is a count that gets discounted.
+  _GOV_NAG_N=$(sed 's|^[^ ]* ||' "$_GOV_PUSH_FLAG" 2>/dev/null | sort -u | grep -c . )
+  [ -n "$_GOV_NAG_N" ] || _GOV_NAG_N=0
+  if [ "$_GOV_NAG_N" -gt 0 ] 2>/dev/null; then
+    # Age from the OLDEST line's own timestamp, not the file mtime: the file is appended to on
+    # every governance edit, so its mtime is always "now" and would report age 0 forever.
+    _GOV_NAG_OLDEST=$(awk 'NF{print $1; exit}' "$_GOV_PUSH_FLAG" 2>/dev/null | cut -c1-10)
+    _GOV_NAG_AGE=""
+    case "$_GOV_NAG_OLDEST" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+        _GOV_NAG_T0=$(date -d "$_GOV_NAG_OLDEST" +%s 2>/dev/null)
+        _GOV_NAG_NOW=$(date +%s 2>/dev/null)
+        if [ -n "$_GOV_NAG_T0" ] && [ -n "$_GOV_NAG_NOW" ] && [ "$_GOV_NAG_NOW" -ge "$_GOV_NAG_T0" ] 2>/dev/null; then
+          _GOV_NAG_AGE=$(( (_GOV_NAG_NOW - _GOV_NAG_T0) / 86400 ))
+        fi
+        ;;
+    esac
+    # Undecidable age => stay SILENT about the number rather than print a wrong one. The queue
+    # is still reported at close either way; this line only exists to be trustworthy.
+    if [ -n "$_GOV_NAG_AGE" ] && [ "$_GOV_NAG_AGE" -ge "$_GOV_NAG_DAYS" ] 2>/dev/null; then
+      _GOV_NAG_FILE=$(sed 's|^[^ ]* ||' "$_GOV_PUSH_FLAG" 2>/dev/null | grep . | head -1)
+      gov_log "pre-session" "stale publish queue: $_GOV_NAG_N file(s), oldest $_GOV_NAG_AGE day(s) (threshold $_GOV_NAG_DAYS)"
+      echo "[GOVERNANCE] $_GOV_NAG_N governance file(s) have waited $_GOV_NAG_AGE days for GOV_PUBLISH=1 (oldest: $_GOV_NAG_FILE). Publish deliberately, or clear the queue: rm \"$_GOV_PUSH_FLAG\". Silence with GOV_PUBLISH_NAG_DAYS=0."
+    fi
+  fi
+fi
+
 # Node-role gate (Framework v2): only run full bootstrap on SOURCE.
 # DEPLOYMENT/FROZEN nodes skip — they don't originate sessions.
 gov_role_guard SOURCE

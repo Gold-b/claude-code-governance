@@ -19,6 +19,102 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { exit 0; }
 gov_disabled && exit 0
 
+# ═══ --publish-preview : what WOULD be pushed, and what must not be (4.3, 1.7.0) ═══════════
+#
+# This is what a human reads BEFORE typing GOV_PUBLISH=1. It is read-only: no clone for push,
+# no staging, no commit, no network write. Run it by hand; it is not registered on any event.
+#
+# IT ALSO ANSWERS THE QUESTION THAT CAUSED THIS WHOLE EXERCISE. The publish does
+# `cp -r <staging>/bundle/* <target>/bundle/`, which is a ONE-WAY overwrite that never deletes
+# and never checks direction. MEASURED 2026-09-18: 13 bundle files differed between staging and
+# the target clone, and for FIVE of them the target was the newer, better copy — v1.5.x/v1.6.x
+# work committed directly in the clone and never pulled back. The next unattended publish would
+# have silently clobbered all five. So any file NEWER IN THE TARGET is printed as TARGET-AHEAD,
+# and the publish REFUSES while even one exists (see the gate near the cp below). That turns a
+# silent-clobber class of bug into an impossible one.
+if [ "${1:-}" = "--publish-preview" ]; then
+  if [ -f "$HOME/.claude/.governance-local.env" ]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.claude/.governance-local.env" 2>/dev/null || true
+  fi
+  _PP_STAGE="${GOV_INSTALLER_REPO:-$HOME/.claude/governance-installer}"
+  _PP_REPO="${GOV_REPO_PATH:-$HOME/claude-code-governance}"
+  _PP_FLAG="$HOME/.claude/logs/.governance-push-pending"
+  echo "=== publish preview ==========================================================="
+  echo "staging : $_PP_STAGE/bundle"
+  echo "target  : $_PP_REPO/bundle"
+  if [ ! -d "$_PP_STAGE/bundle" ]; then
+    echo "ERROR: no staging bundle at $_PP_STAGE/bundle" >&2; exit 1
+  fi
+  if [ ! -d "$_PP_REPO/.git" ]; then
+    echo "NOTE: no target clone at $_PP_REPO — a publish would clone it fresh; nothing to compare."
+    exit 0
+  fi
+  echo
+  echo "--- queue -------------------------------------------------------------------"
+  if [ -s "$_PP_FLAG" ]; then
+    _PP_N=$(sed "s|^[^ ]* ||" < "$_PP_FLAG" 2>/dev/null | sort -u | grep -c . )
+    _PP_OLD=$(awk 'NF{print $1; exit}' "$_PP_FLAG" 2>/dev/null | cut -c1-10)
+    echo "$_PP_N distinct file(s) queued; oldest entry $_PP_OLD"
+    sed "s|^[^ ]* ||" < "$_PP_FLAG" 2>/dev/null | sort -u | sed "s|^|    |"
+  else
+    echo "queue is EMPTY — a close would publish nothing."
+  fi
+  echo
+  echo "--- differences (staging vs target) -----------------------------------------"
+  _PP_AHEAD=0; _PP_DIFF=0; _PP_NEW=0
+  while IFS= read -r _pp_line; do
+    [ -n "$_pp_line" ] || continue
+    case "$_pp_line" in
+      "Only in $_PP_STAGE/bundle"*)
+        # `diff -rq` prints "Only in <dir>: <name>", so a naive echo shows an absolute dir and a
+        # bare name. Rebuild it as the bundle-relative path the reader will see in the commit.
+        _pp_f="${_pp_line#Only in }"
+        _pp_dir="${_pp_f%%: *}"; _pp_base="${_pp_f#*: }"
+        _pp_rel="${_pp_dir#$_PP_STAGE/}"
+        echo "    NEW-IN-STAGING   ${_pp_rel}/${_pp_base}"
+        _PP_NEW=$((_PP_NEW+1))
+        continue
+        ;;
+      "Only in $_PP_REPO/bundle"*)
+        # A file the target has and staging does not. The publish's `cp -r` NEVER DELETES, so
+        # this file would simply survive — say so rather than implying it disappears.
+        echo "    TARGET-ONLY      ${_pp_line#Only in } (cp -r never deletes: it would REMAIN in the repo)"
+        continue
+        ;;
+      Files*differ)
+        _pp_rest="${_pp_line#Files }"
+        _pp_a="${_pp_rest%% and *}"
+        _pp_b="${_pp_rest#* and }"; _pp_b="${_pp_b% differ}"
+        _PP_DIFF=$((_PP_DIFF+1))
+        _pp_ma=$(gov_mtime "$_pp_a" 2>/dev/null)
+        _pp_mb=$(gov_mtime "$_pp_b" 2>/dev/null)
+        if [ -n "$_pp_ma" ] && [ -n "$_pp_mb" ] && [ "$_pp_mb" -gt "$_pp_ma" ] 2>/dev/null; then
+          echo "    TARGET-AHEAD     ${_pp_b#$_PP_REPO/}  <-- the TARGET copy is NEWER; publishing would OVERWRITE it"
+          _PP_AHEAD=$((_PP_AHEAD+1))
+        else
+          echo "    would update     ${_pp_a#$_PP_STAGE/}"
+        fi
+        ;;
+    esac
+  done <<PPEOF
+$(diff -rq "$_PP_STAGE/bundle" "$_PP_REPO/bundle" 2>/dev/null | grep -v 'desktop\.ini')
+PPEOF
+  echo
+  echo "--- verdict -----------------------------------------------------------------"
+  echo "  $_PP_DIFF file(s) differ, $_PP_NEW new in staging, $_PP_AHEAD TARGET-AHEAD"
+  if [ "$_PP_AHEAD" -gt 0 ]; then
+    echo "  PUBLISH WOULD BE REFUSED: $_PP_AHEAD file(s) are newer in the target clone." >&2
+    echo "  Reconcile them FIRST (diff each one, take the intended side, copy it back into" >&2
+    echo "  $_PP_STAGE/bundle), then re-run this preview. A bundle/ edit made directly in the" >&2
+    echo "  target clone is a bug: the live file under ~/.claude is the only edit surface." >&2
+    exit 2
+  fi
+  echo "  No TARGET-AHEAD files: a GOV_PUBLISH=1 close would not clobber anything."
+  echo "  Publishing is still a separate, deliberate act: GOV_PUBLISH=1 <re-run the close>"
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # LAST GATE BEFORE THE WORLD (armed 2026-09-01)
 #
@@ -365,6 +461,25 @@ if [ $HANDOFF_EXISTS -eq 0 ]; then
     HANDOFF_EXISTS=1
   fi
 fi
+# 2026-09-15: both patterns above assume `HANDOFF-v<version>.md` naming. This project's actual,
+# long-established convention (every file under MDs/HANDOFF-*.md, going back months) is DATE-named
+# (`HANDOFF-2026-09-15-op134-fix-released.md`), never version-named — so both checks above have
+# been unable to pass since the project adopted that convention, independent of whether a current,
+# accurate handoff actually exists. Fallback: accept a `status: active` handoff (any filename)
+# whose own content names the current version — this is the same signal pre-close-check's and
+# context-governance's own handoff-currency checks already rely on (frontmatter status, not a
+# filename pattern), so this brings the two families of checks into agreement instead of leaving
+# this one enforcing a convention the project does not use.
+if [ $HANDOFF_EXISTS -eq 0 ] && [ -d "$PROJECT_ROOT/MDs" ]; then
+  for hf in "$PROJECT_ROOT"/MDs/HANDOFF-*.md; do
+    [ -f "$hf" ] || continue
+    if head -n 12 "$hf" | grep -qE '^status:[[:space:]]*active' \
+       && grep -q "v${VJ_VER}\b" "$hf" 2>/dev/null; then
+      HANDOFF_EXISTS=1
+      break
+    fi
+  done
+fi
 if [ $HANDOFF_EXISTS -eq 0 ]; then
   ISSUES="${ISSUES}\n  - No handoff found for v${VJ_VER} (docs/context/HANDOFF.md points to v${HANDOFF_POINTS:-unknown})"
   DIRECTIVES="${DIRECTIVES}\n  (c) Create a new handoff at MDs/HANDOFF-v${VJ_VER}.md with: session summary, current state, open work, exact next action, and read-these-first list. Then update docs/context/HANDOFF.md pointer to reference it. Archive the previous handoff to MDs/archive/ with status: consumed."
@@ -468,13 +583,38 @@ fi
 # thing that happens to you. This is not the 2026-09-01 "kill the auto-push" proposal that was
 # correctly rejected: the pipe is kept, it just asks first.
 if [ -f "$PUSH_FLAG" ] && [ "${GOV_PUBLISH:-0}" != "1" ]; then
-  _PUB_N=$(grep -c . "$PUSH_FLAG" 2>/dev/null | tr -d " ")
+  # COUNT UNIQUE FILES, NOT LINES (4.2, 1.7.0). The flag is append-only, so one file edited
+  # three times is three lines. MEASURED 2026-09-18: 52 lines for 18 distinct files — the old
+  # count overstated the queue by 3x. A number that exaggerates is a number that gets
+  # discounted, and this is the one number that decides whether a human types GOV_PUBLISH=1.
+  _PUB_N=$(sed "s|^[^ ]* ||" < "$PUSH_FLAG" 2>/dev/null | sort -u | grep -c . )
   [ -z "$_PUB_N" ] && _PUB_N=0
-  gov_log "end-session" "publish HELD: $_PUB_N queued file(s), GOV_PUBLISH not set"
+  _PUB_LINES=$(grep -c . "$PUSH_FLAG" 2>/dev/null | tr -d " ")
+  [ -z "$_PUB_LINES" ] && _PUB_LINES=0
+  # Age from the OLDEST LINE'S OWN TIMESTAMP, never the file mtime: the flag is appended to on
+  # every governance edit, so its mtime is always "now" and an mtime-based age reads 0 forever
+  # — which is exactly why a four-day-old queue never looked old.
+  _PUB_OLDEST=$(awk 'NF{print $1; exit}' "$PUSH_FLAG" 2>/dev/null | cut -c1-10)
+  _PUB_AGE=""
+  case "$_PUB_OLDEST" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      _PUB_T0=$(date -d "$_PUB_OLDEST" +%s 2>/dev/null)
+      _PUB_NOW=$(date +%s 2>/dev/null)
+      if [ -n "$_PUB_T0" ] && [ -n "$_PUB_NOW" ] && [ "$_PUB_NOW" -ge "$_PUB_T0" ] 2>/dev/null; then
+        _PUB_AGE=$(( (_PUB_NOW - _PUB_T0) / 86400 ))
+      fi
+      ;;
+  esac
+  gov_log "end-session" "publish HELD: $_PUB_N unique file(s) over $_PUB_LINES queue line(s), oldest ${_PUB_AGE:-?} day(s), GOV_PUBLISH not set"
   echo "[GOVERNANCE] Publish HELD. $_PUB_N governance file(s) are queued for the PUBLIC repo,"
   echo "  and this session will NOT push them. The queue is preserved."
+  if [ -n "$_PUB_AGE" ]; then
+    echo "  Oldest entry: $_PUB_OLDEST ($_PUB_AGE day(s) ago) — $_PUB_LINES queue line(s) for $_PUB_N distinct file(s)."
+  fi
   sed "s|.* ||" < "$PUSH_FLAG" 2>/dev/null | sort -u | tail -10 | sed "s|^|    |"
+  [ "$_PUB_N" -gt 10 ] 2>/dev/null && echo "    ... and $((_PUB_N - 10)) more (showing the last 10 of $_PUB_N)"
   echo "  Review them, then publish deliberately:  GOV_PUBLISH=1 <re-run the close>"
+  echo "  Preview exactly what would be pushed:    bash ~/.claude/hooks/governance/end-session.sh --publish-preview"
   echo "  Or clear the queue without publishing:   rm \"$PUSH_FLAG\""
 fi
 
@@ -517,10 +657,61 @@ if [ -f "$PUSH_FLAG" ] && [ "${GOV_PUBLISH:-0}" = "1" ]; then
   fi
 
   if [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then
+    # ── TARGET-AHEAD GATE (4.3, 1.7.0) — fail closed BEFORE the one-way cp ────────────────
+    # The `cp -r` below is a one-way overwrite that never checks direction and never deletes.
+    # MEASURED 2026-09-18: 13 bundle files differed between staging and this clone, and for
+    # FIVE of them the CLONE held the newer, better copy (v1.5.x/v1.6.x work committed in the
+    # clone and never pulled back). An unattended publish would have clobbered all five
+    # without a word — the exact failure this framework exists to prevent, in its own tooling.
+    # So: any bundle file newer in the target than in staging ABORTS the publish and KEEPS the
+    # queue. Rehearse with `end-session.sh --publish-preview`.
+    _AHEAD_LIST=""
+    while IFS= read -r _ah_line; do
+      case "$_ah_line" in
+        Files*differ)
+          _ah_rest="${_ah_line#Files }"
+          _ah_a="${_ah_rest%% and *}"
+          _ah_b="${_ah_rest#* and }"; _ah_b="${_ah_b% differ}"
+          _ah_ma=$(gov_mtime "$_ah_a" 2>/dev/null)
+          _ah_mb=$(gov_mtime "$_ah_b" 2>/dev/null)
+          if [ -n "$_ah_ma" ] && [ -n "$_ah_mb" ] && [ "$_ah_mb" -gt "$_ah_ma" ] 2>/dev/null; then
+            _AHEAD_LIST="$_AHEAD_LIST
+    ${_ah_b#$GH_REPO/}"
+          fi
+          ;;
+      esac
+    done <<AHEOF
+$(diff -rq "$INSTALLER_REPO/bundle" "$GH_REPO/bundle" 2>/dev/null | grep -v 'desktop\.ini')
+AHEOF
+    if [ -n "$_AHEAD_LIST" ]; then
+      gov_log "end-session" "publish ABORTED: TARGET-AHEAD files in $GH_REPO/bundle (would be clobbered by the one-way cp)"
+      {
+        echo "[GOVERNANCE] PUBLISH ABORTED — the target clone holds NEWER copies of these bundle files:"
+        printf '%s\n' "$_AHEAD_LIST"
+        echo "  Publishing copies staging OVER the clone, so these would be silently overwritten."
+        echo "  Reconcile each one first (diff, take the intended side, copy it back into"
+        echo "  $INSTALLER_REPO/bundle), then re-run the close. The queue is PRESERVED."
+        echo "  A bundle/ edit made directly in the clone is a bug: the live file under ~/.claude"
+        echo "  is the only edit surface, and the sync hook mirrors it."
+        echo "  Rehearse anytime:  bash ~/.claude/hooks/governance/end-session.sh --publish-preview"
+      } >&2
+      # Skip the whole publish block, keep the flag. Same failure direction as the PII gate.
+      GOV_PUBLISH_ABORTED=1
+    fi
+  fi
+  if [ "${GOV_PUBLISH_ABORTED:-0}" = "1" ]; then
+    :
+  elif [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then
     # Sync installer bundle -> git repo (working tree); staging below is per-file
     gov_dry || cp -r "$INSTALLER_REPO/bundle/"* "$GH_REPO/bundle/" 2>/dev/null
     gov_dry || cp "$INSTALLER_REPO/install.sh" "$GH_REPO/install.sh" 2>/dev/null
     gov_dry || cp "$INSTALLER_REPO/verify.sh" "$GH_REPO/verify.sh" 2>/dev/null
+    # README.md added 1.7.0. It was NOT in this list, so the only way to change the published
+    # README was to edit it inside the clone — and a clone edit is invisible to every drift
+    # check this framework runs. MEASURED 2026-09-18: the two copies had diverged by 130 lines
+    # (the clone was 123 lines AHEAD, carrying hook/skill counts the staging copy still had
+    # wrong). Nothing reported it, because nothing compared a file nothing synced.
+    gov_dry || cp "$INSTALLER_REPO/README.md" "$GH_REPO/README.md" 2>/dev/null
 
     # Run git operations in a subshell to avoid changing the main script's CWD
     (
@@ -551,7 +742,7 @@ if [ -f "$PUSH_FLAG" ] && [ "${GOV_PUBLISH:-0}" = "1" ]; then
         esac
         [ -n "$rel" ] && [ -f "$rel" ] && git add "$rel" 2>/dev/null && STAGED=$((STAGED + 1))
       done < "$PUSH_FLAG"
-      for extra in install.sh verify.sh; do
+      for extra in install.sh verify.sh README.md; do
         git diff --quiet -- "$extra" 2>/dev/null || { git add "$extra" 2>/dev/null && STAGED=$((STAGED + 1)); }
       done
       if [ "$STAGED" -gt 0 ] && ! git diff --cached --quiet 2>/dev/null; then

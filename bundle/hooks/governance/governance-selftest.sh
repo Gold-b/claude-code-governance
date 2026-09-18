@@ -970,6 +970,148 @@ case_sync_copies() {
   _run "$CUR_SCRIPT" "$src" "sid-sc-4" '{"hook_event_name":"Stop"}' --sync-if-drifted
   expect_has "Drift detected" "a copy changed outside Edit/Write IS detected at Stop"
   expect_grep "CHANGED BY A SCRIPT" "$inst_h/drift-probe.sh" "and the stale copy is reconciled, not merely reported"
+
+  # ══ 1.7.0: the extended sync surface ═══════════════════════════════════════════════════════
+  # Every case below is BOTH directions on purpose. A crossing control tested only on its
+  # refusal path can be refusing everything, and a control that only ever refuses gets switched
+  # off — after which it protects nothing at all.
+  local bundle="$SBX_HOME/.claude/governance-installer/bundle"
+  mkdir -p "$bundle/agents" "$bundle/hooks" "$bundle/docs" "$bundle/skills" 2>/dev/null
+
+  # bundle/DISTRIBUTED is the allow-list BOTH this hook and install.sh read. Absent, nothing
+  # may cross — so the fixture writes one, and its absence is a case of its own at the end.
+  cat > "$bundle/DISTRIBUTED" <<'SELFDISTEOF'
+[core]
+selftest-skill
+[extended]
+[agents]
+selftest-agent
+[hooks]
+selftest-roothook.sh
+SELFDISTEOF
+
+  # --- *.local.* never crosses (2.2) --------------------------------------------------------
+  # The name is the rule now, not a habit. MEASURED 2026-09-18: a real .local.md on this
+  # machine carries a full name, a GitHub login and a Slack user id on its FIRST line.
+  mkdir -p "$SBX_HOME/.claude/docs" 2>/dev/null
+  local loc_live="$SBX_HOME/.claude/docs/secrets.local.md"
+  printf 'owner-only content\n' > "$loc_live"
+  rm -f "$bundle/docs/secrets.local.md" 2>/dev/null
+  run_hook "$src" "sid-sc-loc" "$(pl_post "$src" sid-sc-loc "$loc_live")"
+  expect_rc 0 "*.local.md edit: never blocks the write"
+  expect_nofile "$bundle/docs/secrets.local.md" "*.local.md does NOT cross into the publishable bundle"
+
+  local pub_live="$SBX_HOME/.claude/docs/ordinary.md"
+  printf 'ordinary governance doc\n' > "$pub_live"
+  rm -f "$bundle/docs/ordinary.md" 2>/dev/null
+  run_hook "$src" "sid-sc-loc2" "$(pl_post "$src" sid-sc-loc2 "$pub_live")"
+  expect_file "$bundle/docs/ordinary.md" "a NON-.local doc still crosses (the pattern is not over-broad)"
+
+  # --- CLAUDE.md: rendered at the marker, never copied whole (5.2) ---------------------------
+  local cmd_live="$SBX_HOME/.claude/CLAUDE.md"
+  local cmd_dest="$bundle/CLAUDE.md.template"
+  printf '%s\n' '# HEAD' '' '## Generic Preferences' '- generic' '' '---' > "$bundle/CLAUDE.md.template.head"
+
+  # (a) marker ABSENT -> publish NOTHING, and name the line to add. "Copy the whole file" here
+  #     would publish the personal section, which is the entire failure mode.
+  printf '%s\n' '# Live' '' '## Policy' 'publishable' '' '## Personal' 'private detail' > "$cmd_live"
+  rm -f "$cmd_dest" 2>/dev/null
+  run_hook "$src" "sid-sc-cmd1" "$(pl_post "$src" sid-sc-cmd1 "$cmd_live")"
+  expect_rc 0 "CLAUDE.md without a marker: never blocks the write"
+  expect_has "NO local-only marker" "marker absent is REPORTED, not silent"
+  expect_nofile "$cmd_dest" "marker absent: NOTHING is published from CLAUDE.md"
+
+  # (b) marker PRESENT -> everything above it verbatim; nothing below it, ever.
+  printf '%s\n' '# Live' '' '## Policy' 'publishable line' '' \
+    '<!-- GOV-LOCAL-ONLY: nothing below this line is synced or published -->' '' \
+    '## Personal' 'PRIVATE-DETAIL-MUST-NOT-SHIP' > "$cmd_live"
+  rm -f "$cmd_dest" 2>/dev/null
+  run_hook "$src" "sid-sc-cmd2" "$(pl_post "$src" sid-sc-cmd2 "$cmd_live")"
+  expect_file "$cmd_dest" "marker present: the template IS rendered"
+  expect_grep "publishable line" "$cmd_dest" "content ABOVE the marker is published verbatim"
+  expect_nogrep "PRIVATE-DETAIL-MUST-NOT-SHIP" "$cmd_dest" "content BELOW the marker never reaches the bundle"
+  expect_grep "Generic Preferences" "$cmd_dest" "the generic head is prepended"
+  expect_nogrep "# Live" "$cmd_dest" "the live file's own H1 is dropped (no duplicate title)"
+
+  # (c) a REAL VALUE above the marker -> the gate refuses the copy. The gate scans the RENDERED
+  #     file; that is exactly why the render happens BEFORE the scan and not after.
+  #     The fixture number is ASSEMBLED from two string literals so the contiguous phone shape
+  #     never exists in this file's own text — this script also ships in the public bundle and
+  #     is scanned by the same rule it is here to exercise. (A `pii-allow:` marker would work
+  #     too; a shape that is simply absent needs no exemption to review later.)
+  local _fx_phone='+972-50-'"123-4567"
+  printf '%s\n' '# Live' '' '## Policy' "call me on $_fx_phone any time" '' \
+    '<!-- GOV-LOCAL-ONLY: nothing below this line is synced or published -->' '' \
+    '## Personal' 'x' > "$cmd_live"
+  rm -f "$cmd_dest" 2>/dev/null
+  run_hook "$src" "sid-sc-cmd3" "$(pl_post "$src" sid-sc-cmd3 "$cmd_live")"
+  expect_nofile "$cmd_dest" "a real value ABOVE the marker REFUSES the copy (the gate scans the render)"
+
+  # (d) a PROJECT .claude/CLAUDE.md is not the user-level one and must never be published.
+  local proj_cmd="$src/.claude/CLAUDE.md"
+  mkdir -p "$src/.claude" 2>/dev/null
+  printf '%s\n' '# Project instructions' 'client-specific' > "$proj_cmd"
+  printf '%s\n' '# Live' '' '## Policy' 'ok' '' \
+    '<!-- GOV-LOCAL-ONLY: nothing below this line is synced or published -->' '' '## Personal' 'x' > "$cmd_live"
+  rm -f "$cmd_dest" 2>/dev/null
+  run_hook "$src" "sid-sc-cmd4" "$(pl_post "$src" sid-sc-cmd4 "$proj_cmd")"
+  expect_has "PROJECT CLAUDE.md" "a project-level CLAUDE.md is refused by name"
+  expect_nofile "$cmd_dest" "and nothing is published from it"
+
+  # --- agents: allow-listed raw copy (5.3) --------------------------------------------------
+  mkdir -p "$SBX_HOME/.claude/agents" 2>/dev/null
+  printf '%s\n' '---' 'name: selftest-agent' 'model: opus' '---' 'generic role text' \
+    > "$SBX_HOME/.claude/agents/selftest-agent.md"
+  rm -f "$bundle/agents/selftest-agent.md" 2>/dev/null
+  run_hook "$src" "sid-sc-ag1" "$(pl_post "$src" sid-sc-ag1 "$SBX_HOME/.claude/agents/selftest-agent.md")"
+  expect_file "$bundle/agents/selftest-agent.md" "a LISTED agent crosses into the bundle"
+
+  printf '%s\n' '---' 'name: selftest-unlisted' '---' 'text' \
+    > "$SBX_HOME/.claude/agents/selftest-unlisted.md"
+  rm -f "$bundle/agents/selftest-unlisted.md" 2>/dev/null
+  run_hook "$src" "sid-sc-ag2" "$(pl_post "$src" sid-sc-ag2 "$SBX_HOME/.claude/agents/selftest-unlisted.md")"
+  expect_rc 0 "an UNLISTED agent edit: never blocks the write"
+  expect_has "not listed under [agents]" "an UNLISTED agent is refused OUT LOUD, not silently"
+  expect_nofile "$bundle/agents/selftest-unlisted.md" "and it does NOT reach the bundle"
+
+  # --- root hooks: allow-listed, depth 1 only (5.4) -----------------------------------------
+  # This directory was UNWATCHED before 1.7.0, which is how a hook naming a real deployment
+  # container sat in the public bundle while a clean copy existed locally: nothing compared
+  # them, because nothing synced them.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SBX_HOME/.claude/hooks/selftest-roothook.sh"
+  rm -f "$bundle/hooks/selftest-roothook.sh" 2>/dev/null
+  run_hook "$src" "sid-sc-rh1" "$(pl_post "$src" sid-sc-rh1 "$SBX_HOME/.claude/hooks/selftest-roothook.sh")"
+  expect_file "$bundle/hooks/selftest-roothook.sh" "a LISTED root hook crosses into the bundle"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SBX_HOME/.claude/hooks/selftest-private.sh"
+  rm -f "$bundle/hooks/selftest-private.sh" 2>/dev/null
+  run_hook "$src" "sid-sc-rh2" "$(pl_post "$src" sid-sc-rh2 "$SBX_HOME/.claude/hooks/selftest-private.sh")"
+  expect_has "not listed under [hooks]" "an UNLISTED root hook is refused OUT LOUD"
+  expect_nofile "$bundle/hooks/selftest-private.sh" "and it does NOT reach the bundle"
+
+  # --- skills: the allow-list is the mechanism now, the denylist only a belt (2.4) -----------
+  mkdir -p "$SBX_HOME/.claude/skills/selftest-skill" "$SBX_HOME/.claude/skills/selftest-notshipped" 2>/dev/null
+  printf 'listed skill\n' > "$SBX_HOME/.claude/skills/selftest-skill/SKILL.md"
+  rm -f "$bundle/skills/selftest-skill/SKILL.md" 2>/dev/null
+  run_hook "$src" "sid-sc-sk1" "$(pl_post "$src" sid-sc-sk1 "$SBX_HOME/.claude/skills/selftest-skill/SKILL.md")"
+  expect_file "$bundle/skills/selftest-skill/SKILL.md" "a LISTED skill still crosses (the allow-list is not over-broad)"
+
+  printf 'unlisted skill\n' > "$SBX_HOME/.claude/skills/selftest-notshipped/SKILL.md"
+  rm -rf "$bundle/skills/selftest-notshipped" 2>/dev/null
+  run_hook "$src" "sid-sc-sk2" "$(pl_post "$src" sid-sc-sk2 "$SBX_HOME/.claude/skills/selftest-notshipped/SKILL.md")"
+  expect_has "not listed in bundle/DISTRIBUTED" "an UNLISTED skill is refused OUT LOUD (it used to be copied by default)"
+  expect_nofile "$bundle/skills/selftest-notshipped/SKILL.md" "and it does NOT reach the bundle"
+
+  # --- DISTRIBUTED missing => NOTHING crosses, loudly (fail-closed) -------------------------
+  # The failure DIRECTION is the point: an unreadable allow-list must publish nothing, and must
+  # not be quiet about it. A silent fail-open here would reintroduce the whole defect.
+  mv "$bundle/DISTRIBUTED" "$bundle/DISTRIBUTED.hidden" 2>/dev/null
+  rm -f "$bundle/agents/selftest-agent.md" 2>/dev/null
+  printf '%s\n' '---' 'name: selftest-agent' '---' 'changed' > "$SBX_HOME/.claude/agents/selftest-agent.md"
+  run_hook "$src" "sid-sc-nd" "$(pl_post "$src" sid-sc-nd "$SBX_HOME/.claude/agents/selftest-agent.md")"
+  expect_has "DISTRIBUTED is MISSING" "a missing allow-list is announced, not assumed"
+  expect_nofile "$bundle/agents/selftest-agent.md" "and NOTHING crosses while it is missing (fail closed)"
+  mv "$bundle/DISTRIBUTED.hidden" "$bundle/DISTRIBUTED" 2>/dev/null
 }
 
 # --- file-collision-record.sh -----------------------------------------------------------------
@@ -2050,7 +2192,7 @@ printf '  sandbox:  %s (HOME is redirected here for every hook run)\n' "$SBX"
 printf '  mutation: %s\n' "$([ "$DO_MUTATION" = 1 ] && echo on || echo off)"
 
 # ── .result: a DIRECT run invalidates it, it never writes a verdict ──────────────────────────
-# Fixed 2026-09-14 (was Gold-B Open-Problem #133). `~/.claude/logs/governance-selftest.result` is
+# Fixed 2026-09-14 (raised as an open problem by a downstream project). `~/.claude/logs/governance-selftest.result` is
 # the artifact a reader treats AS the verdict, and only selftest-advisory-stop.sh used to write it.
 # So a manual run left the previous evening's `verdict=GREEN` sitting on disk next to a fresh red
 # log — measured: a run finishing pass=239 fail=3 beside a .result reading pass=242 fail=0, while

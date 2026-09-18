@@ -4,10 +4,11 @@
 #
 # WHY THIS EXISTS (2026-09-07). A session was asked whether a retired tree was
 # safe to delete. It answered by FILTERING: it searched the Scheduled Tasks for
-# the string "GoldB", found three, handled them, and reported that no vector
-# remained. Five more existed. One was named "OpenClaw_..." and so never matched
-# the filter; it pointed at a script that a rebranding commit had renamed months
-# earlier, and it had been failing at 03:00 every morning since. The same
+# the current project name, found three, handled them, and reported that no
+# vector remained. Five more existed. One was still named after the project's
+# PRE-REBRANDING name and so never matched the filter; it pointed at a script
+# that the rebranding commit had renamed months earlier, and it had been
+# failing at 03:00 every morning since. The same
 # session also asserted "nothing can recreate these" without ever searching for
 # scripts that create tasks. There were six.
 #

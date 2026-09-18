@@ -6,6 +6,12 @@ user-invocable: true
 
 # /bootstrapper — Project Context Bootstrapper
 
+**Model routing:** this is context-governance work → dispatch it via the `Agent` tool with
+`subagent_type: "governance-worker"` (model: opus, effort: high) rather than running it inline.
+See `~/.claude/CLAUDE.md` § Model Routing Policy. Exception: when this skill is fired automatically
+by the `pre-session.sh` hook at session start, run it inline — a session-start briefing must not
+block on a subagent.
+
 **Language:** Communicate in **Hebrew**. All code, paths, identifiers in **English**.
 
 **Authority:** Context Governance framework (see `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §5). This is the FIRST skill that runs at session start (after `context-governance lite`). It produces the briefing that Claude reads before doing any work.

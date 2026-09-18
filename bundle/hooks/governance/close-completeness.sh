@@ -126,6 +126,76 @@ if [ -d "$_cc_mem" ]; then
   fi
 fi
 
+# 4. HEAD sits on a release tag, but a canonical record file was last committed BEFORE that tag.
+#    Added 2026-09-15, from a session that shipped two releases, deployed and verified both — and
+#    then died at its own close ("Prompt is too long") with five governance files still describing
+#    the pre-release world. Open-Problems still read "NOT RELEASED ... the live node is untouched"
+#    two releases after that stopped being true, and the next-session prompt briefed a job already
+#    finished. Lite passed cleanly throughout, because every check it runs was satisfied: one
+#    active handoff, version.json == CLAUDE.md. Nothing asked whether the RECORD had caught up
+#    with the RELEASE — they are two separate commitments and only one of them was kept.
+#
+#    Deliberately warn-only and deliberately narrow. It fires ONLY when HEAD is exactly on a tag,
+#    so it is silent through every ordinary working session. A docs-only release that legitimately
+#    touches no problem list will produce one false warning; that is the correct trade for a
+#    control that cannot block, and a blocking version of this would be wrong — the record is
+#    sometimes finished in the session AFTER the release, which is a valid choice, not a defect.
+if [ -n "${PROJECT_ROOT:-}" ] && [ -d "$PROJECT_ROOT/.git" ]; then
+  _cc_tag="$(git -C "$PROJECT_ROOT" describe --tags --exact-match HEAD 2>/dev/null || true)"
+  if [ -n "$_cc_tag" ]; then
+    _cc_tagtime="$(git -C "$PROJECT_ROOT" log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
+    _cc_lag=""
+    for _cc_rel in MDs/Open-Problems.md docs/context/OPEN-PROBLEMS.md Plans/PLAN.md \
+                   docs/context/MEMORY.md docs/context/NEXT-SESSION-PROMPT.md; do
+      [ -f "$PROJECT_ROOT/$_cc_rel" ] || continue
+      _cc_ft="$(git -C "$PROJECT_ROOT" log -1 --format=%ct -- "$_cc_rel" 2>/dev/null || echo 0)"
+      [ "$_cc_ft" -lt "$_cc_tagtime" ] 2>/dev/null && _cc_lag="$_cc_lag $_cc_rel"
+    done
+    if [ -n "$_cc_lag" ]; then
+      _cc_warn "HEAD is on $_cc_tag but these record files predate the release commit:$(printf '%s' "$_cc_lag" | tr ' ' '\n' | sed '/^$/d' | sed 's|^|\n        |')
+        A release that is live while the record still describes the world before it is the
+        failure this check was written for. Ask of each file: does it still say NOT RELEASED,
+        name the previous version as deployed, point at a superseded handoff, or brief a job
+        that is already done? Reconcile it, or state deliberately that the record is being
+        finished next session."
+    fi
+  fi
+fi
+
+# 5. The active handoff carries a finding it admits was never filed.
+#    Added 2026-09-15. The same session's audit produced a real money-path bug (a rate-limited
+#    confirmation burning its own approval and defeating an anti-double-issue guard) and recorded
+#    it as a paragraph of handoff prose ending "Not filed as a numbered Open-Problem yet — do that
+#    first if picking this up." It survived only because the next session read the sentence.
+#    A finding with no number is not in the problem list, is not in any priority ordering, and is
+#    invisible to every count — it exists exactly as long as one person remembers the paragraph.
+#    The phrase list is the tell an author writes when they KNOW the record is in the wrong place.
+if [ -n "${PROJECT_ROOT:-}" ] && [ -f "$PROJECT_ROOT/docs/context/HANDOFF.md" ]; then
+  _cc_target="$(grep -m1 -E '^points_to:' "$PROJECT_ROOT/docs/context/HANDOFF.md" 2>/dev/null \
+    | sed 's|^points_to:[[:space:]]*||' | tr -d '\r')"
+  _cc_hf=""
+  case "$_cc_target" in
+    '') _cc_hf="$PROJECT_ROOT/docs/context/HANDOFF.md" ;;
+    /*) _cc_hf="$_cc_target" ;;
+    *)  _cc_hf="$PROJECT_ROOT/docs/context/$_cc_target" ;;
+  esac
+  if [ -f "$_cc_hf" ]; then
+    # Match on a WHITESPACE-FLATTENED copy, never line by line. The first draft of this check
+    # used a line-oriented grep and reported nothing on the very handoff it was written for:
+    # the sentence was wrapped as "... but real. Not\nfiled as a numbered Open-Problem yet ...".
+    # A pattern that assumes a sentence sits on one line is a pattern for a document nobody wrote.
+    _cc_unfiled="$(tr '\n' ' ' < "$_cc_hf" 2>/dev/null | tr -s ' ' \
+      | grep -oiE '.{0,70}(not (yet )?filed as|file (this|it) (first|as a numbered)|no (numbered )?open.?problem yet|needs its own (numbered )?entry).{0,70}' \
+      | head -3 || true)"
+    if [ -n "$_cc_unfiled" ]; then
+      _cc_warn "the active handoff says a finding was never filed:$(printf '%s' "$_cc_unfiled" | sed 's|^|\n        |')
+        File it in the project's problem list with a number NOW, then point the handoff at that
+        number. Prose in a handoff is read once, by whoever happens to open it; a numbered entry
+        is in the list, in the priority order, and in every count."
+    fi
+  fi
+fi
+
 # ── PROTECTED DOCS WRITTEN OUTSIDE THE GUARD (2026-09-07) ───────────────────
 #
 # governance-guard.sh is registered PreToolUse on Edit|Write|MultiEdit|NotebookEdit and NOT on

@@ -63,6 +63,90 @@ FILE_PATH=$(printf '%s' "$FILE_PATH" | head -c 512 | tr -d '\n\r' | tr -cd '[:pr
 # Normalize path separators — we match on substring so both Unix and Windows forms work.
 NORMALIZED=$(printf '%s' "$FILE_PATH" | tr '\\' '/')
 
+# ── bundle/ IS A PUBLISH TARGET, NOT AN EDIT SURFACE (5.6, 1.7.0) ─────────────────────────────
+#
+# THE ROOT CAUSE THIS CLOSES. The three copies of this framework are:
+#     ~/.claude/{hooks,skills,docs,agents,CLAUDE.md}   LIVE     — the ONLY edit surface
+#  -> ~/.claude/governance-installer/bundle/           STAGING  — mirrored by the sync hook
+#  -> <GOV_REPO_PATH>/bundle/                          TARGET   — written only by a publish
+# The publish does `cp -r <staging>/bundle/* <target>/bundle/`: one-way, no direction check,
+# no delete. MEASURED 2026-09-18: 13 files differed and FIVE had the TARGET as the newer,
+# better copy — someone had edited the clone directly across v1.5.x/v1.6.x. The next
+# unattended publish would have clobbered all five silently.
+#
+# The TARGET-AHEAD gate in end-session.sh catches that at publish time. This catches it at the
+# keystroke, which is where it is cheap to fix. Cost when this guard is WRONG: it blocks a
+# deliberate clone edit — so there is a named kill switch, and the message says what to edit
+# instead rather than only refusing.
+#
+# ORDER MATTERS: this runs BEFORE the protected-docs machinery and before the fail-closed
+# trap, and it is gated on the path containing `/bundle/` so an ordinary edit pays NOTHING
+# (no env sourcing, no extra fork) — the 2026-09-15 lesson about controls that cost time on
+# every run applies to this file more than most.
+case "$NORMALIZED" in
+  */bundle/*)
+    if [ "${GOV_BUNDLE_EDIT:-0}" = "1" ]; then
+      [ "${GOV_BYPASS_QUIET:-0}" = "1" ] || echo "[governance] GOV_BUNDLE_EDIT=1 — writing DIRECTLY into a publish target. The sync hook will overwrite this from the live file, and a publish may clobber it. (GOV_BYPASS_QUIET=1 to mute)" >&2
+      gov_log "governance-guard" "GOV_BUNDLE_EDIT=1 bypass: direct bundle write allowed at $NORMALIZED"
+    else
+      # Roots are CONFIGURATION, never hardcoded: this file ships in the public bundle, so a
+      # baked checkout path would be both an identity leak and wrong on every other machine.
+      _GG_ROOTS=""
+      if [ -f "$HOME/.claude/.governance-local.env" ]; then
+        _GG_REPO=$(grep -E '^[[:space:]]*GOV_REPO_PATH=' "$HOME/.claude/.governance-local.env" 2>/dev/null \
+                   | tail -1 | sed -e 's/^[^=]*=//' -e 's/^["'"'"']//' -e 's/["'"'"']$//' -e 's/[[:space:]]*$//')
+        [ -n "$_GG_REPO" ] && _GG_ROOTS="$_GG_REPO"
+      fi
+      if [ -f "$HOME/.claude/.governance-mirrors" ]; then
+        _GG_ROOTS="$_GG_ROOTS
+$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$HOME/.claude/.governance-mirrors" 2>/dev/null | grep -v '^$')"
+      fi
+      # Fold `C:/x` -> `/c/x` and lowercase BOTH sides before comparing. The payload gives a
+      # Windows path (e.g. C:\dev\example-project\bundle\x) while a configured root may be
+      # written in either form, and Windows paths are case-insensitive — a raw string compare
+      # says "different" for the very write this guard exists to stop. Same fold as
+      # sync-governance-copies.sh gov_norm_path(), for the same reason.
+      _gg_fold() {
+        _p=$(printf '%s' "$1" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+        case "$_p" in [a-z]:/*) _p="/${_p%%:*}/${_p#*:/}" ;; esac
+        while [ "${_p%/}" != "$_p" ]; do _p="${_p%/}"; done
+        printf '%s' "$_p"
+      }
+      _GG_TARGET=$(_gg_fold "$NORMALIZED")
+      while IFS= read -r _gg_root; do
+        [ -n "$_gg_root" ] || continue
+        _gg_norm=$(_gg_fold "$_gg_root")
+        [ -n "$_gg_norm" ] || continue
+        case "$_GG_TARGET" in
+          "$_gg_norm"/bundle/*)
+            gov_log "governance-guard" "BLOCK: direct write into a publish target: $NORMALIZED"
+            {
+              echo "[GOVERNANCE] BLOCKED: bundle/ is a PUBLISH TARGET, not an edit surface."
+              echo "  target : $FILE_PATH"
+              echo "  root   : $_gg_norm"
+              echo "  Edit the LIVE file under ~/.claude instead — the sync hook mirrors it into"
+              echo "  ~/.claude/governance-installer/bundle/ (PII-gated), and a deliberate"
+              echo "  GOV_PUBLISH=1 close copies that into the repo."
+              echo "    hooks/governance/<f>  ->  ~/.claude/hooks/governance/<f>"
+              echo "    skills/<s>/SKILL.md   ->  ~/.claude/skills/<s>/SKILL.md"
+              echo "    docs/<d>.md           ->  ~/.claude/docs/<d>.md"
+              echo "    agents/<a>.md         ->  ~/.claude/agents/<a>.md   (must be listed in bundle/DISTRIBUTED)"
+              echo "    CLAUDE.md.template    ->  ~/.claude/CLAUDE.md       (rendered: content above the GOV-LOCAL-ONLY marker)"
+              echo "  WHY: editing a clone's bundle/ is invisible to every drift check here, and the"
+              echo "  publish copies staging OVER the clone — MEASURED 2026-09-18, five such clone-only"
+              echo "  edits were one unattended close away from being silently overwritten."
+              echo "  Deliberate exception (say so out loud): GOV_BUNDLE_EDIT=1"
+            } >&2
+            exit 2
+            ;;
+        esac
+      done <<GGEOF
+$_GG_ROOTS
+GGEOF
+    fi
+    ;;
+esac
+
 # Protected file patterns — any Edit/Write to a path containing one of these
 # is blocked unless a fresh success token exists.
 #

@@ -6,6 +6,13 @@ user-invocable: true
 
 # /plan-and-execute — Multi-Agent Plan & Execute Pipeline
 
+**Model routing:** split by phase (see `~/.claude/CLAUDE.md` § Model Routing Policy).
+- **Planning / architecture / design phases** → `Agent` with `subagent_type: "architect-planner"`
+  (model: fable, effort: high).
+- **Canonical-file writes** (PLAN / HANDOFF / MEMORY / OPEN-PROBLEMS) → `Agent` with
+  `subagent_type: "governance-worker"` (model: opus, effort: high).
+- **Implementation / code / scripts** → Sonnet, i.e. the session's default model; no dispatch needed.
+
 **Language:** Communicate with the user in **Hebrew**. All code, comments, and technical artifacts in **English**.
 
 **Authority:** Context Governance framework (see `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §9, §12). This skill orchestrates multi-agent planning and execution for any governed project. It is the most complex governance skill — errors here cascade into every plan created.

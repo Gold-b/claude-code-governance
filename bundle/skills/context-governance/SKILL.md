@@ -6,6 +6,12 @@ user-invocable: true
 
 # /context-governance — Context Hygiene Meta-Skill
 
+**Model routing:** this is context-governance work → dispatch it via the `Agent` tool with
+`subagent_type: "governance-worker"` (model: opus, effort: high) rather than running it inline.
+See `~/.claude/CLAUDE.md` § Model Routing Policy. Exception: **Lite** mode fired automatically by
+`pre-session.sh` / `pre-task.sh` runs inline (it is a ~6.5K-token check and must not block).
+**Full** mode always goes to `governance-worker`.
+
 > This skill works on ANY project that has been initialized with `/init-governance`.
 
 **Language:** Communicate in **Hebrew**. All code, paths, file content in **English**.

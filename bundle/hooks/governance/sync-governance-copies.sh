@@ -24,6 +24,100 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { exit 0; }
 gov_disabled && exit 0
 
+# ---------------------------------------------------------------------------
+# WHAT SHIPS — one definition, read here and by install.sh: bundle/DISTRIBUTED
+#
+# Before 1.7.0 this hook decided the private->public crossing with a DENYLIST
+# (GOV_NEVER_DISTRIBUTE_SKILLS) and an unconditional `mkdir -p` into the bundle for
+# everything else, while install.sh carried its own hardcoded lists. Two owners for one
+# invariant, never compared: MEASURED, every user-level skill on this machine — including
+# deployment tooling naming real clients and containers — was one Edit-tool save away from
+# entering a PUBLIC bundle, gated only by a scanner that models shapes and cannot see a
+# product name.
+#
+# An allow-list fails the safe way round: a new skill/agent/root-hook does not cross until a
+# human writes its name in bundle/DISTRIBUTED. A MISSING or unparseable DISTRIBUTED therefore
+# means "nothing crosses", and says so out loud — a silent fail-open here is the whole bug.
+# ---------------------------------------------------------------------------
+GOV_DISTRIBUTED_FILE="${GOV_DISTRIBUTED_FILE:-$HOME/.claude/governance-installer/bundle/DISTRIBUTED}"
+
+# _gov_distributed <section> — one name per line from [section].
+# LITERAL header equality, never `$0 ~ want`: with want="[core]" a regex match reads the
+# brackets as a CHARACTER CLASS and every section header matches, returning the whole file
+# for every query. That bug was caught by a parity assertion in install.sh, not by review.
+_gov_distributed() {
+  [ -f "$GOV_DISTRIBUTED_FILE" ] || return 1
+  awk -v want="[$1]" '
+    /^[[:space:]]*\[/ {
+      hdr = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", hdr)
+      inside = (hdr == want)
+      next
+    }
+    inside {
+      sub(/#.*$/, "");
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "");
+      if (length($0)) print
+    }
+  ' "$GOV_DISTRIBUTED_FILE" 2>/dev/null
+}
+
+# _gov_is_distributed <section> <name> — 0 = may cross into the bundle.
+_gov_is_distributed() {
+  local _sect="$1" _want="$2" _n
+  [ -n "$_want" ] || return 1
+  if [ ! -f "$GOV_DISTRIBUTED_FILE" ]; then
+    echo "[GOVERNANCE-SYNC] bundle/DISTRIBUTED is MISSING at $GOV_DISTRIBUTED_FILE - nothing may cross into the publishable bundle until it exists. (Nothing was copied; the live file is untouched.)" >&2
+    gov_log "sync-copies" "DISTRIBUTED missing - crossing refused for $_sect/$_want"
+    return 1
+  fi
+  while IFS= read -r _n; do
+    [ "$_n" = "$_want" ] && return 0
+  done <<GOVDISTEOF
+$(_gov_distributed "$_sect")
+GOVDISTEOF
+  return 1
+}
+
+# ── CLAUDE.md: SOURCE-CLEAN + CUT, never scrub (1.7.0) ─────────────────────────────────
+# ~/.claude/CLAUDE.md is prose policy that LEGITIMATELY names its owner, their language and
+# their preferences - that is what a personal instruction file IS. Three options were weighed:
+#   A. raw copy + the PII gate  - rejected: the gate models SHAPES (its own header says so).
+#      A name has no shape, so a possessive first name in a section header, or a medical
+#      detail, passes a shape scanner; the one backstop, NAME_DENY, is case-insensitive
+#      substring matching and unusable for a two-letter first name. MEASURED 2026-09-18: two
+#      agent definitions naming the owner in their second paragraph scanned CLEAN.
+#   B. a real->placeholder substitution map at the crossing - rejected as the primary: it is a
+#      denylist, and this framework's 2026-08-18 and 2026-09-01 incidents are both denylists
+#      lagging reality. Regex over prose also rewrites code samples and cannot be reviewed
+#      with a plain diff. Kept only as the fail-closed backstop it already is (.pii-names).
+#   C. CUT at a marker - CHOSEN. Everything above the marker is publishable verbatim, the
+#      local part lives below it, and the transform is `sed -n` with no pattern matching on
+#      the content at all.
+# The RENDERED file is then PII-scanned like every other bundle file, so a name that drifts
+# above the marker REFUSES the copy instead of publishing. Marker absent => the whole file is
+# treated as local and NOTHING is published. Never "copy the whole file".
+GOV_CLAUDE_LOCAL_MARKER='GOV-LOCAL-ONLY'
+GOV_CLAUDE_MD="${GOV_CLAUDE_MD:-$HOME/.claude/CLAUDE.md}"
+GOV_TEMPLATE_HEAD="${GOV_TEMPLATE_HEAD:-$HOME/.claude/governance-installer/bundle/CLAUDE.md.template.head}"
+GOV_TEMPLATE_DEST="${GOV_TEMPLATE_DEST:-$HOME/.claude/governance-installer/bundle/CLAUDE.md.template}"
+
+# _gov_render_claude_md <outfile>
+#   0 rendered - 1 live file unreadable/write failed - 4 marker missing - 5 head file missing
+_gov_render_claude_md() {
+  local out="$1" m
+  [ -f "$GOV_CLAUDE_MD" ] || return 1
+  [ -f "$GOV_TEMPLATE_HEAD" ] || return 5
+  m=$(grep -n "$GOV_CLAUDE_LOCAL_MARKER" "$GOV_CLAUDE_MD" 2>/dev/null | head -1 | cut -d: -f1)
+  [ -n "$m" ] || return 4
+  [ "$m" -gt 1 ] 2>/dev/null || return 4
+  # head carries the H1 and the generic User Preferences stanza, so the live file's own line 1
+  # (its H1) is dropped - otherwise the template would carry two titles.
+  { cat "$GOV_TEMPLATE_HEAD"; sed -n "2,$((m-1))p" "$GOV_CLAUDE_MD"; } > "$out" 2>/dev/null || return 1
+  [ -s "$out" ] || return 1
+  return 0
+}
+
 # --sync-all is a CLI reconcile, not a hook event: remember it here, ACT on it further down.
 # The reconciler needs the PII helpers, and those are defined below — while the stdin read a few
 # lines from here exits 0 on an empty payload, which is exactly what a CLI invocation has. Both
@@ -472,8 +566,14 @@ SAEOF
     # instead of slipping into a publishable bundle unseen.
     case "$_rel" in
       *.bak|*.bak-*|*.tmp|*.orig|*.rej)  continue ;;
+      *.local.md|*.local.json|*.local.sh|*.local.env|*.local.*) continue ;;  # machine-local by convention (1.7.0) — same rule as the per-file path
       __pycache__/*|*/__pycache__/*|*.pyc|*.pyo) continue ;;   # build cache
       services/*)                        continue ;;           # 2-byte stray fixture (2026-07-27) from the render-gate family; task B11
+      *.lock)                            continue ;;           # concurrency lock files are never content
+      desktop.ini|*/desktop.ini)         continue ;;           # Google-Drive folder metadata, not content. It was being scanned and
+                                                               # REFUSED on every reconcile (2 hits, MEASURED 2026-09-18), which is
+                                                               # noise in the one report that must stay readable: a real refusal has
+                                                               # to stand out from a permanent one.
     esac
     _sa_n=$((_sa_n+1))
     while IFS= read -r _d; do
@@ -486,6 +586,74 @@ SADEOF
   done <<SAFEOF
 $(find "$_SA_LIVE_HOOKS" -type f 2>/dev/null | sort)
 SAFEOF
+
+  # ── CLAUDE.md: compare the RENDERED output, never the raw file (1.7.0) ────────────────
+  # The reconciler exists because PostToolUse cannot see a Bash/sed/heredoc edit. CLAUDE.md is
+  # edited that way often, and it is the one watched file whose bundle form is COMPUTED, so a
+  # raw `cmp` against bundle/CLAUDE.md.template would report permanent drift and copy the
+  # local section into the public bundle. Render first, then compare.
+  if [ -f "$GOV_CLAUDE_MD" ] && [ -d "$(dirname "$GOV_TEMPLATE_DEST")" ]; then
+    _sa_cmd_tmp="$HOME/.claude/logs/.gov-claude-template-sa.$$"
+    mkdir -p "$(dirname "$_sa_cmd_tmp")" 2>/dev/null
+    _gov_render_claude_md "$_sa_cmd_tmp"; _sa_rr=$?
+    if [ "$_sa_rr" -eq 4 ]; then
+      _sa_report="$_sa_report
+    SKIPPED CLAUDE.md: no '$GOV_CLAUDE_LOCAL_MARKER' marker - the whole file is treated as local, nothing published."
+    elif [ "$_sa_rr" -eq 5 ]; then
+      _sa_report="$_sa_report
+    SKIPPED CLAUDE.md: bundle/CLAUDE.md.template.head missing at $GOV_TEMPLATE_HEAD."
+    elif [ "$_sa_rr" -eq 0 ]; then
+      _sa_n=$((_sa_n+1))
+      # rc captured on its own line: `_pii_scan x; [ $? -ne 0 ]` inside a compound condition
+      # is readable but reads $? of whatever the shell evaluated last, which is not always the
+      # scan. An explicit variable cannot drift.
+      _sa_cmd_pii=0
+      if ! gov_pii_gate_off; then
+        _pii_scan "$_sa_cmd_tmp"; _sa_cmd_pii=$?
+      fi
+      if [ -f "$GOV_TEMPLATE_DEST" ] && cmp -s "$_sa_cmd_tmp" "$GOV_TEMPLATE_DEST"; then
+        _sa_same=$((_sa_same+1))
+      elif [ "$_sa_cmd_pii" -ne 0 ]; then
+        _sa_refused=$((_sa_refused+1))
+        _sa_report="$_sa_report
+    REFUSED (PII rc=$_sa_cmd_pii): CLAUDE.md.template (rendered) -> installer-bundle"
+      elif [ "$_SA_DRY" = "1" ]; then
+        _sa_copied=$((_sa_copied+1))
+        _sa_report="$_sa_report
+    [dry] would render: CLAUDE.md -> bundle/CLAUDE.md.template (cut at the local-only marker)"
+      elif cp -f "$_sa_cmd_tmp" "$GOV_TEMPLATE_DEST" 2>/dev/null; then
+        _sa_copied=$((_sa_copied+1))
+        _sa_report="$_sa_report
+    rendered: CLAUDE.md -> bundle/CLAUDE.md.template (cut at the local-only marker)"
+      else
+        _sa_report="$_sa_report
+    FAILED to write: bundle/CLAUDE.md.template"
+      fi
+    fi
+    rm -f "$_sa_cmd_tmp" 2>/dev/null
+  fi
+
+  # ── Allow-listed agents and root hooks (1.7.0) ───────────────────────────────────────
+  # Same reconcile, driven by bundle/DISTRIBUTED. Mirrors get nothing (a project-level
+  # agents/ or hooks/ entry SHADOWS the user-level one), so the bundle is the only target.
+  for _sa_kind in agents hooks; do
+    case "$_sa_kind" in
+      agents) _sa_src_dir="$HOME/.claude/agents"; _sa_dst_dir="$HOME/.claude/governance-installer/bundle/agents"; _sa_sfx=".md" ;;
+      hooks)  _sa_src_dir="$HOME/.claude/hooks";  _sa_dst_dir="$HOME/.claude/governance-installer/bundle/hooks";  _sa_sfx="" ;;
+    esac
+    [ -d "$_sa_src_dir" ] || continue
+    [ -d "$_sa_dst_dir" ] || continue
+    while IFS= read -r _sa_name; do
+      [ -n "$_sa_name" ] || continue
+      _sa_f="$_sa_src_dir/$_sa_name$_sa_sfx"
+      [ -f "$_sa_f" ] || { _sa_report="$_sa_report
+    MISSING live source for allow-listed $_sa_kind entry: $_sa_name$_sa_sfx"; continue; }
+      _sa_n=$((_sa_n+1))
+      _sa_one "$_sa_f" "$_sa_name$_sa_sfx" "$_sa_dst_dir" "installer-bundle" "1"
+    done <<SAALEOF
+$(_gov_distributed "$_sa_kind")
+SAALEOF
+  done
 
   [ -n "$_sa_report" ] && printf '%s\n' "$_sa_report"
   printf '[sync-all] %s live file(s) x %s destination(s): %s already identical, %s copied, %s created, %s REFUSED by the PII gate\n' \
@@ -551,6 +719,26 @@ _mirror_allowed() {
   return 1
 }
 
+# ── *.local.* NEVER CROSSES, unconditionally (2.2, 1.7.0) ──────────────────────────────
+# The `.local.` infix is already the convention on this machine for machine-local companions
+# to tracked files (config.local.json, routine-prompt.local.md). MEASURED 2026-09-18: one of
+# those carries a full name, a GitHub login and a Slack user id on its FIRST LINE. Nothing
+# enforced the convention - it was a naming habit that happened to sit outside a watched
+# directory. This makes the name binding, and it is checked BEFORE any branch so it holds for
+# docs, skills, hooks and agents alike.
+#
+# The convention cuts both ways, and that is the point: a THIRD `.local.md` in the same
+# directory turned out to be entirely generic instructions, so on 2026-09-18 it was RENAMED out
+# of the convention (-> docs/ROTATE-CONNECTOR-TOKEN.md) and now ships. `.local.` is a claim
+# about a file's CONTENT, not a place to park things.
+# Paired with the same pattern in the reconciler skip list and in the repo .gitignore.
+case "$FILE_PATH" in
+  *.local.md|*.local.json|*.local.sh|*.local.env|*.local.*)
+    gov_log "sync-copies" "*.local.* is machine-local by convention - not synced: $FILE_PATH"
+    exit 0
+    ;;
+esac
+
 # --- Detect: is this a governance file? ---
 HOOK_DIR="$HOME/.claude/hooks/governance"
 SKILL_DIR="$HOME/.claude/skills"
@@ -594,6 +782,126 @@ case "$FILE_PATH" in
         echo "$(date +%Y-%m-%dT%H:%M:%S%z) $FILE_PATH" >> "$FLAG_FILE" 2>/dev/null
         gov_log "sync-copies" "docs synced to installer bundle: $DOC_REL"
         echo "[GOVERNANCE-SYNC] Governance doc copied to the installer bundle. GitHub push queued for session end."
+      fi
+    fi
+    exit 0
+    ;;
+  */.claude/CLAUDE.md)
+    # RENDERED, not copied (see _gov_render_claude_md above). Only the HOME file: a
+    # `.claude/CLAUDE.md` inside any project checkout is that PROJECT's instruction file and
+    # publishing it would be a straight data leak - the same trap the docs branch below
+    # guards against, and the reason that guard is repeated here rather than assumed.
+    if ! gov_same_file "$FILE_PATH" "$GOV_CLAUDE_MD"; then
+      echo "[GOVERNANCE-SYNC] $FILE_PATH is a PROJECT CLAUDE.md, not the user-level file at $GOV_CLAUDE_MD - nothing synced, nothing queued for GitHub."
+      gov_log "sync-copies" "project-scoped CLAUDE.md refused at the private->public crossing: $FILE_PATH"
+      exit 0
+    fi
+    if gov_dry; then echo "[GOVERNANCE DRY-RUN] sync-copies: would render $GOV_CLAUDE_MD -> $GOV_TEMPLATE_DEST"; exit 0; fi
+    _CMD_TMP="$HOME/.claude/logs/.gov-claude-template.$$"
+    mkdir -p "$(dirname "$_CMD_TMP")" 2>/dev/null
+    _gov_render_claude_md "$_CMD_TMP"; _rr=$?
+    case "$_rr" in
+      4)
+        # FAIL CLOSED AND SAY WHICH LINE TO ADD. A CLAUDE.md with no marker is treated as
+        # 100% local: publishing "everything" from a file whose local part is unmarked is
+        # exactly the leak this design exists to prevent.
+        rm -f "$_CMD_TMP" 2>/dev/null
+        echo "[GOVERNANCE-SYNC] CLAUDE.md has NO local-only marker, so NOTHING was published from it." >&2
+        echo "  Add this line immediately above the last (personal) section:" >&2
+        echo "    <!-- $GOV_CLAUDE_LOCAL_MARKER: nothing below this line is synced or published -->" >&2
+        echo "  Everything ABOVE it is published verbatim into bundle/CLAUDE.md.template; everything below stays on this machine." >&2
+        gov_log "sync-copies" "CLAUDE.md render refused: marker '$GOV_CLAUDE_LOCAL_MARKER' not found"
+        exit 0
+        ;;
+      5)
+        rm -f "$_CMD_TMP" 2>/dev/null
+        echo "[GOVERNANCE-SYNC] bundle/CLAUDE.md.template.head is MISSING at $GOV_TEMPLATE_HEAD - the template cannot be rendered, so nothing was published." >&2
+        gov_log "sync-copies" "CLAUDE.md render refused: head file missing at $GOV_TEMPLATE_HEAD"
+        exit 0
+        ;;
+      0) : ;;
+      *)
+        rm -f "$_CMD_TMP" 2>/dev/null
+        gov_log "sync-copies" "CLAUDE.md render failed (rc=$_rr)"
+        exit 0
+        ;;
+    esac
+    # The GATE SCANS THE RENDERED FILE, which is the whole point: a name that drifts ABOVE
+    # the marker refuses this copy and is reported, instead of reaching the public repo.
+    _bundle_copy "$_CMD_TMP" "$GOV_TEMPLATE_DEST" "CLAUDE.md.template (rendered)"; _rc=$?
+    rm -f "$_CMD_TMP" 2>/dev/null
+    if [ "$_rc" -eq 0 ]; then
+      echo "$(date +%Y-%m-%dT%H:%M:%S%z) bundle/CLAUDE.md.template" >> "$FLAG_FILE" 2>/dev/null
+      gov_log "sync-copies" "CLAUDE.md rendered into bundle/CLAUDE.md.template (cut at the local-only marker)"
+      echo "[GOVERNANCE-SYNC] CLAUDE.md rendered into the installer bundle (content above the local-only marker only). GitHub push queued for session end."
+    fi
+    exit 0
+    ;;
+  */.claude/agents/*.md)
+    # ALLOW-LISTED raw copy. No marker mechanism: an agent definition is either fully generic
+    # or it does not ship (owner-specific text belongs below the marker in CLAUDE.md, and the
+    # agent refers to "the owner's standing policy in CLAUDE.md" instead - which is how both
+    # shipped definitions are already phrased).
+    #
+    # Mirrors get NOTHING. Agents are user-level, and a project-level .claude/agents/<x> would
+    # SHADOW the user-level definition for every session opened in that project - the exact
+    # failure that made "MIRROR, NEVER RESURRECT" the rule for skills on 2026-08-17.
+    AGENT_REL=$(echo "$FILE_PATH" | sed "s|.*/.claude/agents/||")
+    AGENT_NAME="${AGENT_REL%.md}"
+    if ! gov_same_file "$FILE_PATH" "$HOME/.claude/agents/$AGENT_REL"; then
+      echo "[GOVERNANCE-SYNC] $FILE_PATH is a PROJECT-level agent, not the user-level one at ~/.claude/agents/$AGENT_REL - nothing synced."
+      gov_log "sync-copies" "project-scoped agent refused at the private->public crossing: $FILE_PATH"
+      exit 0
+    fi
+    if ! _gov_is_distributed agents "$AGENT_NAME"; then
+      echo "[GOVERNANCE-SYNC] agent '$AGENT_NAME' is not listed under [agents] in bundle/DISTRIBUTED - NOT copied into the public bundle. Local copy untouched."
+      gov_log "sync-copies" "agent '$AGENT_NAME' not allow-listed - crossing refused"
+      exit 0
+    fi
+    if [ -f "$FILE_PATH" ]; then
+      if gov_dry; then echo "[GOVERNANCE DRY-RUN] sync-copies: would copy $FILE_PATH -> bundle/agents/$AGENT_REL"; exit 0; fi
+      _bundle_copy "$FILE_PATH" "$HOME/.claude/governance-installer/bundle/agents/$AGENT_REL" "agents/$AGENT_REL"; _rc=$?
+      if [ "$_rc" -eq 0 ]; then
+        echo "$(date +%Y-%m-%dT%H:%M:%S%z) $FILE_PATH" >> "$FLAG_FILE" 2>/dev/null
+        gov_log "sync-copies" "agent synced to installer bundle: $AGENT_REL"
+        echo "[GOVERNANCE-SYNC] Agent definition copied to the installer bundle. GitHub push queued for session end."
+      fi
+    fi
+    exit 0
+    ;;
+  */.claude/hooks/*)
+    # ROOT-LEVEL hooks only (depth 1) - hooks/governance/** is matched by the branch above and
+    # ships whole. This directory was UNWATCHED until 1.7.0, which is why a hook carrying a
+    # real container name sat in the public bundle while a clean copy existed locally: nothing
+    # compared them because nothing synced them.
+    #
+    # Allow-listed, because the live hooks/ root is mostly machine-local: the WhatsApp-bridge
+    # family and client-named tooling live here. Unlisted files exit quietly with a log line,
+    # exactly as a never-distributed skill does.
+    ROOTHOOK_REL=$(echo "$FILE_PATH" | sed "s|.*/.claude/hooks/||")
+    case "$ROOTHOOK_REL" in
+      */*)
+        # A subdirectory of hooks/ that is not hooks/governance/. Never distributed.
+        gov_log "sync-copies" "hooks/ subdirectory is not a distributable surface: $ROOTHOOK_REL"
+        exit 0
+        ;;
+    esac
+    if ! gov_same_file "$FILE_PATH" "$HOME/.claude/hooks/$ROOTHOOK_REL"; then
+      gov_log "sync-copies" "project-scoped root hook refused at the private->public crossing: $FILE_PATH"
+      exit 0
+    fi
+    if ! _gov_is_distributed hooks "$ROOTHOOK_REL"; then
+      echo "[GOVERNANCE-SYNC] root hook '$ROOTHOOK_REL' is not listed under [hooks] in bundle/DISTRIBUTED - NOT copied into the public bundle. Local copy untouched."
+      gov_log "sync-copies" "root hook '$ROOTHOOK_REL' not allow-listed - crossing refused"
+      exit 0
+    fi
+    if [ -f "$FILE_PATH" ]; then
+      if gov_dry; then echo "[GOVERNANCE DRY-RUN] sync-copies: would copy $FILE_PATH -> bundle/hooks/$ROOTHOOK_REL"; exit 0; fi
+      _bundle_copy "$FILE_PATH" "$HOME/.claude/governance-installer/bundle/hooks/$ROOTHOOK_REL" "hooks/$ROOTHOOK_REL"; _rc=$?
+      if [ "$_rc" -eq 0 ]; then
+        echo "$(date +%Y-%m-%dT%H:%M:%S%z) $FILE_PATH" >> "$FLAG_FILE" 2>/dev/null
+        gov_log "sync-copies" "root hook synced to installer bundle: $ROOTHOOK_REL"
+        echo "[GOVERNANCE-SYNC] Root hook copied to the installer bundle. GitHub push queued for session end."
       fi
     fi
     exit 0
@@ -698,6 +1006,24 @@ EOF
       exit 0
       ;;
   esac
+
+  # ── AND the skill must be ALLOW-LISTED (1.7.0). The denylist above is now a BELT, not the
+  # mechanism. It only ever named the skills somebody had already thought of. MEASURED
+  # 2026-09-18: the live tree held SEVEN more distributable-by-default skill paths - remote-host
+  # tooling named after a real client, three project-specific rebuild/revert skills, a
+  # third-party skill, a `synced/` subtree and a stray top-level `skills/*.md` file. Every one
+  # was one Edit-tool save away from entering a PUBLIC bundle, none was on any denylist, and
+  # none is installed by install.sh. "Protected by accident" is not protected. (The names are
+  # deliberately not written here: this file ships in the public bundle, and one of them is a
+  # client organisation - the PII gate blocked an earlier draft of this very comment.)
+  #
+  # A name that is BOTH allow-listed AND denied is refused by the block above and is a bug to
+  # be SEEN - the contradiction is deliberately not resolved by a precedence rule.
+  if ! _gov_is_distributed core "$SKILL_NAME" && ! _gov_is_distributed extended "$SKILL_NAME"; then
+    echo "[GOVERNANCE-SYNC] skill '$SKILL_NAME' is not listed in bundle/DISTRIBUTED ([core] or [extended]) - NOT copied into the public bundle. Local copies are untouched."
+    gov_log "sync-copies" "skill '$SKILL_NAME' not allow-listed in bundle/DISTRIBUTED - crossing refused"
+    exit 0
+  fi
 
   # Target 3: Installer bundle - THIS IS THE PRIVATE->PUBLIC CROSSING. Gated (see above).
   if [ -d "$INSTALLER_SKILLS" ]; then

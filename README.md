@@ -149,9 +149,147 @@ never in the skill — `config.example.json` ships placeholders only.
 - **GOVERNANCE-HUMAN-GUIDE.md** — Human-readable governance reference
 - **NEXT-SESSION-HANDOVER.md** — Goal-scoped continuation protocol: the `/goal` + `/loop` templates, the context-limit exception, and the rules that keep an autonomous loop from overriding a governance stop. It is the *renderer spec*; the rendered prompt lands in each project's `docs/context/NEXT-SESSION-PROMPT.md`, rewritten or deleted at every close.
 
+### Agents (v1.7.0)
+
+`bundle/agents/*.md` → `~/.claude/agents/`, installed with the same never-silently-overwrite
+copy as everything else, and **skipped by `--core-only`**.
+
+| Agent | Model | For |
+|---|---|---|
+| `architect-planner` | Fable | plans, architecture, solution design, context-inference reasoning |
+| `governance-worker` | Opus | canonical/memory files, skills and hooks |
+
+An agent definition is the **deterministic carrier of model routing**: the `model:` and
+`effort:` keys in its frontmatter are what actually pin a tier. Prose in `CLAUDE.md` asking for
+a model cannot switch one — a skill is text loaded into whatever model is already running.
+
+Two things are worth knowing before you rely on them:
+
+- **A restart is required after installing a new agent.** The agent-file watcher only covers
+  directories that existed when the session launched, so a dispatch from the session that
+  created `~/.claude/agents/` returns *"Agent type not found"* (measured 2026-09-17).
+- **The base interactive model cannot be switched mid-session** by any hook, skill or rule.
+  Routing applies only to work explicitly dispatched to a subagent; a whole session on a
+  different model is a human choice at launch (`/model`, `--model`).
+
 ### Configuration
-- **CLAUDE.md** — User-level instructions (session protocol, security, governance rules)
+- **CLAUDE.md** — User-level instructions (session protocol, security, governance rules).
+  Installed from `bundle/CLAUDE.md.template`, and **never overwritten** if you already have one
+  — not even with `--force`. See "The CLAUDE.md marker" below for how that template is built.
 - **settings.json** — Hook registrations merged into existing settings
+
+## What ships, and who decides — `bundle/DISTRIBUTED` (v1.7.0)
+
+One file lists every skill, agent and root-level hook this framework distributes, in four
+sections: `[core]`, `[extended]`, `[agents]`, `[hooks]`. It is read by **both** `install.sh`
+(what to install) and `sync-governance-copies.sh` (what may cross from your live `~/.claude`
+into the publishable bundle).
+
+**Why one file.** Those two used to disagree by construction: the installer had hardcoded skill
+lists, while the sync hook used the opposite shape — a *denylist* plus an unconditional
+`mkdir -p` into the bundle for everything else. Two owners for one invariant, and nothing
+compared them. Measured consequence on the authoring machine: every user-level skill present,
+including deployment tooling naming a real client and a real container, was **one Edit-tool save
+away from entering a public repository** — protected only by a scanner that models *shapes* and
+cannot recognise a product name. Seven such skill paths existed; none was on any denylist; none
+was installed by the installer. Protected by accident is not protected.
+
+**An allow-list fails the safe way round.** A new skill does not ship until a human writes its
+name down. `GOV_NEVER_DISTRIBUTE_SKILLS` is kept as a belt on top: a name that is both listed
+and denied is refused loudly, because a contradiction should be seen rather than silently
+resolved by a precedence rule. If `bundle/DISTRIBUTED` is missing or unparseable, **nothing
+crosses and nothing installs**, and both paths say so — the installer exits non-zero rather than
+reporting success over an empty skill set.
+
+## The `.local.*` convention (v1.7.0)
+
+Any file whose name carries a `.local.` infix — `*.local.md`, `*.local.json`, `*.local.sh`,
+`*.local.env` — is **machine-local**: never synced, never published, and ignored by git. Use it
+for the real-value companion of a tracked file.
+
+This was already a naming habit; v1.7.0 makes it binding in three places at once (the sync
+hook, the reconciler's skip list, and `.gitignore`), because a habit is not a control. One such
+file on the authoring machine carries a full name, a GitHub login and a Slack user id on its
+first line, and it was safe only because it happened to sit outside a watched directory.
+
+The rule cuts both ways, which is the point: a third `.local.md` in that same directory turned
+out to be entirely generic instructions, so it was **renamed out** of the convention and now
+ships as `docs/ROTATE-CONNECTOR-TOKEN.md`. `.local.` is a claim about a file's content, not a
+place to park things.
+
+## The `CLAUDE.md` marker (v1.7.0)
+
+`bundle/CLAUDE.md.template` is **not hand-written**. It is rendered as:
+
+```
+bundle/CLAUDE.md.template.head            (tracked, generic)
++ ~/.claude/CLAUDE.md lines 2 .. marker-1 (your policy, verbatim, minus its own H1)
+= bundle/CLAUDE.md.template
+```
+
+where the marker is a single line in your live file:
+
+```html
+<!-- GOV-LOCAL-ONLY: nothing below this line is synced or published -->
+```
+
+Put it immediately above your last, personal section. Everything **above** it is published
+verbatim; everything **below** it never leaves the machine.
+
+**Why a cut and not a scrubber.** A personal instruction file legitimately names its owner,
+their language and their preferences — that is what the file *is*. The PII gate models *shapes*
+(a phone number has a shape; a name does not), so scrubbing prose means maintaining a denylist,
+and this project's own incidents are all denylists lagging reality. Measured while building
+this: two agent definitions that named the owner in their second paragraph scanned **completely
+clean**. A cut has no pattern matching on content at all, and its result is reviewable with
+`diff`.
+
+Failure directions, both deliberate:
+
+- **No marker → nothing is published,** and the message tells you the exact line to add. A file
+  whose local part is unmarked is treated as 100% local; "copy the whole thing" is never the
+  fallback.
+- The **rendered** file is PII-scanned like any other bundle file, so a real value that drifts
+  *above* the marker refuses the copy instead of publishing.
+
+The same render is used by the reconciler, so a `CLAUDE.md` edited by a script — which
+`PostToolUse` cannot see — is still compared correctly rather than reported as permanent drift.
+
+## bundle/ is a publish target, not an edit surface (v1.7.0)
+
+There are three copies, and only the first is an edit surface:
+
+```
+~/.claude/{hooks,skills,docs,agents,CLAUDE.md}   LIVE     — edit here, always
+  -> ~/.claude/governance-installer/bundle/       STAGING  — mirrored by the sync hook (PII-gated)
+  -> <GOV_REPO_PATH>/bundle/                      TARGET   — written only by a deliberate publish
+```
+
+A write into a `bundle/` directory under your configured repo or mirror root is now **blocked**
+at `PreToolUse`, with a message naming the live file to edit instead. Deliberate exception:
+`GOV_BUNDLE_EDIT=1` (it announces itself).
+
+**Earned the hard way.** The publish does `cp -r <staging>/bundle/* <target>/bundle/` — one-way,
+no direction check, no delete. Measured 2026-09-18: 13 bundle files differed between staging and
+the clone, and for **five** of them the clone held the newer, better copy — work committed
+directly in the clone across two minor versions and never pulled back. The next unattended
+publish would have silently overwritten all five. So there are now two independent stops: this
+guard at the keystroke, and a **TARGET-AHEAD** check that aborts the publish while any file is
+newer in the target than in staging.
+
+Rehearse a publish before doing one:
+
+```bash
+bash ~/.claude/hooks/governance/end-session.sh --publish-preview
+```
+
+It is read-only — no clone, no staging, no commit — and prints the queue, every differing file,
+and any `TARGET-AHEAD` blocker. Publishing itself stays what it has always been: a separate,
+explicit `GOV_PUBLISH=1` on a close. That gate is not going away; the thing v1.7.0 fixes is that
+a held queue used to be mentioned **only** at Stop, buried in close output, where a four-day-old
+queue never looked old. It is now also one line at session start (`GOV_PUBLISH_NAG_DAYS`,
+default 7, `0` to silence) and the count is of **distinct files** rather than append-only log
+lines, which used to overstate it threefold.
 
 ## Portability
 
@@ -373,6 +511,34 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-18 (v1.7.0) — `~/.claude` brought under sync governance, and the three copies stopped
+  being able to silently disagree.** The sync surface grew four members: `CLAUDE.md` (rendered
+  at a `GOV-LOCAL-ONLY` marker, never copied whole), `agents/*.md`, root-level `hooks/*`, and
+  `README.md` — the last one because it was *never* in the publish copy list, so the only way to
+  change the published README was to edit the clone, which no drift check here can see. The two
+  copies had diverged by 130 lines and nothing reported it.
+  **What ships is now one file** (`bundle/DISTRIBUTED`), read by the installer AND by the
+  private→public crossing. It replaces two hardcoded lists in `install.sh` and a *denylist* in
+  the sync hook: measured, every user-level skill on the authoring machine — including tooling
+  naming a real client and a real container — was one Edit-tool save from a public repository.
+  **Three new fail-closed stops:** a `PreToolUse` block on writes into any `bundle/` publish
+  target (`GOV_BUNDLE_EDIT=1` to override); a **TARGET-AHEAD** abort that refuses to publish
+  while the clone holds a newer copy of any bundle file (five such files existed, one close away
+  from being overwritten); and `.local.*` now never crossing, in the sync hook, the reconciler
+  and `.gitignore` at once.
+  **Scanner:** the literal-password-to-`sshpass` shape is modelled (found live in
+  `permissions.allow`, then multiplied into 24 backup copies and a cloud-synced folder, with no
+  rule that could see it), and the claim that Claude OAuth tokens were already caught by the
+  existing `sk-…` alternative is now a `--selftest` case instead of an inference.
+  **Visibility:** the held publish queue is reported at session *start* too, counted in distinct
+  files rather than append-only lines (which overstated it 3×), with the oldest entry's real age;
+  `--publish-preview` rehearses a publish read-only. `GOV_PUBLISH=1` remains a deliberate,
+  per-close human act — unchanged, and deliberately so.
+  **Removed from the bundle:** `wa-cc-autostart.sh` and `wa-bridge-claim-check.{js,test.js}` —
+  never installed by `install.sh`, runtime of a never-distributed skill, and one of them carried
+  a real container name in published HEAD. Illustrative strings naming the author's own products
+  were replaced with generic text in two hooks.
 
 - **2026-09-15 (v1.6.2) - task B11 closed, and a second orphan-process class found the same day
   got the same treatment as the first.** `gov-notify.ps1` deleted: no caller, no incident behind

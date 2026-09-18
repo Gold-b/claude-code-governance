@@ -90,7 +90,29 @@ RE_GOOGLE_ID='(((docs|drive|sheets|script)\.google\.com|googleusercontent\.com)[
 RE_TUNNEL_HOST='\b[A-Za-z0-9][A-Za-z0-9-]{1,60}\.(ngrok(-free)?\.(io|app|dev)|trycloudflare\.com|loca\.lt|serveo\.net|tunnelto\.dev|lhr\.life|bore\.pub|pagekite\.me)\b'
 # Credential shapes. A governance/skills bundle carries installers and CI snippets, and the
 # 2026-08-30 assessment found a real (read-only) GitHub PAT committed in six files.
-RE_SECRET='(gh[pousr]_[A-Za-z0-9]{28,})|(github_pat_[A-Za-z0-9_]{40,})|(xox[baprse]-[A-Za-z0-9-]{16,})|(sk-[A-Za-z0-9_-]{24,})|(AIza[0-9A-Za-z_-]{30,})|(-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----)|(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,})'
+#
+# The sshpass literal-password form was added 2026-09-18, and it is a DIFFERENT KIND of shape
+# from the rest: every other alternative here recognises a token by its own prefix and entropy,
+# whereas this one recognises a CONTEXT that makes the next word a password whatever it looks
+# like. It is here because the class was found live and unmodelled: a root SSH password sat in
+# `permissions.allow` inside settings.json — a file nothing treated as secret — and was then
+# multiplied into 16 top-level .bak copies, 8 more under backups/, and a Google-Drive-synced
+# folder. The scanner had no rule that could see it, so every scan of that tree passed.
+#
+# Anchored on the flag, not on the value: that flag is never correct in a tracked file, so
+# there is no false-positive population to trade against. The -e and -f flags read from the
+# environment and from a file, are the legitimate forms, and are deliberately NOT matched
+# (both are asserted green in --selftest).
+#
+# NOTE FOR ANYONE EDITING THE PROSE HERE: this comment cannot spell the flag adjacent to the
+# binary name, or the rule matches its own documentation and selftest D ("this script scans
+# clean against itself") goes red. That happened twice while the rule was being written — which
+# is the same lesson the fixtures below already encode, one screen up.
+#
+# Claude OAuth tokens (sk-ant-oat01-…, sk-ant-ort01-…) need no new alternative: they are
+# already caught by `sk-[A-Za-z0-9_-]{24,}` above. That was an INFERENCE from reading the
+# regex, so --selftest now carries an explicit fabricated-token case to make it a MEASUREMENT.
+RE_SECRET='(gh[pousr]_[A-Za-z0-9]{28,})|(github_pat_[A-Za-z0-9_]{40,})|(xox[baprse]-[A-Za-z0-9-]{16,})|(sk-[A-Za-z0-9_-]{24,})|(AIza[0-9A-Za-z_-]{30,})|(-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----)|(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,})|(sshpass[[:space:]]+-p[[:space:]]*['"'"'"]?[^'"'"'"[:space:]]+)'
 # NAME_ATTRIB — a person named where documents name people. Two strengths: a labelled
 # attribution (Owner:/Author:/Operator:...) fires anywhere in the file; the weak forms
 # ("by X Y", "— X Y") must START a line. Mid-line they are titles, not bylines:
@@ -152,7 +174,7 @@ rule_fix() {
     SLACK_ID)    printf '%s' 'use C0EXAMPLE01 / U0EXAMPLE01 / T0EXAMPLE01 and example.slack.com' ;;
     GOOGLE_ID)   printf '%s' 'a Drive/Docs/Sheets id is a live pointer at a private document: use 1EXAMPLE_FILE_ID or read it from the machine-local config' ;;
     TUNNEL_HOST) printf '%s' 'a tunnel host is an open door while it is up: use example.ngrok.io or <TUNNEL_HOST>, and rotate the real one if it was published' ;;
-    SECRET)      printf '%s' 'ROTATE IT FIRST, then replace with an EXAMPLE-marked stub and read the real one from the environment — removing it from the file is not enough' ;;
+    SECRET)      printf '%s' 'ROTATE IT FIRST, then replace with an EXAMPLE-marked stub and read the real one from the environment — removing it from the file is not enough. If the hit is a literal password handed to sshpass, there is nothing to placeholder: set up key auth (ssh-copy-id, then PermitRootLogin prohibit-password) and delete the line — a password on a command line also leaks into the process table and the shell history' ;;
     NAME_ATTRIB) printf '%s' 'a public bundle should not name a private person: use "Operator One", "the operator", or a role ("the owner")' ;;
     NAME_FIELD)  printf '%s' 'a fixture contact record needs a shape, not an identity: use { name: "Operator One", phone: "+972500000000" }' ;;
     NAME_DENY)   printf '%s' 'a proper noun from your machine-local name list (~/.claude/.pii-names): replace with "Operator One" / "the operator"' ;;
@@ -571,6 +593,16 @@ selftest() {
   DFN='Thadd'; DFN="${DFN}eus"; DLN='V'; DLN="${DLN}ex"   # person known only to the local list
   GID='1Ab'; GID="${GID}Cd3fGh5jKl7mNp9qRs1tUv3wXy5zAb7cDe9fGh1"  # 44-char Drive id
   TUN='mybox-42'; SEC='gh'; SEC="${SEC}p_"; SECT='Ab3Cd5Ef7Gh9Jk1Lm3Np5Qr7St9Uv1Wx'
+  # A password handed to sshpass on a command line (2026-09-18). Assembled, like every other
+  # dirty value here, so the complete shape never exists as a literal in this file — the new
+  # rule would otherwise fire on its own fixture, which is how a scanner becomes unrunnable
+  # over its own tree. (It did exactly that twice while this rule was being written.)
+  SSHP='ssh'; SSHP="${SSHP}pass -p"; SSHPW='Tr0ub4dor'; SSHPW="${SSHPW}&3xKq"
+  # Claude OAuth access / refresh tokens. The claim that the existing sk-… alternative already
+  # catches these was an INFERENCE from reading the regex; these two fixtures turn it into a
+  # measurement, which is the whole point of a selftest.
+  OAT='sk-'; OAT="${OAT}ant-oat01-"; OATT='Zq7Wr3Tn9Lm2Kd5Hf8Gj1Bv4Cx6Ns0Pq'
+  ORT='sk-'; ORT="${ORT}ant-ort01-"; ORTT='Ya2Ub4Ic6Od8Ee0Kf2Mg4Qh6Sj8Uk0Wl'
 
   {
     echo "owner: ${FN} ${LN}"
@@ -595,6 +627,9 @@ selftest() {
     echo "shortname { \"type\": \"dm\", \"name\": \"${FN:0:2}\", \"phone\": \"+972${ILT}\" }"
     echo "deny-name mentioned inline: ${DFN} ${DLN} was here"
     echo "deny AcmeSecretProject"
+    echo "sshpw ${SSHP} '${SSHPW}' root@a-host"
+    echo "oauth-access ${OAT}${OATT}"
+    echo "oauth-refresh ${ORT}${ORTT}"
   } > "$TD/dirty.txt"
 
   {
@@ -618,6 +653,12 @@ selftest() {
     echo "drive https://docs.google.com/spreadsheets/d/1EXAMPLE_SHEET_ID_00000000000000000000000/edit"
     echo "tunnel example.ngrok.io  placeholder.trycloudflare.com"
     echo "secret ghp_EXAMPLE0000000000000000000000000000"
+    # The sshpass rule must not fire on the LEGITIMATE forms. -e reads the password from the
+    # environment and -f from a file; only a literal after -p is a leak. Without these two the
+    # rule could be matching the binary name alone and nobody would know.
+    echo "sshpass-env  sshpass -e ssh root@a-host"
+    echo "sshpass-file sshpass -f /run/secrets/pw ssh root@a-host"
+    echo "sshpass-doc  sshpass -p example-placeholder ssh user@host"
     echo "# GUIDE.md -- Agent Operational Guide"   # a title, not a byline
     echo "attrib **Owner:** Operator One / **Author:** Claude Code / by Operator One"
     echo "record { name: 'Operator One', phone: '+972500000000', lid: '100000000000001' }"

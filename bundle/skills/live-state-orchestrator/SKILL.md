@@ -6,6 +6,10 @@ user-invocable: true
 
 # /live-state-orchestrator — Live State Orchestrator
 
+**Model routing:** this is context-governance work → dispatch it via the `Agent` tool with
+`subagent_type: "governance-worker"` (model: opus, effort: high) rather than running it inline.
+See `~/.claude/CLAUDE.md` § Model Routing Policy.
+
 **Language:** Communicate in **Hebrew**. All file content in **English**.
 
 **Authority:** Context Governance framework (see `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §10). This skill keeps the project's "current state" files in sync with reality. It is the bookkeeper.

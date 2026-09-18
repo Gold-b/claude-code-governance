@@ -141,8 +141,59 @@ gov_read_version_local() { { cat "$CLAUDE_HOME/.governance-version" 2>/dev/null 
 # NEXT-SESSION-HANDOVER.md and its default Definition of Done, which names /pr-to-git as a
 # mandatory bullet — while the skill itself would be absent. A doc that ships in core may only
 # mandate skills that ship in core.
-CORE_SKILLS="bootstrapper context-governance cross-session-protocol evidence-debugger impact-safe-executor init-governance live-state-orchestrator parallel-session-merge pre-close-check pr-to-git pr-follow-through"
-EXTENDED_SKILLS="plan-and-execute qa-sec multi-agents full-finish enable-remote-code"
+#
+# THE LISTS MOVED OUT OF THIS FILE (2026-09-18) — bundle/DISTRIBUTED.
+# They used to be two hardcoded variables here, while the sync hook that decides what may
+# CROSS into the bundle used the opposite shape (a denylist + an unconditional mkdir -p).
+# Two owners for one invariant, and nothing compared them: every user-level skill on the
+# machine was one Edit-tool save away from entering the public bundle. bundle/DISTRIBUTED is
+# now the single definition, read by this installer AND by the crossing in
+# sync-governance-copies.sh. See that file's header for the full reasoning.
+DISTRIBUTED_FILE="$BUNDLE_DIR/DISTRIBUTED"
+
+# gov_distributed_section <section> — print the names under [section] from bundle/DISTRIBUTED.
+# Pure awk: this runs before the framework is installed, so no helper is available.
+#
+# The header test is a LITERAL string equality, not a regex match. `$0 ~ want` with
+# want="[core]" reads `[core]` as a CHARACTER CLASS — it matches any line containing c, o, r
+# or e, i.e. every section header in the file — so all four sections returned the whole list
+# concatenated. Caught by a parity assertion against the lists this replaced; it would
+# otherwise have installed every agent name as a skill.
+gov_distributed_section() {
+  [ -f "$DISTRIBUTED_FILE" ] || return 1
+  awk -v want="[$1]" '
+    /^[[:space:]]*\[/ {
+      hdr = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", hdr)
+      inside = (hdr == want)
+      next
+    }
+    inside {
+      sub(/#.*$/, "");
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "");
+      if (length($0)) print
+    }
+  ' "$DISTRIBUTED_FILE" 2>/dev/null | tr '\n' ' ' | sed -e 's/[[:space:]]\+$//'
+}
+
+# FAIL LOUD, NEVER QUIET. An unreadable DISTRIBUTED would make both lists empty, and an
+# installer that installs zero skills while printing "success" is precisely the silent-gap
+# class this file already carries two comments about.
+if [ ! -f "$DISTRIBUTED_FILE" ]; then
+  error "bundle/DISTRIBUTED is missing at: $DISTRIBUTED_FILE"
+  error "It is the single definition of which skills, agents and root hooks ship."
+  error "This bundle is incomplete — re-clone Gold-b/claude-code-governance and re-run."
+  exit 1
+fi
+CORE_SKILLS="$(gov_distributed_section core)"
+EXTENDED_SKILLS="$(gov_distributed_section extended)"
+DISTRIBUTED_AGENTS="$(gov_distributed_section agents)"
+DISTRIBUTED_ROOT_HOOKS="$(gov_distributed_section hooks)"
+if [ -z "$CORE_SKILLS" ]; then
+  error "bundle/DISTRIBUTED has no [core] entries — refusing to install an empty skill set."
+  error "A parse that yields nothing must stop, not quietly install nothing."
+  exit 1
+fi
 
 # ── Uninstall mode ───────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = "1" ]; then
@@ -266,12 +317,39 @@ copy_safe() {
 }
 
 # ── 1. Install hooks ────────────────────────────────────────────────────────
-header "Installing Hooks (12 files)"
+# The count is computed, not typed. "Installing Hooks (12 files)" was hardcoded and had
+# gone stale — same class as the "2 docs" and "12 skills" banners already fixed here.
+header "Installing Hooks ($( { find "$BUNDLE_DIR/hooks" -type f 2>/dev/null || true; } | grep -vc 'desktop\.ini' ) files)"
 
-# Root-level hook
-copy_safe "$BUNDLE_DIR/hooks/check-full-finish.sh" \
-          "$CLAUDE_HOME/hooks/check-full-finish.sh" \
-          "hooks/check-full-finish.sh"
+# Root-level hooks — ALLOW-LISTED from bundle/DISTRIBUTED [hooks].
+# This used to be one hardcoded copy_safe line for check-full-finish.sh, while the bundle
+# ALSO carried wa-cc-autostart.sh and wa-bridge-claim-check.{js,test.js} that nothing here
+# ever installed. Files that ship but never install are invisible: one of them sat in the
+# public repo carrying a real container name. Reading the same allow-list the crossing reads
+# means "in the bundle" and "installed" can no longer disagree silently.
+for roothook in $DISTRIBUTED_ROOT_HOOKS; do
+  if [ -f "$BUNDLE_DIR/hooks/$roothook" ]; then
+    copy_safe "$BUNDLE_DIR/hooks/$roothook" \
+              "$CLAUDE_HOME/hooks/$roothook" \
+              "hooks/$roothook"
+  else
+    warn "Root hook listed in bundle/DISTRIBUTED [hooks] but absent from the bundle: $roothook (skipping)"
+  fi
+done
+
+# Any root-level hook the bundle carries that is NOT allow-listed is a packaging mistake —
+# it will never be installed, so it can only sit in a public repo unread. Name it.
+while IFS= read -r _bh; do
+  [ -n "$_bh" ] || continue
+  _bhn="$(basename "$_bh")"
+  case "$_bhn" in desktop.ini) continue ;; esac
+  case " $DISTRIBUTED_ROOT_HOOKS " in
+    *" $_bhn "*) : ;;
+    *) warn "bundle/hooks/$_bhn is not in bundle/DISTRIBUTED [hooks] — bundled but never installed. Remove it from the bundle or list it." ;;
+  esac
+done <<ROOTHOOKEOF
+$( { find "$BUNDLE_DIR/hooks" -maxdepth 1 -type f 2>/dev/null || true; } | sort )
+ROOTHOOKEOF
 
 # Governance hooks — EVERY FILE THE BUNDLE CARRIES, enumerated by the bundle itself.
 #
@@ -384,6 +462,40 @@ for skill in $INSTALL_SKILLS; do
 done
 
 success "Skills installed: $SKILL_COUNT"
+
+# ── 2b. Install agents (user-level subagent definitions) ────────────────────
+# Added 1.7.0. An agent file carries MODEL ROUTING in its frontmatter (`model:`, `effort:`) —
+# that frontmatter, not prose in CLAUDE.md, is what actually pins a tier, so the definitions
+# have to be installed to have any effect.
+#
+# Allow-listed from bundle/DISTRIBUTED [agents], never "whatever is in the directory": an
+# agent is prose that legitimately names its owner, and there is no marker mechanism for
+# agents the way there is for CLAUDE.md. Either a definition is fully generic or it does not
+# ship.
+#
+# copy_safe (backs up before replacing), and NOT installed by --core-only: an agent is inert
+# without the dispatch, and a minimal install should not silently acquire new routing.
+AGENT_COUNT=0
+if [ "$CORE_ONLY" = "1" ]; then
+  info "Agents skipped (--core-only)"
+elif [ -n "$DISTRIBUTED_AGENTS" ] && [ -d "$BUNDLE_DIR/agents" ]; then
+  header "Installing Agents"
+  for agent in $DISTRIBUTED_AGENTS; do
+    src_agent="$BUNDLE_DIR/agents/$agent.md"
+    if [ -f "$src_agent" ]; then
+      copy_safe "$src_agent" "$CLAUDE_HOME/agents/$agent.md" "agents/$agent.md"
+      AGENT_COUNT=$((AGENT_COUNT + 1))
+    else
+      warn "Agent listed in bundle/DISTRIBUTED [agents] but absent from the bundle: $agent (skipping)"
+    fi
+  done
+  success "Agents installed: $AGENT_COUNT"
+  # A NEW agents/ directory is not picked up by a RUNNING session: measured 2026-09-17, a
+  # dispatch from the session that created the directory returned "Agent type not found",
+  # because the file watcher only covers directories that existed at launch. Say so here —
+  # the alternative is a user concluding the install failed.
+  [ "$AGENT_COUNT" -gt 0 ] && info "Restart Claude Code before dispatching to a newly installed agent (the agent-file watcher only sees directories that existed at launch)."
+fi
 
 # ── 3. Install docs ─────────────────────────────────────────────────────────
 header "Installing Governance Docs"

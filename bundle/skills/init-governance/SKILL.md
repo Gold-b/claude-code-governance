@@ -6,6 +6,10 @@ user-invocable: true
 
 # /init-governance — Project Governance Scaffold
 
+**Model routing:** this is context-governance work → dispatch it via the `Agent` tool with
+`subagent_type: "governance-worker"` (model: opus, effort: high) rather than running it inline.
+See `~/.claude/CLAUDE.md` § Model Routing Policy.
+
 **Language:** Communicate in **Hebrew**. All file content in **English**.
 
 **Purpose:** One-time initialization of the Context Governance framework in a new project. Creates the canonical file structure so that all governance skills (bootstrapper, live-state-orchestrator, impact-safe-executor, evidence-debugger, parallel-session-merge, context-governance) can operate.

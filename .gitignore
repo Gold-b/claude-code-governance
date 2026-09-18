@@ -103,3 +103,53 @@ Plans/
 
 # Google Drive sync scratch dir. Appears at the root of any repo Drive is syncing.
 .tmp.driveupload/
+
+# --- Appended 2026-09-18: ~/.claude-shaped secrets, defensively ----------------
+# WHY A SECOND, OVERLAPPING LAYER. The sync hook already refuses to copy a contaminated file
+# into bundle/, and .githooks/ carries a pre-commit/pre-push PII gate. Both are real, and
+# neither is a reason to skip this: those two protect the SYNC path, while a human working in
+# this clone can `git add` anything at all. These entries are shaped after the files that
+# actually live in a ~/.claude tree, because that is what gets copied here by hand at 2am.
+#
+# Line by line, since a rule nobody understands gets deleted:
+.credentials.json
+**/.credentials.json
+#   ^ the existing `credentials.json` rule (line 34) is a LITERAL and does NOT match the
+#     leading-dot name (MEASURED 2026-09-18). Claude Code's OAuth tokens live in the dotted one.
+*.local.md
+*.local.json
+*.local.sh
+*.local.env
+**/config.local.json
+#   ^ formalises the `.local.` convention already in use for machine-local companions to
+#     tracked files. MEASURED: one such file carries a full name, a GitHub login and a Slack
+#     user id on its FIRST line. The same pattern is now enforced in sync-governance-copies.sh,
+#     so "it is named .local" means the same thing to git and to the sync.
+settings.json
+settings.json.*
+*.backup-*
+#   ^ settings.json is NEVER a publishable artefact — the shipped template is
+#     bundle/settings-hooks.json. MEASURED 2026-09-18: 16 settings.json.bak-* copies and 8 more
+#     under backups/ each contained a plaintext credential on a command line. One `git add -A`
+#     in the wrong directory is the whole threat model.
+*.jsonl
+#   ^ history.jsonl, wa-inbox.jsonl, slack-inbox.jsonl — verbatim conversation and inbox state.
+sessions/
+session-env/
+projects/
+file-history/
+shell-snapshots/
+uploads/
+daemon/
+state/
+#   ^ Claude Code runtime state. projects/ alone is ~947 MB of session transcripts (MEASURED
+#     2026-09-18) containing whatever was ever pasted into a session.
+
+# --- THE ESCAPE HATCH MUST BE LAST -------------------------------------------
+# gitignore resolves by LAST MATCHING PATTERN, so these negations only work below every rule
+# they need to override. They were at lines 70-72 with ~35 lines of rules after them, which
+# meant `settings.json.*` above would have swallowed `settings.json.example`. Anything added
+# after this point must be added ABOVE it.
+!*.example
+!*.template
+!*.sample

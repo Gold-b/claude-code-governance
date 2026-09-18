@@ -1,0 +1,38 @@
+# User-Level Instructions — Global (All Projects)
+
+<!--
+  THIS FILE IS THE GENERIC HEAD OF bundle/CLAUDE.md.template.
+
+  The template is not hand-written. It is RENDERED, by
+  hooks/governance/sync-governance-copies.sh, as:
+
+      bundle/CLAUDE.md.template.head              (this file, tracked)
+    + ~/.claude/CLAUDE.md lines 2 .. marker-1     (the live policy, verbatim)
+    ------------------------------------------------------------------
+    = bundle/CLAUDE.md.template
+
+  where `marker` is the line carrying
+
+      <!-- GOV-LOCAL-ONLY: nothing below this line is synced or published -->
+
+  WHY A CUT AND NOT A SCRUB. The live CLAUDE.md legitimately names the owner, his
+  language and his preferences — that is what a personal instruction file IS. The PII
+  gate models SHAPES (a phone number has a shape; a name does not), so a scrubber over
+  prose is a denylist, and this framework's own 2026-08-18 and 2026-09-01 incidents are
+  both denylists lagging reality. A CUT has no regex: everything above the marker is
+  publishable verbatim, everything below it is local by definition, and the transform is
+  verifiable with `diff`. The rendered file is then PII-scanned like every other bundle
+  file, so a name that drifts above the marker REFUSES the copy instead of publishing.
+
+  Consequence worth knowing: an installer's own preferences belong in the section below,
+  which this head deliberately keeps generic. Edit THIS file to change the head; editing
+  bundle/CLAUDE.md.template directly is pointless — the next render overwrites it.
+-->
+
+## User Preferences
+- Communicate in your preferred language (replace this line with your own preference)
+- Code and comments in **English**
+- Never save project files outside the project directory
+- Always read project-level CLAUDE.md before any action
+
+---

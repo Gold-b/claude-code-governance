@@ -132,7 +132,8 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/sync-governance-copies.sh",
-            "timeout": 15,
+            "timeout": 60,
+            "_timeout_note": "Raised 15 -> 60 on 2026-09-18, from a measurement, not a guess. This hook renders and PII-gates the file that was just edited; on a loaded machine (25-36 concurrent bash processes) the render+gate+copy path measured 7.4s / 7.9s / 11.1s / 15.9s -- the last one OVER the old 15s budget. A PostToolUse hook killed at its timeout leaves the live file and the publishable bundle silently DIVERGED, which is the exact failure this hook exists to prevent. Per the 2026-09-15 rule (~/.claude/CLAUDE.md), the remedy for a slow-but-correct control is a budget it can finish inside, never a watchdog: machinery that supervises machinery costs time on every run, a bigger budget costs nothing until something is genuinely slow. Same fix and same reasoning as governance-guard.sh (10 -> 60) that day.",
             "statusMessage": "Context Governance: mirroring governance files..."
           },
           {

@@ -1,0 +1,73 @@
+# bundle/DISTRIBUTED — the ONE definition of what ships in this framework.
+#
+# Read by BOTH:
+#   install.sh                                  — what it installs
+#   hooks/governance/sync-governance-copies.sh   — what may CROSS from the live tree
+#                                                  (~/.claude) into this publishable bundle
+#
+# WHY IT EXISTS (2026-09-18). Until now "what ships" was two hardcoded variables in
+# install.sh (CORE_SKILLS / EXTENDED_SKILLS) while the sync hook used the OPPOSITE shape:
+# a DENYLIST (GOV_NEVER_DISTRIBUTE_SKILLS) plus an unconditional `mkdir -p` into the
+# bundle for anything not on it. Measured consequence: every user-level skill on the
+# machine — including deployment-specific tooling naming real clients and containers —
+# was ONE Edit-tool save away from entering a public bundle, protected only by a scanner
+# that models shapes and cannot see a product name. Three things were true at once:
+# install.sh knew what shipped, the crossing did not, and nothing compared them.
+#
+# An allow-list fails the safe way round: a new skill is NOT distributed until a human
+# writes its name here. A denylist is a prediction about files that do not exist yet, and
+# this framework has been wrong about exactly that twice (extension lists, 2026-08-16 and
+# 2026-09-01).
+#
+# FORMAT
+#   [section] headers; one name per line; `#` comments; blank lines ignored.
+#   Names are skill/agent directory or file names, never paths.
+#
+# GOV_NEVER_DISTRIBUTE_SKILLS remains ON TOP of this file as a belt: a name that is BOTH
+# listed here AND denied there is refused, loudly — a contradiction is a bug to be seen,
+# not a precedence rule to be memorised.
+
+[core]
+# Installed on every machine, including --core-only.
+# pr-to-git is CORE, not extended, and not because it is important: bundle/docs/ installs
+# UNCONDITIONALLY, so a --core-only machine gets NEXT-SESSION-HANDOVER.md, whose default
+# Definition of Done names /pr-to-git. A doc that ships in core may only mandate skills
+# that ship in core.
+bootstrapper
+context-governance
+cross-session-protocol
+evidence-debugger
+impact-safe-executor
+init-governance
+live-state-orchestrator
+parallel-session-merge
+pre-close-check
+pr-to-git
+pr-follow-through
+
+[extended]
+# Installed unless --core-only.
+plan-and-execute
+qa-sec
+multi-agents
+full-finish
+enable-remote-code
+
+[agents]
+# ~/.claude/agents/<name>.md — user-level subagent definitions (model-routing carriers).
+# An agent file is either FULLY GENERIC or it does not ship: there is no marker mechanism
+# for agents. Owner-specific text belongs below the GOV-LOCAL-ONLY marker in CLAUDE.md,
+# and the agent references "the owner's standing policy in CLAUDE.md" instead.
+architect-planner
+governance-worker
+
+[hooks]
+# Root-level ~/.claude/hooks/<file> only (NOT hooks/governance/**, which ships whole —
+# install.sh enumerates that directory from the bundle itself, by design).
+# Everything else in the live hooks/ root is machine-local: the WhatsApp-bridge family
+# (wa-*.sh/.js/.ps1, whatsapp-checkpoints-reminder.sh) and client-named tooling
+# (anonycase-*.sh). wa-cc-autostart.sh and wa-bridge-claim-check.{js,test.js} were REMOVED
+# from this bundle on 2026-09-18: install.sh never installed them (it takes exactly
+# check-full-finish.sh from this directory), their skill is never-distributed, and one of
+# them carried a real container name into the public repo.
+check-full-finish.sh

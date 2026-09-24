@@ -2,6 +2,11 @@
 # governance-guard.sh — BLOCK edits to protected governance docs without a success token
 # Created: 2026-04-12 (user feedback: "enforcement via hook, not LLM instruction")
 #
+# 1.7.1 (2026-09-24): the success-token gate is OPT-IN (GOV_REQUIRE_SUCCESS_TOKEN=1) and OFF by
+# default. With it on, closes deadlocked: end-session.sh demanded a HANDOFF while this guard refused
+# to write one until the human approved. The bundle/ gate and the DEPLOYMENT/FROZEN role gate below
+# are unaffected and always on.
+#
 # This hook fires on PreToolUse for Edit/Write/MultiEdit tools. It reads the
 # tool input JSON from stdin, extracts the target file path, and checks if it
 # is in the "protected" list. Protected files can only be edited when a fresh
@@ -316,6 +321,14 @@ Kill switch (not recommended): GOV_ROLE_FRAMEWORK=0 disables role awareness.
 ERRMSG
   trap - EXIT
   exit 2
+fi
+
+# Success-token gate: OPT-IN since 1.7.1 (GOV_REQUIRE_SUCCESS_TOKEN=1). Off by default because it
+# deadlocked session closes - see gov_success_token_required in _common.sh. The role gate above
+# and the bundle/ gate at the top still apply either way.
+if ! gov_success_token_required; then
+  gov_log "governance-guard" "ALLOW: success-token gate off (default; opt in with GOV_REQUIRE_SUCCESS_TOKEN=1)"
+  exit 0
 fi
 
 # Check for a fresh success token.

@@ -846,6 +846,19 @@ case_governance_guard() {
   local prot="$src/docs/context/GOTCHAS.md"
   printf '# gotchas\n' > "$prot"
 
+  # DEFAULT (1.7.1): the success-token gate is OFF - a protected doc with no token is ALLOWED.
+  # Owner decision 2026-09-24: the gate deadlocked every close.
+  fx_token
+  unset GOV_REQUIRE_SUCCESS_TOKEN
+  run_hook "$src" "sid-gg-0" "$(pl_pre "$src" sid-gg-0 "$prot")"
+  expect_rc 0 "default (gate off): protected doc, no token: ALLOWED"
+  expect_not "requires a success token" "default (gate off): no token demand in the output"
+  printf '# gotchas\n' > "$dep/docs/context/GOTCHAS.md"
+  run_hook "$dep" "sid-gg-0b" "$(pl_pre "$dep" sid-gg-0b "$dep/docs/context/GOTCHAS.md")"
+  expect_rc 2 "default (gate off): DEPLOYMENT node is STILL blocked (role gate is independent)"
+
+  # OPT-IN: everything below exercises the gate with GOV_REQUIRE_SUCCESS_TOKEN=1.
+  export GOV_REQUIRE_SUCCESS_TOKEN=1
   fx_token
   run_hook "$src" "sid-gg-1" "$(pl_pre "$src" sid-gg-1 "$prot")"
   expect_rc 2 "protected doc, no token: BLOCKED"
@@ -883,6 +896,7 @@ case_governance_guard() {
   expect_rc 2 "unexpected exit after protected-target log: fail-closed BLOCKS instead of falling through"
   expect_grep "fail-closed" "$SBX_HOME/.claude/logs/governance.log" "fail-closed block: names itself so the gap is never silent again"
   fx_token
+  unset GOV_REQUIRE_SUCCESS_TOKEN
 }
 
 # --- pre-write.sh -----------------------------------------------------------------------------
@@ -1187,6 +1201,14 @@ case_pre_done() {
   fx_project "$src" SOURCE "$(_winform "$src")"
   fx_state_reset
 
+  # DEFAULT (1.7.1): gate off - changes without a token do NOT block task completion.
+  fx_changes sid-pd-0 "$src/admin/lib/a.js"
+  fx_token
+  unset GOV_REQUIRE_SUCCESS_TOKEN
+  run_hook "$src" "sid-pd-0" "$(pl_plain "$src" sid-pd-0 TaskCompleted)"
+  expect_rc 0 "default (gate off): changes without a token: task completion ALLOWED"
+
+  export GOV_REQUIRE_SUCCESS_TOKEN=1
   fx_changes sid-pd-1 "$src/admin/lib/a.js" "$src/admin/lib/b.js"
   fx_token
   run_hook "$src" "sid-pd-1" "$(pl_plain "$src" sid-pd-1 TaskCompleted)"
@@ -1202,6 +1224,7 @@ case_pre_done() {
   run_hook "$src" "sid-pd-3" "$(pl_plain "$src" sid-pd-3 TaskCompleted)"
   expect_rc 0 "changes with a fresh token: allowed"
   fx_token
+  unset GOV_REQUIRE_SUCCESS_TOKEN
 }
 
 # --- end-session.sh ---------------------------------------------------------------------------
@@ -2248,7 +2271,7 @@ part_b
 _real_log="$CHOME/logs/governance.log"
 if [ -f "$_real_log" ]; then
   _lp=$(grep -c 'protected target' "$_real_log" 2>/dev/null || echo 0)
-  _la=$(grep -c 'ALLOW: token valid' "$_real_log" 2>/dev/null || echo 0)
+  _la=$(grep -cE 'ALLOW: (token valid|success-token gate off)' "$_real_log" 2>/dev/null || echo 0)
   _lb=$(grep -cE 'BLOCK:' "$_real_log" 2>/dev/null || echo 0)
   _lgap=$((_lp - _la - _lb))
   if [ "$_lgap" -ne 0 ]; then

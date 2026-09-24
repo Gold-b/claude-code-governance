@@ -132,6 +132,14 @@ run_guard() {
   echo $?
 }
 
+  # DEFAULT (1.7.1): the success-token gate is opt-in, so with it unset the same write is ALLOWED.
+  unset GOV_REQUIRE_SUCCESS_TOKEN
+  rc=$(run_guard "$SRC_ROOT/docs/context/GOTCHAS.md")
+  if [ "$rc" = "0" ]; then ok "default (gate off): guard ALLOWS a protected doc with no token (exit 0)"
+  else bad "default (gate off): guard ALLOWS a protected doc with no token" "exit was $rc, expected 0"; fi
+
+  # Everything below covers the OPT-IN gate.
+  export GOV_REQUIRE_SUCCESS_TOKEN=1
   rc=$(run_guard "$SRC_ROOT/docs/context/GOTCHAS.md")
   if [ "$rc" = "2" ]; then ok "guard BLOCKS a protected doc with no token (exit 2)"
   else bad "guard BLOCKS a protected doc with no token" "exit was $rc, expected 2"; fi

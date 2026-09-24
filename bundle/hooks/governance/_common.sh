@@ -66,6 +66,17 @@ gov_disabled() {
   return 1
 }
 
+# gov_success_token_required
+# Returns 0 only when the operator has OPTED IN to the success-token gate (GOV_REQUIRE_SUCCESS_TOKEN=1).
+# OFF BY DEFAULT since 1.7.1 (owner decision, 2026-09-24). The gate made the agent ask the human
+# before it could write HANDOFF/MEMORY/OPEN-PROBLEMS/GOTCHAS, while end-session.sh and
+# close-completeness.sh REQUIRE those writes before a stop - two rules that deadlocked every close.
+# Journalling the current project is paperwork, not a success claim, and needs no approval.
+# Consumers: governance-guard.sh (protected-doc edits) and pre-done.sh (TaskCompleted gate).
+gov_success_token_required() {
+  [ "${GOV_REQUIRE_SUCCESS_TOKEN:-0}" = "1" ]
+}
+
 # gov_skill_exists <skill_name>
 # Returns 0 (success) if the named skill is installed at $GOVERNANCE_SKILLS_DIR/<skill_name>/SKILL.md
 gov_skill_exists() {

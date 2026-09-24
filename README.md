@@ -87,7 +87,7 @@ distinct scripts.
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
 | UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
 | UserPromptSubmit | `parallel-import.sh` | Detects pasted output from another session |
-| PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks protected-doc edits without a success token |
+| PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks direct edits into a publish target's `bundle/` and governance edits on DEPLOYMENT/FROZEN nodes. The success-token gate on protected docs is **opt-in** since v1.7.1 (`GOV_REQUIRE_SUCCESS_TOKEN=1`) |
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
 | PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
@@ -511,6 +511,17 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-24 (v1.7.1) — the success-token gate is OFF by default.** With it on, every close
+  could deadlock: `end-session.sh` and `close-completeness.sh` require HANDOFF / MEMORY /
+  OPEN-PROBLEMS to be written before a stop, while `governance-guard.sh` refused to write them
+  until the human had approved a "success token". The agent had to stop and ask for permission
+  to do the paperwork the close demanded. Writing the current project's canonical records is
+  journalling, not a success claim, and now needs no approval. The gate still exists for anyone
+  who wants it: set `GOV_REQUIRE_SUCCESS_TOKEN=1` (it then also re-arms the TaskCompleted gate in
+  `pre-done.sh`). Unchanged and always on: the `bundle/` publish-target block and the
+  DEPLOYMENT/FROZEN role block. The close messages now tell the agent to write the records
+  without asking, instead of telling it to mint a token.
 
 - **2026-09-18 (v1.7.0) — `~/.claude` brought under sync governance, and the three copies stopped
   being able to silently disagree.** The sync surface grew four members: `CLAUDE.md` (rendered

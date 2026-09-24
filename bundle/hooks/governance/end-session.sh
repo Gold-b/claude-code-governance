@@ -498,6 +498,13 @@ if [ -n "$ISSUES" ]; then
   # stderr → shown as hook error (blocks the stop)
   printf "[end-session] BLOCKED — governance files are stale. Fix before stopping.\n" >&2
 
+  if gov_success_token_required; then
+    _es_token_note='- GOV_REQUIRE_SUCCESS_TOKEN=1 is set: mint a success token before editing protected files:
+    bash ~/.claude/hooks/governance/commit-task-success.sh "<description>"'
+  else
+    _es_token_note='- No approval is needed to write these files. Write them now - do not ask the user first.'
+  fi
+
   # stdout → injected into LLM context as detailed instructions
   cat <<ENDMSG
 
@@ -513,8 +520,7 @@ $(printf '%b' "$DIRECTIVES")
 
 IMPORTANT:
 - Edit this project's canonical files (docs/context/*.md, Plans/PLAN.md) — see docs/context/CONTEXT-MANIFEST.md for the exact paths.
-- You need a governance success token to edit protected files:
-    bash ~/.claude/hooks/governance/commit-task-success.sh "<description>"
+$_es_token_note
 - After fixing all issues, try stopping the session again. This hook will re-check.
 - If you believe this is a false positive, the user can override with: GOVERNANCE_HOOKS=0
 

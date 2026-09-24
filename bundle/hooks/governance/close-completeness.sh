@@ -483,6 +483,15 @@ if [ -n "$MISSING_BLOCK" ]; then
   gov_log "close-completeness" "BLOCKED missing:$(printf '%b' "$MISSING_BLOCK" | tr '\n' ' ')"
   gov_notify "סגירת סשן" "קבצי תיעוד קנוניים לא עודכנו בסשן הזה." "/live-state-orchestrator"
   printf "[close-completeness] BLOCKED - this session changed code but not its canonical records.\n" >&2
+  if gov_success_token_required; then
+    _cc_step1='  1. GOV_REQUIRE_SUCCESS_TOKEN=1 is set, so governance-guard.sh REFUSES edits to
+     docs/context/{MEMORY,OPEN-PROBLEMS,HANDOFF,GOTCHAS}.md without a fresh success token.
+     Mint one first, or you will loop:
+       bash ~/.claude/hooks/governance/commit-task-success.sh "<what you completed>"'
+  else
+    _cc_step1='  1. No approval is needed: writing the canonical records is the job, not a success
+     claim. Write them now - do not ask the user first.'
+  fi
   cat <<ENDMSG
 
 [GOVERNANCE-ENFORCEMENT] Session stop BLOCKED by close-completeness.
@@ -493,10 +502,7 @@ This is the failure the owner reported on 2026-07-27: several recent closes wrot
 skipped the records that describe it, so the canonical files fell days behind reality.
 
 Required before stopping:
-  1. governance-guard.sh protects docs/context/{MEMORY,OPEN-PROBLEMS,HANDOFF,GOTCHAS}.md and
-     will REFUSE the edit without a fresh success token. Mint one first, or you will loop:
-       bash ~/.claude/hooks/governance/commit-task-success.sh "<what you completed>"
-     (Plans/PLAN.md is not protected and needs no token.)
+$_cc_step1
   2. Run /live-state-orchestrator, which writes each of the files above.
   3. Record what THIS session actually did - a milestone entry in PLAN.md, and any durable
      decision or lesson in MEMORY.md. Append; never overwrite an existing entry.

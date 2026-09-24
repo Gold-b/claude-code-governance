@@ -40,6 +40,14 @@ if [ "$CHANGE_COUNT" -eq 0 ]; then
   exit 0
 fi
 
+# Success-token gate is OPT-IN since 1.7.1 (GOV_REQUIRE_SUCCESS_TOKEN=1) — see
+# gov_success_token_required in _common.sh. Off, nothing here can mint the token, so blocking
+# would only trap the session.
+if ! gov_success_token_required; then
+  gov_log "pre-done" "success-token gate off (default) — allowing task completion"
+  exit 0
+fi
+
 # Changes exist — check for governance success token
 TOKEN_FILE="$HOME/.claude/logs/governance-success-token.json"
 

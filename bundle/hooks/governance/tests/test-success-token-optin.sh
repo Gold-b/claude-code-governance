@@ -56,12 +56,16 @@ token
 while IFS= read -r pat; do
   [ -n "$pat" ] || continue
   f="$SRC/$pat"; mkdir -p "$(dirname "$f")"
-  for tool in Edit Write MultiEdit; do
-    run governance-guard.sh "$SRC" "$(pl "$tool" "$f" "$SRC")"; expect 0 "default: $tool $pat"
-  done
+  run governance-guard.sh "$SRC" "$(pl Edit "$f" "$SRC")"; expect 0 "default: Edit $pat"
 done <<EOF
 $PATTERNS
 EOF
+# The guard never branches on tool_name (the matcher lives in settings.json), so one pattern is
+# enough to prove Write/MultiEdit take the same path. Each hook call costs 2-9s under load; the
+# full 3x matrix pushed this suite past 20 minutes on a busy machine.
+for tool in Write MultiEdit; do
+  run governance-guard.sh "$SRC" "$(pl "$tool" "$SRC/docs/context/HANDOFF.md" "$SRC")"; expect 0 "default: $tool docs/context/HANDOFF.md"
+done
 # Windows-style path with backslashes (as Claude Code sends it on Windows)
 WIN=$(cygpath -w "$SRC/docs/context/HANDOFF.md" 2>/dev/null | sed 's/\\/\\\\/g')
 if [ -n "$WIN" ]; then
@@ -160,5 +164,5 @@ printf '%s' \"\$_es_token_note\"")
 done
 
 echo
-echo "$PASS passed, $FAIL failed"
+echo "$PASS passed, $FAIL failed  (${SECONDS}s)"
 [ "$FAIL" -eq 0 ]

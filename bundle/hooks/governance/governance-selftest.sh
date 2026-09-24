@@ -1770,6 +1770,23 @@ EOF
   else
     _sk_core="$(sed -n 's/^CORE_SKILLS="\(.*\)"$/\1/p' "$_sk_inst" 2>/dev/null)"
     _sk_ext="$(sed -n 's/^EXTENDED_SKILLS="\(.*\)"$/\1/p' "$_sk_inst" 2>/dev/null)"
+    # Since 1.7.0 install.sh DERIVES the lists from bundle/DISTRIBUTED
+    # (CORE_SKILLS="$(gov_distributed_section core)"), so the literal read above yields the
+    # unexpanded `$(...)` text and every bundled skill looked undistributed (OPEN-PROBLEMS #13).
+    # Read the lists from where install.sh reads them - same literal-header awk as install.sh's
+    # gov_distributed_section, including its reason for NOT using a regex match on `[core]`.
+    case "$_sk_core $_sk_ext" in
+      *'$('*)
+        _sk_dist="$(dirname "$_sk_inst")/bundle/DISTRIBUTED"
+        _sk_section() {
+          awk -v want="[$1]" '
+            /^[[:space:]]*\[/ { hdr=$0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", hdr); inside=(hdr==want); next }
+            inside { sub(/#.*$/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if (length($0)) print }
+          ' "$_sk_dist" 2>/dev/null | tr '\n' ' '
+        }
+        _sk_core="$(_sk_section core)"; _sk_ext="$(_sk_section extended)"
+        ;;
+    esac
     _sk_never=" ${GOV_NEVER_DISTRIBUTE_SKILLS:-wa-cc-bridge wa-cc-poll whatsapp whatsapp-checkpoints end-session} "
     _sk_listed=" $_sk_core $_sk_ext "
     _sk_n_bundle=0; _sk_n_listed=0; _sk_unshipped=""; _sk_missing=""; _sk_leaked=""

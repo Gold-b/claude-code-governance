@@ -361,6 +361,7 @@ Backs up all files before removal. CLAUDE.md is NOT removed (manual decision).
 bash bundle/hooks/governance/tests/test-session-state.sh
 bash bundle/hooks/governance/tests/test-update-advisory.sh
 bash bundle/hooks/governance/tests/test-payload-root.sh
+bash bundle/hooks/governance/tests/test-success-token-optin.sh   # v1.7.1: no close deadlock, gate opt-in
 ```
 
 ## Rolling out an update to a client machine

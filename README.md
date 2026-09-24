@@ -362,6 +362,7 @@ bash bundle/hooks/governance/tests/test-session-state.sh
 bash bundle/hooks/governance/tests/test-update-advisory.sh
 bash bundle/hooks/governance/tests/test-payload-root.sh
 bash bundle/hooks/governance/tests/test-success-token-optin.sh   # v1.7.1: no close deadlock, gate opt-in
+bash bundle/hooks/governance/tests/test-stdin-cli-mode.sh       # v1.7.3: hand-run tools never hang on stdin
 ```
 
 ## Rolling out an update to a client machine
@@ -512,6 +513,15 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-25 (v1.7.3) — hand-run tools no longer hang on an open stdin.** `_common.sh` reads the
+  hook payload from stdin the moment it is sourced — right for a hook, whose stdin Claude Code
+  closes, but a tool run by hand from a shell that leaves stdin open waited forever. Measured
+  `rc=124` for `end-session.sh --publish-preview`, `close-report.sh --help` and
+  `sync-governance-copies.sh --sync-all`. Now a script invoked with a `--flag` skips the read
+  (except `--sync-if-drifted`, the one flag a registered hook passes; `GOV_NO_STDIN=1` forces the
+  skip). Real hooks still receive their payload — asserted both ways in the new
+  `tests/test-stdin-cli-mode.sh`, which includes a negative control proving it can see a hang.
 
 - **2026-09-24 (v1.7.2) — follow-ups to v1.7.1, bumped so the update notice reaches anyone who
   installed the first 1.7.1 commit.** `GOV_REQUIRE_SUCCESS_TOKEN` accepts `1`/`true`/`yes`/`on` (any

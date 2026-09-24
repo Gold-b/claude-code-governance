@@ -11,6 +11,10 @@
 # Sandboxed: a temporary HOME and fixture projects; your real ~/.claude is never read or written.
 # Usage: bash tests/test-success-token-optin.sh      (HOOKS=<dir> to point it at another copy)
 HOOKS="${HOOKS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Every hook call below gets its payload through an explicit pipe. Close the suite's OWN stdin:
+# sourcing/running hook code with an open, silent stdin blocks in gov_hook_input forever - that is
+# what made two runs of this suite hit a 20-minute timeout when launched from a backgrounded shell.
+exec </dev/null
 REAL_GIT="$(command -v git)"
 SBX="$(mktemp -d)"; trap 'rm -rf "$SBX"' EXIT
 SBX_HOME="$SBX/home"; mkdir -p "$SBX_HOME/.claude/logs"

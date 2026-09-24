@@ -800,5 +800,24 @@ gov_memory_dir() {
 # Prime the stdin cache in the SOURCING shell: a "$(...)" call would read stdin inside a
 # subshell and could not cache it for its parent, so the second reader would see EOF
 # (2026-08-16 sandbox finding). Hooks may then call gov_hook_input / gov_session_id freely.
-_GOV_HOOK_INPUT=$(gov_hook_input)
+#
+# EXCEPT in a hand-run CLI mode (2026-09-24). A tool run by hand with a `--flag` has no payload, and
+# `head` waits for EOF: with stdin left OPEN (a backgrounded agent shell, a pipe) the tool blocked
+# forever. MEASURED with a held-open stdin: close-report.sh --help, sync-governance-copies.sh
+# --sync-all, file-collision-guard.test.sh --list and end-session.sh --publish-preview all hit
+# rc=124. A registered hook always gets a closed payload pipe from Claude Code, so it never saw
+# this. `$1` here is the SOURCING script's first argument (every hook sources with no args).
+# The one registered hook that passes a flag keeps its payload - listed explicitly, and any new
+# flag used in a registered hook command must be added here. GOV_NO_STDIN=1 forces the skip.
+case "${1:-}" in
+  --sync-if-drifted) _gov_cli_mode=0 ;;   # registered Stop hook (settings-hooks.json): has a payload
+  --*)               _gov_cli_mode=1 ;;
+  *)                 _gov_cli_mode=0 ;;
+esac
+if [ "$_gov_cli_mode" = "1" ] || [ "${GOV_NO_STDIN:-0}" = "1" ]; then
+  _GOV_HOOK_INPUT=""
+else
+  _GOV_HOOK_INPUT=$(gov_hook_input)
+fi
+unset _gov_cli_mode
 _GOV_HOOK_INPUT_READ=1

@@ -513,6 +513,13 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-24 (v1.7.2) — follow-ups to v1.7.1, bumped so the update notice reaches anyone who
+  installed the first 1.7.1 commit.** `GOV_REQUIRE_SUCCESS_TOKEN` accepts `1`/`true`/`yes`/`on` (any
+  case) — before, `=true` silently left the gate off. New sandboxed regression test
+  `tests/test-success-token-optin.sh` (54 checks) replays the close deadlock end to end. The
+  selftest's distribution-coverage case reads `bundle/DISTRIBUTED` like install.sh does (it had
+  flagged all 16 skills as undistributed since 1.7.0).
+
 - **2026-09-24 (v1.7.1) — the success-token gate is OFF by default.** With it on, every close
   could deadlock: `end-session.sh` and `close-completeness.sh` require HANDOFF / MEMORY /
   OPEN-PROBLEMS to be written before a stop, while `governance-guard.sh` refused to write them

@@ -518,8 +518,8 @@ verifies clean. Freshness is the version marker's job, not this gate's.
   until the human had approved a "success token". The agent had to stop and ask for permission
   to do the paperwork the close demanded. Writing the current project's canonical records is
   journalling, not a success claim, and now needs no approval. The gate still exists for anyone
-  who wants it: set `GOV_REQUIRE_SUCCESS_TOKEN=1` (it then also re-arms the TaskCompleted gate in
-  `pre-done.sh`). Unchanged and always on: the `bundle/` publish-target block and the
+  who wants it: set `GOV_REQUIRE_SUCCESS_TOKEN=1` (or `true`/`yes`/`on`) in the `env` block of
+  `~/.claude/settings.json` (it then also re-arms the TaskCompleted gate in `pre-done.sh`). Unchanged and always on: the `bundle/` publish-target block and the
   DEPLOYMENT/FROZEN role block. The close messages now tell the agent to write the records
   without asking, instead of telling it to mint a token.
 

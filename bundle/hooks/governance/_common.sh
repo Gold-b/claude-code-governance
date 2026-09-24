@@ -73,8 +73,14 @@ gov_disabled() {
 # close-completeness.sh REQUIRE those writes before a stop - two rules that deadlocked every close.
 # Journalling the current project is paperwork, not a success claim, and needs no approval.
 # Consumers: governance-guard.sh (protected-doc edits) and pre-done.sh (TaskCompleted gate).
+# Truthy: 1 / true / yes / on (any case). Anything else, including unset or empty, is OFF - so
+# `GOV_REQUIRE_SUCCESS_TOKEN=true` is not silently read as "off" by someone who meant "on".
+# Set it for every session in ~/.claude/settings.json -> "env".
 gov_success_token_required() {
-  [ "${GOV_REQUIRE_SUCCESS_TOKEN:-0}" = "1" ]
+  case "$(printf '%s' "${GOV_REQUIRE_SUCCESS_TOKEN:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # gov_skill_exists <skill_name>

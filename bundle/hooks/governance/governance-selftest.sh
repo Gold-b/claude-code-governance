@@ -183,6 +183,10 @@ CUR_LABEL=""
 _snip() { printf '%s' "$1" | tr '\n' '|' | head -c 320; }
 
 _ok()  { CASE_FAILS=$CASE_FAILS; [ "$MUT" = 1 ] && return 0; PASS=$((PASS+1)); printf '    [PASS] %s\n' "$1"; }
+# _na <check> <why>: a Part B check whose SUBJECT does not exist in the audited project (e.g. the
+# admin/lib inventory in a project with no admin/). Printed, never counted as a pass. It is NOT the
+# empty-extraction case — a subject that exists and yields no claim stays a FAIL.
+_na()  { [ "$MUT" = 1 ] && return 0; NA_N=$((${NA_N:-0}+1)); printf '    [N/A]  %s — %s\n' "$1" "$2"; }
 _bad() {
   CASE_FAILS=$((CASE_FAILS+1))
   [ "$MUT" = 1 ] && return 0
@@ -1682,6 +1686,20 @@ part_a() {
     fn="$(case_fn_for "$base")"
     printf '\n  [%s] %s\n' "$ev" "$path"
     if [ -z "$fn" ] || ! command -v "$fn" >/dev/null 2>&1; then
+      # A hook the USER registered that is not the framework's (2026-09-25). Coverage is a promise
+      # about THIS framework's hooks — the same ownership line settings-merge.js draws (a command
+      # under hooks/governance/, or check-full-finish.sh). A machine-local hook from another project
+      # can have no case here and was keeping this machine's verdict RED forever. It is still named
+      # on every run, so it cannot go quiet; it is just not counted as a framework gap.
+      case "$path" in
+        */hooks/governance/*|*/hooks/check-full-finish.sh) : ;;
+        *)
+          USERHOOK_N=$((${USERHOOK_N:-0}+1))
+          USERHOOK_LOG="${USERHOOK_LOG:-}
+  $path"
+          printf '    [USER HOOK] not part of this framework — its owner tests it, this suite does not\n'
+          continue ;;
+      esac
       UNCOV=$((UNCOV+1))
       UNCOV_LOG="$UNCOV_LOG
   $path — no must-block/must-allow case is defined for it; it is EXECUTED nowhere and its behaviour is unverified"
@@ -2074,6 +2092,13 @@ part_b() {
   #      cannot appear - the extraction returned empty and claim_check rendered empty as _ok;
   #  (3) `head -1` over a single file let a correct number in one place mask a wrong one in another.
   local _sz_scanned=0 _sz_found=0 _szf _szclaims _szc
+  # Applicability (2026-09-25): Part B used to assume ONE project's layout. Pointed at a project
+  # without MDs/Open-Problems.md, "no size claim found" is not drift, it is a question that does not
+  # exist there — reported N/A, not FAIL. Where the file exists, an empty extraction stays a FAIL.
+  if [ ! -f "$PROJECT/MDs/Open-Problems.md" ]; then
+    CUR_SCRIPT="docs/context/CONTEXT-MANIFEST.md"
+    _na "Open-Problems.md size claims" "this project has no MDs/Open-Problems.md"
+  else
   for _szf in "$PROJECT/docs/context/CONTEXT-MANIFEST.md" "$PROJECT/docs/context/OPEN-PROBLEMS.md"; do
     [ -f "$_szf" ] || continue
     _sz_scanned=$((_sz_scanned+1))
@@ -2092,7 +2117,13 @@ part_b() {
   else
     _ok "Open-Problems.md size claims: scanned $_sz_scanned file(s), found $_sz_found claim(s), measured ${op_lines:-0} lines"
   fi
+  fi
 
+  # --- God Mode tool count + admin/lib inventory: only for a project that HAS admin/lib ---------
+  if [ ! -d "$PROJECT/admin/lib" ]; then
+    CUR_SCRIPT="admin/lib"
+    _na "God Mode tool count / admin/lib module inventory / MDs/FILE-ROLES.md" "this project has no admin/lib"
+  else
   # --- God Mode tool count ------------------------------------------------------------------
   local gm_measured=""
   if [ -f "$PROJECT/admin/lib/godmode-tools.js" ] && command -v node >/dev/null 2>&1; then
@@ -2162,6 +2193,7 @@ part_b() {
     _bad "every admin/lib module is documented in MDs/FILE-ROLES.md" \
          "$missing of ${lib_mod:-0} modules are absent:$(printf '%s' "$miss_list" | head -c 400)"
   fi
+  fi
 
   # --- canonical documents must contain no control bytes ------------------------------------
   # A single NUL byte makes grep declare a text file BINARY: it prints "Binary file ... matches"
@@ -2229,7 +2261,11 @@ part_b() {
     fi
   done
   CUR_SCRIPT="Project-version lines"
-  if [ "$_vl_checked" -eq 0 ]; then
+  # The Project-version line is what sync-governance.sh maintains FROM version.json; a project with
+  # no version.json has no such line to maintain (N/A). With version.json, finding none is a FAIL.
+  if [ "$_vl_checked" -eq 0 ] && [ ! -f "$PROJECT/version.json" ]; then
+    _na "Project-version lines" "this project has no version.json, so no Project-version line is maintained"
+  elif [ "$_vl_checked" -eq 0 ]; then
     _bad "Project-version lines were found to check" "scanned 2 file(s) and found NO Project-version line - an empty input set is never a pass"
   fi
 
@@ -2360,6 +2396,9 @@ if [ -n "$FAIL_LOG" ]; then
 fi
 if [ -n "$UNCOV_LOG" ]; then
   printf 'UNCOVERED (executed nowhere — NOT green)\n%s\n\n' "$UNCOV_LOG"
+fi
+if [ "${USERHOOK_N:-0}" -gt 0 ]; then
+  printf 'USER HOOKS registered on this machine but not part of the framework (%s; not counted, not tested here):%s\n\n' "$USERHOOK_N" "$USERHOOK_LOG"
 fi
 printf '[governance-selftest] pass=%s fail=%s uncovered=%s\n' "$PASS" "$FAIL" "$UNCOV"
 

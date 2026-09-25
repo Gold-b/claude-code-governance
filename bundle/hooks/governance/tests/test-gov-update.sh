@@ -875,7 +875,7 @@ is "dry run without a GREEN selftest -> exit 1" "$_rc" "1"
 has "  it names the failing precondition" "$_o" "FAIL  selftest verdict=GREEN"
 has "  and prints the passing ones too" "$_o" "PASS  clean working tree"
 is "  nothing was tagged" "$(git -C "$RR" tag -l v2.0.0)" ""
-_fpnow=$(find "$RH/.claude/hooks" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)
+_fpnow=$(find "$RH/.claude/hooks/governance" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) | LC_ALL=C sort | xargs cat | sha256sum | cut -c1-12)
 printf 'verdict=GREEN\nhooks_fingerprint=%s\n' "$_fpnow" > "$RH/.claude/logs/governance-selftest.result"
 _o=$(grel 2.0.0 --dry-run); _rc=$?
 is "dry run with every precondition met -> exit 0" "$_rc" "0"

@@ -96,11 +96,17 @@ bash "$SCRIPT_DIR/end-session.sh" --publish-preview </dev/null >/dev/null 2>&1; 
 _d=$(diff -rq --exclude=desktop.ini "$STAGING/bundle" "$REPO/bundle" 2>&1 | head -3)
 [ -z "$_d" ]; chk "staging bundle/ == clone bundle/" $? "$_d"
 _res="$CH/logs/governance-selftest.result"
-_fp_now=$(find "$CH/hooks" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) 2>/dev/null \
+# Computed EXACTLY as the verdict's writer computes it (selftest-advisory-stop.sh: the directory
+# the suite lives in, hooks/governance). governance-selftest.sh's own _gov_tree_id hashes all of
+# hooks/ — a different number for the same question; comparing against the wrong one refused a
+# GREEN, current verdict (MEASURED 2026-09-25).
+_fp_now=$(find "$SCRIPT_DIR" -type f \( -name '*.sh' -o -name '*.js' -o -name '*.py' -o -name '*.ps1' \) 2>/dev/null \
           | LC_ALL=C sort | xargs cat 2>/dev/null | sha256sum 2>/dev/null | cut -c1-12)
 grep -q '^verdict=GREEN' "$_res" 2>/dev/null; chk "selftest verdict=GREEN (Stop-hook certified)" $? "$(grep -E '^(verdict|reason)=' "$_res" 2>/dev/null | tr '\n' ' ')"
 [ "$(sed -n 's/^hooks_fingerprint=//p' "$_res" 2>/dev/null)" = "$_fp_now" ]; chk "the selftest verdict is about the live hooks tree now" $? "result $(sed -n 's/^hooks_fingerprint=//p' "$_res" 2>/dev/null) != live $_fp_now - re-run the selftest"
-bash "$SCRIPT_DIR/check-no-pii.sh" --tree "$REPO/bundle" </dev/null >/dev/null 2>&1; chk "check-no-pii.sh --tree bundle" $?
+# The files a release SHIPS are the tracked ones: scanning the directory would also read untracked
+# Windows desktop.ini files (never released, and they carry a version string the IPV4 rule flags).
+(cd "$REPO" && git ls-files -z -- bundle | xargs -0 bash "$SCRIPT_DIR/check-no-pii.sh") </dev/null >/dev/null 2>&1; chk "check-no-pii.sh over every tracked bundle/ file" $?
 grep -qF "(v$VER)" "$REPO/README.md"; chk "README.md changelog has a (v$VER) entry" $?
 [ -f "$REPO/LICENSE" ] && [ -f "$REPO/NOTICE-AUTO-UPDATE.md" ]; chk "LICENSE and NOTICE-AUTO-UPDATE.md present" $?
 _tv=$(tr -d '[:space:]' < "$REPO/bundle/TERMS-VERSION" 2>/dev/null); case "$_tv" in ''|*[!0-9]*) _tv=0 ;; esac

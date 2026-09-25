@@ -91,10 +91,19 @@ relman_have_sshsig; chk "ssh-keygen -Y available" $?
 [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "master" ]; chk "on master" $?
 git -C "$REPO" fetch -q origin 2>/dev/null
 git -C "$REPO" merge-base --is-ancestor origin/master HEAD 2>/dev/null; chk "HEAD contains origin/master (nothing to pull)" $? "pull first"
-[ ! -f "$CH/logs/.governance-push-pending" ]; chk "publish queue empty" $? "a held GOV_PUBLISH queue exists - publish or clear it first"
 bash "$SCRIPT_DIR/end-session.sh" --publish-preview </dev/null >/dev/null 2>&1; chk "end-session.sh --publish-preview clean (no TARGET-AHEAD)" $?
 _d=$(diff -rq --exclude=desktop.ini "$STAGING/bundle" "$REPO/bundle" 2>&1 | head -3)
 [ -z "$_d" ]; chk "staging bundle/ == clone bundle/" $? "$_d"
+# The publish queue records hook edits that reached STAGING. Every hook edit adds to it, so it is
+# never empty on the machine where the release was just built. What matters is that nothing in it
+# is missing from what this release commits: with staging == clone (checked above) every queued
+# change is already in the clone, and this release publishes it. The queue is archived after the push.
+_PQ="$CH/logs/.governance-push-pending"
+if [ ! -f "$_PQ" ]; then
+  chk "publish queue empty" 0
+else
+  [ -z "$_d" ]; chk "publish queue fulfilled by this release ($(sed 's|^[^ ]* ||' "$_PQ" 2>/dev/null | sort -u | grep -c .) queued file(s), all already in the clone)" $? "staging and clone differ - reconcile before releasing"
+fi
 _res="$CH/logs/governance-selftest.result"
 # Computed EXACTLY as the verdict's writer computes it (selftest-advisory-stop.sh: the directory
 # the suite lives in, hooks/governance). governance-selftest.sh's own _gov_tree_id hashes all of
@@ -201,6 +210,8 @@ relman_archive_tree "$REPO" HEAD "$_work/c" || die "archive of the release commi
 relman_verify_tree "$REPO/RELEASE-MANIFEST" "$_work/c" || die "the COMMITTED tree does not match the manifest - not tagging"
 git -C "$REPO" -c gpg.format=ssh -c user.signingkey="$KEY" tag -s "$TAG" -m "Release $VER" || die "signed tag failed"
 git -C "$REPO" push -q origin master "$TAG" || die "push failed (the pre-push gate may have refused it)"
+# The queued publish is now on the remote with this release; keep the list as a record.
+[ -f "$_PQ" ] && mv -f "$_PQ" "$_PQ.released-v$VER" 2>/dev/null
 awk -v v="(v$VER)" 'index($0, v) { on = 1 } on && /^- \*\*/ && !index($0, v) { exit } on { print }' "$REPO/README.md" > "$_work/notes"
 gh release create "$TAG" --repo "$(git -C "$REPO" remote get-url origin | sed 's|.*github.com[:/]||; s|\.git$||')" \
    --title "$TAG" --notes-file "$_work/notes" "$REPO/RELEASE-MANIFEST" "$REPO/RELEASE-MANIFEST.sig" >/dev/null \

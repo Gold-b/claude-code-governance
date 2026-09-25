@@ -880,8 +880,13 @@ printf 'verdict=GREEN\nhooks_fingerprint=%s\n' "$_fpnow" > "$RH/.claude/logs/gov
 _o=$(grel 2.0.0 --dry-run); _rc=$?
 is "dry run with every precondition met -> exit 0" "$_rc" "0"
 [ "$_rc" = "0" ] || printf '%s\n' "$_o" | grep FAIL | head -5
+# A publish queue whose content is already in the clone does not block the release, and is
+# archived once the release has pushed it.
+printf '2026-01-01T00:00:00+00:00 %s\n' "$RH/.claude/hooks/governance/gov-update.sh" > "$RH/.claude/logs/.governance-push-pending"
 _o=$(grel 2.0.0); _rc=$?
 is "the real run exits 0" "$_rc" "0"
+has "  the queued publish counts as fulfilled" "$_o" "publish queue fulfilled by this release"
+is "  and is archived after the push" "$([ -f "$RH/.claude/logs/.governance-push-pending" ] && echo pending || echo archived)/$([ -f "$RH/.claude/logs/.governance-push-pending.released-v2.0.0" ] && echo kept || echo lost)" "archived/kept"
 [ "$_rc" = "0" ] || printf '%s\n' "$_o" | tail -8
 has "  the client-side rehearsal verified the tag" "$_o" "Rehearsal: verify-archive: OK v2.0.0"
 is "  tag v2.0.0 is on the remote" "$(git -C "$SB/relremote.git" tag -l v2.0.0)" "v2.0.0"

@@ -20,3 +20,13 @@
 # Windows-only hosts. Stated explicitly rather than left to the platform default.
 *.ps1   text eol=crlf
 *.vbs   text eol=crlf
+
+# Extensionless release files. Their SHA-256 is signed in RELEASE-MANIFEST from blob
+# content; a CRLF checkout would make a Windows clone differ from the signed hash.
+bundle/VERSION                   text eol=lf
+bundle/DISTRIBUTED               text eol=lf
+bundle/TERMS-VERSION             text eol=lf
+bundle/release/allowed_signers   text eol=lf
+RELEASE-MANIFEST                 text eol=lf
+RELEASE-MANIFEST.sig             text eol=lf
+LICENSE                          text eol=lf

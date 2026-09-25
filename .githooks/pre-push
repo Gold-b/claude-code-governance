@@ -31,10 +31,63 @@ export GATE_PHASE
   exit 1
 }
 
-gate_disabled && exit 0
-
 ZERO="0000000000000000000000000000000000000000"
 RC=0
+# git writes the ref lines ONCE on stdin; two passes below need them (PII, then VERSION/tag).
+PUSH_REFS="$(cat)"
+
+# ── VERSION without a tag (2.0.0) ────────────────────────────────────────────────────────────
+# Clients read master's bundle/VERSION to learn that a release exists, then download the TAG
+# v<VERSION>. A VERSION bump that reaches master without its tag makes every client fetch a 404
+# three times and halt that version with a "maintainer problem" line. So a push of a branch whose
+# range changes bundle/VERSION is refused unless the tag v<new VERSION> exists locally and points
+# at a commit the pushed tip contains. gov-release.sh pushes master and the tag in one push.
+# Kill switch: GOV_GIT_VERSION_TAG_GATE=0 git push ...
+if [ "${GOV_GIT_VERSION_TAG_GATE:-1}" != "0" ]; then
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    case "$local_sha" in "$ZERO"|"") continue ;; esac
+    case "${remote_ref:-}" in refs/heads/*) ;; *) continue ;; esac
+    if [ "${remote_sha:-$ZERO}" = "$ZERO" ]; then
+      CHANGED="$(git log --name-only --pretty=format: "$local_sha" --not --remotes -- bundle/VERSION 2>/dev/null | grep -c .)"
+    elif ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+      # The remote tip is not in this clone (not fetched): the range cannot be computed, so assume
+      # VERSION changed. Fail closed — a released VERSION always has its tag, so this only ever
+      # asks for what a correct push already has.
+      CHANGED=1
+    else
+      CHANGED="$(git diff --name-only "$remote_sha" "$local_sha" -- bundle/VERSION 2>/dev/null | grep -c .)"
+    fi
+    [ "${CHANGED:-0}" -gt 0 ] || continue
+    NEWV="$(git show "$local_sha:bundle/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    TAGC="$(git rev-parse -q --verify "refs/tags/v$NEWV^{commit}" 2>/dev/null)"
+    # The tag must REACH the remote, not just exist here: pushed in this same push, or already there.
+    TAG_OUT=0
+    case "$PUSH_REFS" in *" refs/tags/v$NEWV "*) TAG_OUT=1 ;; esac
+    if [ "$TAG_OUT" = "0" ] && [ -n "$NEWV" ] && [ -n "$(git ls-remote --tags "${1:-origin}" "refs/tags/v$NEWV" 2>/dev/null)" ]; then TAG_OUT=1; fi
+    if [ -n "$NEWV" ] && [ -n "$TAGC" ] && [ "$TAG_OUT" = "0" ]; then
+      printf 'pre-push: [BLOCKED] tag v%s exists locally but is neither in this push nor on the remote.\n' "$NEWV" >&2
+      printf 'pre-push: push them together:  git push %s %s v%s\n' "${1:-origin}" "${remote_ref#refs/heads/}" "$NEWV" >&2
+      RC=1
+    elif [ -z "$NEWV" ] || [ -z "$TAGC" ]; then
+      printf 'pre-push: [BLOCKED] this push changes bundle/VERSION to %s but there is no local tag v%s.\n' "${NEWV:-?}" "${NEWV:-?}" >&2
+      printf 'pre-push: clients would see the new VERSION, fetch the missing tag, and halt. Release with\n' >&2
+      printf 'pre-push:   bash ~/.claude/hooks/governance/gov-release.sh %s\n' "${NEWV:-<version>}" >&2
+      printf 'pre-push: (kill switch, say so out loud: GOV_GIT_VERSION_TAG_GATE=0)\n' >&2
+      RC=1
+    elif ! git merge-base --is-ancestor "$TAGC" "$local_sha" 2>/dev/null; then
+      printf 'pre-push: [BLOCKED] tag v%s exists but is not contained in the pushed %s.\n' "$NEWV" "$remote_ref" >&2
+      RC=1
+    fi
+  done <<PUSHREFS2
+$PUSH_REFS
+PUSHREFS2
+fi
+
+# The PII gate has its own kill switch; it must not switch the VERSION/tag gate above off with it,
+# so the check comes after that gate ran.
+if gate_disabled; then exit $RC; fi
+
 
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
@@ -108,6 +161,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
     rm -f "$RANGE_PATCH" "$RANGE_ADDED" 2>/dev/null
   fi
-done
+done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
 
 exit $RC

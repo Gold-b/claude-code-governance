@@ -639,6 +639,29 @@ gov_is_semver() {
   return 0
 }
 
+# gov_semver_cmp_var <varname> <a> <b>
+# Assigns lt | eq | gt (a relative to b) or "undecidable" when a component is not a plain number.
+# Fork-free, the same builtin loop pre-session.sh's advisory uses (added 2.0.0 for the updater,
+# which must refuse downgrades: 1.9.0 -> 1.10.0 is an upgrade a string compare gets wrong).
+# ADDITIVE-ONLY RULE: helpers here are only ever added or kept backward-compatible within a
+# release line, never removed or re-typed. The auto-updater swaps this file FIRST, so for a moment
+# a new _common.sh serves old hooks; that is only safe while nothing an old hook calls disappears.
+gov_semver_cmp_var() {
+  local __sc_n="$1" __sc_a="$2" __sc_b="$3" __sc_x __sc_y __sc_r="eq"
+  while [ -n "$__sc_a$__sc_b" ]; do
+    __sc_x="${__sc_a%%.*}"; __sc_y="${__sc_b%%.*}"
+    [ -n "$__sc_x" ] || __sc_x=0
+    [ -n "$__sc_y" ] || __sc_y=0
+    case "$__sc_x$__sc_y" in *[!0-9]*) __sc_r="undecidable"; break ;; esac
+    # 10# forces base 10: a component like 08 must not be read as a bad octal literal.
+    if [ "$((10#$__sc_x))" -gt "$((10#$__sc_y))" ]; then __sc_r="gt"; break; fi
+    if [ "$((10#$__sc_x))" -lt "$((10#$__sc_y))" ]; then __sc_r="lt"; break; fi
+    case "$__sc_a" in *.*) __sc_a="${__sc_a#*.}" ;; *) __sc_a="" ;; esac
+    case "$__sc_b" in *.*) __sc_b="${__sc_b#*.}" ;; *) __sc_b="" ;; esac
+  done
+  printf -v "$__sc_n" '%s' "$__sc_r"
+}
+
 # gov_detect_role_var <varname> <root>
 # Fork-free twin of gov_detect_role: assigns instead of printing. `gov_detect_role` is called from
 # hot paths that run at every session start, and on Windows/MSYS2 the `$( )` around it costs

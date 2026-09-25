@@ -7,7 +7,7 @@
 # Idempotent — safe to run multiple times. Existing files are backed up.
 #
 # Usage:
-#   bash ~/.claude/governance-installer/install.sh [--core-only] [--force] [--dry-run]
+#   bash ~/.claude/governance-installer/install.sh [--core-only] [--force] [--dry-run] [--accept-terms]
 #
 # Options:
 #   --core-only   Install only core governance skills (skip extended toolkit)
@@ -15,6 +15,15 @@
 #   --dry-run     Show what would be installed without making changes
 #   --no-claude-md  Skip CLAUDE.md installation (keep your existing one)
 #   --uninstall   Remove all governance files (with backup)
+#   --accept-terms  Accept NOTICE-AUTO-UPDATE.md without the typed prompt (non-interactive
+#                 installs; env equivalent GOV_ACCEPT_TERMS=1). Without it and without a
+#                 terminal, the install refuses before writing anything.
+#   --trust-new-key Replace the pinned release-signing key with this clone's even though the
+#                 clone's manifest does not verify under the key pinned now (key rotation after a
+#                 compromise — compare the fingerprint with README.md first)
+#   --print-install-map  Print "src -> dest  tag" for every file this installer copies, and
+#                 exit. The release manifest embeds this output, so what the auto-updater
+#                 installs and what this script installs are one list by construction.
 #   --deep-verify Also run governance-selftest.sh after installing (~2 min extra)
 #   --no-verify   Skip the post-install verification. The run still completes and
 #                 still exits 0 -- a kill switch that fails the build is a nag,
@@ -54,6 +63,10 @@ FORCE=0
 DRY_RUN=0
 NO_CLAUDE_MD=0
 UNINSTALL=0
+ACCEPT_TERMS=0
+if [ "${GOV_ACCEPT_TERMS:-0}" = "1" ]; then ACCEPT_TERMS=1; fi
+TRUST_NEW_KEY=0
+PRINT_MAP=0
 # Post-install verification. ON by default: an installer whose only evidence is
 # "the files are there" is the failure this framework already shipped once —
 # verify.sh reported 37/37 from `[ -f ]` tests while a --force run had reverted a
@@ -70,6 +83,9 @@ for arg in "$@"; do
     --uninstall)    UNINSTALL=1 ;;
     --no-verify)    DO_VERIFY=0 ;;
     --deep-verify)  DEEP_VERIFY=1 ;;
+    --accept-terms) ACCEPT_TERMS=1 ;;
+    --trust-new-key) TRUST_NEW_KEY=1 ;;
+    --print-install-map) PRINT_MAP=1 ;;
     --help|-h)
       sed -n '2,/^# ====/{ /^# ====/d; s/^# //; s/^#//; p; }' "$0"
       exit 0
@@ -114,6 +130,7 @@ INSTALL_DEGRADED=0
 # install printed "Settings: NOT registered", which sends the reader to fix a
 # settings.json that is perfectly fine.
 SETTINGS_FAILED=0
+SETTINGS_MERGED=0
 VERIFY_FAILED=0
 VERIFY_SKIPPED=0
 
@@ -195,6 +212,146 @@ if [ -z "$CORE_SKILLS" ]; then
   exit 1
 fi
 
+# ── The install map (ONE enumeration — the copy loops below AND the release manifest read it) ──
+#
+# WHY (2.0.0). The auto-updater installs a signed release by walking the `[install-map]` section
+# of its manifest, and that section is this function's output (`--print-install-map`). The copy
+# loops in sections 1-3 iterate the SAME output. So "what install.sh installs" and "what the
+# updater installs" cannot drift: there is one list, not two lists and a hope.
+#
+# Format: `<src relative to the repo root> -> <dest relative to ~/.claude>  <tag>`, tag one of
+#   core      installed in every mode (hooks, docs, [core] skills)
+#   extended  skipped by --core-only ([extended] skills)
+#   agents    skipped by --core-only ([agents])
+# NOT in the map, on purpose: CLAUDE.md.template, .governance-local.env.example and .pii-names —
+# the special cases below own them, and the updater never touches them.
+gov_install_skip() {
+  case "$1" in
+    *.bak|*.bak-*|*.tmp|*.orig|*.rej|desktop.ini|*/desktop.ini) return 0 ;;
+  esac
+  return 1
+}
+
+gov_install_map() {
+  local rh f rel skill agent
+  for rh in $DISTRIBUTED_ROOT_HOOKS; do
+    if [ -f "$BUNDLE_DIR/hooks/$rh" ]; then
+      printf 'bundle/hooks/%s -> hooks/%s  core\n' "$rh" "$rh"
+    fi
+  done
+  if [ -d "$BUNDLE_DIR/hooks/governance" ]; then
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      rel="${f#$BUNDLE_DIR/hooks/governance/}"
+      if gov_install_skip "$rel"; then continue; fi
+      printf 'bundle/hooks/governance/%s -> hooks/governance/%s  core\n' "$rel" "$rel"
+    done <<MAPHOOKS
+$( { find "$BUNDLE_DIR/hooks/governance" -type f 2>/dev/null || true; } | LC_ALL=C sort)
+MAPHOOKS
+  fi
+  for skill in $CORE_SKILLS; do
+    for f in "$BUNDLE_DIR/skills/$skill"/*; do
+      [ -f "$f" ] || continue
+      if gov_install_skip "${f##*/}"; then continue; fi
+      printf 'bundle/skills/%s/%s -> skills/%s/%s  core\n' "$skill" "${f##*/}" "$skill" "${f##*/}"
+    done
+  done
+  for skill in $EXTENDED_SKILLS; do
+    for f in "$BUNDLE_DIR/skills/$skill"/*; do
+      [ -f "$f" ] || continue
+      if gov_install_skip "${f##*/}"; then continue; fi
+      printf 'bundle/skills/%s/%s -> skills/%s/%s  extended\n' "$skill" "${f##*/}" "$skill" "${f##*/}"
+    done
+  done
+  for agent in $DISTRIBUTED_AGENTS; do
+    if [ -f "$BUNDLE_DIR/agents/$agent.md" ]; then
+      printf 'bundle/agents/%s.md -> agents/%s.md  agents\n' "$agent" "$agent"
+    fi
+  done
+  for f in "$BUNDLE_DIR/docs/"*.md; do
+    [ -f "$f" ] || continue
+    printf 'bundle/docs/%s -> docs/%s  core\n' "${f##*/}" "${f##*/}"
+  done
+}
+
+INSTALL_MAP="$(gov_install_map)"
+
+if [ "$PRINT_MAP" = "1" ]; then
+  printf '%s\n' "$INSTALL_MAP"
+  exit 0
+fi
+
+# map_select <dest-prefix> -> "src dest" pairs for this run's mode whose dest starts with the prefix
+INSTALL_MODE="full"
+if [ "$CORE_ONLY" = "1" ]; then INSTALL_MODE="core-only"; fi
+map_select() {
+  # `pre == ""` is spelled out: index(s, "") is 1 in gawk but 0 in mawk (Debian/Ubuntu default),
+  # which would turn "every entry" into "no entry" and record an empty install baseline.
+  printf '%s\n' "$INSTALL_MAP" | awk -v pre="$1" -v mode="$INSTALL_MODE" '
+    NF == 4 && $2 == "->" && (pre == "" || index($3, pre) == 1) {
+      if (mode == "core-only" && $4 != "core") next
+      print $1 " " $3
+    }'
+}
+
+# ── Never race an automatic update (2.0.0) ──────────────────────────────────
+# A live apply would keep renaming files over this install (or over an uninstall), and its rollback
+# would restore its own older backup over the result. So: refuse while one runs, and HOLD the
+# updater's own lock for the whole run, so none can start part-way through. Checked before
+# --uninstall too, which removes the very directory the apply journals in.
+UPD_DIR="$CLAUDE_HOME/.governance-update"
+INSTALL_LOCK_HELD=0
+if [ "$PRINT_MAP" = "0" ]; then
+  for _pf in "$UPD_DIR/APPLYING" "$UPD_DIR/lock.d/info"; do
+    _apid=$( { sed -n 's/^pid=\([0-9]*\).*/\1/p' "$_pf" 2>/dev/null || true; } | head -1)
+    if [ -n "$_apid" ] && kill -0 "$_apid" 2>/dev/null; then
+      error "An automatic update is running right now (pid $_apid, $_pf)."
+      error "Wait for it to finish (it prints one line at session start), then re-run. Nothing was changed."
+      exit 1
+    fi
+  done
+  if [ "$DRY_RUN" = "0" ]; then
+    mkdir -p "$UPD_DIR" 2>/dev/null || true
+    # Take the lock FIRST; clear an existing one only when its pid is re-read and proven dead (a
+    # remove-then-take would open a window for an apply to take the lock and lose it to us).
+    # Same rules as gov-update.sh upd_lock, so the two can never disagree about who holds it:
+    #   a pid that is alive -> held;  NO readable pid -> held unless the lock is > 30 min old (the
+    #   updater creates lock.d and writes its info a moment later — an empty info is a lock being
+    #   taken, not a dead one);  a dead pid -> broken, but only under the lock.break.d mutex and
+    #   only after re-reading the same pid there.
+    _got_lock=0
+    if mkdir "$UPD_DIR/lock.d" 2>/dev/null; then
+      _got_lock=1
+    else
+      _lpid=$( { sed -n 's/^pid=\([0-9]*\).*/\1/p' "$UPD_DIR/lock.d/info" 2>/dev/null || true; } | head -1)
+      _lage=0
+      if [ -z "$_lpid" ]; then
+        _lm=$( { stat -c %Y "$UPD_DIR/lock.d" 2>/dev/null || stat -f %m "$UPD_DIR/lock.d" 2>/dev/null || echo 0; } | head -1)
+        case "$_lm" in ''|*[!0-9]*) _lm=0 ;; esac
+        _lage=$(( $(date +%s) - _lm ))
+      fi
+      if { [ -n "$_lpid" ] && kill -0 "$_lpid" 2>/dev/null; } || { [ -z "$_lpid" ] && [ "$_lage" -le 1800 ]; }; then
+        error "An automatic update holds the update lock right now (pid ${_lpid:-being written}). Re-run in a minute. Nothing was changed."
+        exit 1
+      fi
+      if mkdir "$UPD_DIR/lock.break.d" 2>/dev/null; then
+        _lpid2=$( { sed -n 's/^pid=\([0-9]*\).*/\1/p' "$UPD_DIR/lock.d/info" 2>/dev/null || true; } | head -1)
+        if [ "$_lpid2" = "$_lpid" ]; then rm -rf "$UPD_DIR/lock.d" 2>/dev/null || true; fi
+        rmdir "$UPD_DIR/lock.break.d" 2>/dev/null || true
+      fi
+      if mkdir "$UPD_DIR/lock.d" 2>/dev/null; then _got_lock=1; fi
+    fi
+    if [ "$_got_lock" = "1" ]; then
+      printf 'pid=%s since=%s mode=install\n' "$$" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$UPD_DIR/lock.d/info" 2>/dev/null || true
+      INSTALL_LOCK_HELD=1
+      trap 'if [ "$INSTALL_LOCK_HELD" = "1" ]; then rm -rf "$UPD_DIR/lock.d" 2>/dev/null || true; fi' EXIT
+    else
+      error "Could not take the update lock at $UPD_DIR/lock.d - another installer or update may be starting. Re-run in a moment."
+      exit 1
+    fi
+  fi
+fi
+
 # ── Uninstall mode ───────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = "1" ]; then
   header "Uninstalling Context Governance"
@@ -249,6 +406,19 @@ if [ "$UNINSTALL" = "1" ]; then
   # The glob catches `.governance-latest.<pid>` temp files left by fetches that were killed.
   rm -f "$CLAUDE_HOME/logs/.governance-latest" "$CLAUDE_HOME/logs/.governance-latest".* 2>/dev/null || true
 
+  # Auto-update state (2.0.0). Everything goes except `terms-accepted`: that file is a record of
+  # what this user agreed to and when, it is harmless, and deleting it would erase the one piece
+  # of evidence the terms exist to create.
+  if [ -d "$CLAUDE_HOME/.governance-update" ]; then
+    cp -r "$CLAUDE_HOME/.governance-update" "$BACKUP_DIR/.governance-update" 2>/dev/null || true
+    for _uf in "$CLAUDE_HOME/.governance-update"/* "$CLAUDE_HOME/.governance-update"/.[!.]*; do
+      [ -e "$_uf" ] || continue
+      case "${_uf##*/}" in terms-accepted) continue ;; esac
+      rm -rf "$_uf"
+    done
+    success "Removed auto-update state (kept terms-accepted as the record of acceptance; backed up)"
+  fi
+
   info "Backup saved at: $BACKUP_DIR"
   success "Uninstall complete. CLAUDE.md was NOT removed (manual decision)."
   exit 0
@@ -274,6 +444,150 @@ if ! command -v node &>/dev/null; then
   HAS_NODE=0
 else
   HAS_NODE=1
+fi
+
+# ── Pre-flight 2 (2.0.0): source marker, terms, release key — all BEFORE any file is written ──
+UPD_DIR="$CLAUDE_HOME/.governance-update"
+RELMAN_LIB="$BUNDLE_DIR/hooks/governance/release-manifest.sh"
+CLONE_SIGNERS="$BUNDLE_DIR/release/allowed_signers"
+CLONE_MANIFEST="$INSTALLER_DIR/RELEASE-MANIFEST"
+CLONE_SIG="$INSTALLER_DIR/RELEASE-MANIFEST.sig"
+PINNED_SIGNERS="$UPD_DIR/allowed_signers"
+NOTICE_FILE="$INSTALLER_DIR/NOTICE-AUTO-UPDATE.md"
+
+
+# The release source machine installs over its own live tree only by deliberate --force.
+if [ -f "$CLAUDE_HOME/.governance-source" ] && [ "$FORCE" = "0" ]; then
+  warn "This machine is marked as the RELEASE SOURCE (~/.claude/.governance-source)."
+  warn "Its live tree is where releases are made; installing over it replaces work in progress."
+  warn "Re-run with --force if that is what you mean."
+fi
+
+# Terms. A missing TERMS-VERSION means a pre-2.0 bundle with no terms and no auto-update.
+TERMS_V=$( { cat "$BUNDLE_DIR/TERMS-VERSION" 2>/dev/null || true; } | tr -d '[:space:]')
+TERMS_METHOD=""
+if [ -n "$TERMS_V" ]; then
+  case "$TERMS_V" in *[!0-9]*) error "bundle/TERMS-VERSION is not an integer: '$TERMS_V'"; exit 1 ;; esac
+  if [ ! -f "$NOTICE_FILE" ]; then
+    error "bundle/TERMS-VERSION exists but NOTICE-AUTO-UPDATE.md is missing at $NOTICE_FILE."
+    error "Terms cannot be accepted without the text they refer to. Re-clone and re-run."
+    exit 1
+  fi
+  ACCEPTED_V=$( { grep -o 'terms_version=[0-9]*' "$UPD_DIR/terms-accepted" 2>/dev/null || true; } | head -1 | cut -d= -f2)
+  if [ -n "$ACCEPTED_V" ] && [ "$ACCEPTED_V" -ge "$TERMS_V" ] 2>/dev/null; then
+    info "Terms v$TERMS_V already accepted on this machine."
+  elif [ "$ACCEPT_TERMS" = "1" ]; then
+    if [ "${GOV_ACCEPT_TERMS:-0}" = "1" ]; then TERMS_METHOD="env"; else TERMS_METHOD="--accept-terms"; fi
+    info "Terms v$TERMS_V accepted non-interactively ($TERMS_METHOD). Full text: $NOTICE_FILE"
+  elif [ -t 0 ]; then
+    printf '\n%s\n' "Context Governance for Claude Code — terms version $TERMS_V"
+    printf '%s\n' "Full text: $NOTICE_FILE   License: MIT, provided AS IS (see LICENSE)"
+    printf '\n'
+    sed -n '/<!-- terms-summary:begin -->/,/<!-- terms-summary:end -->/{/<!--/d;p;}' "$NOTICE_FILE"
+    printf '\n'
+    _answer=""
+    read -r -p "Type I ACCEPT to continue: " _answer || true
+    if [ "$_answer" != "I ACCEPT" ]; then
+      error "Terms not accepted — nothing was installed or changed."
+      exit 1
+    fi
+    TERMS_METHOD="interactive"
+  else
+    if [ "$DRY_RUN" = "1" ]; then
+      warn "[DRY] Terms v$TERMS_V are not accepted and there is no terminal: the real run would refuse."
+      warn "[DRY] Pass --accept-terms or set GOV_ACCEPT_TERMS=1 after reading $NOTICE_FILE."
+      INSTALL_DEGRADED=1   # the preview's exit code mirrors the real refusal
+    else
+      error "Terms v$TERMS_V not accepted, and there is no terminal to ask on."
+      error "Read $NOTICE_FILE, then re-run with --accept-terms (or GOV_ACCEPT_TERMS=1)."
+      error "Nothing was installed or changed."
+      exit 1
+    fi
+  fi
+fi
+
+# Release key + manifest self-consistency. Pre-2.0 bundles carry neither; nothing to do then.
+RELEASE_STATE="none"   # tagged | snapshot | unverified | none
+PIN_ACTION="none"      # tofu | keep | replace | none
+HAVE_SSHSIG=0
+if [ -s "$CLONE_SIGNERS" ]; then
+  if [ ! -f "$RELMAN_LIB" ]; then
+    error "bundle/release/allowed_signers exists but release-manifest.sh is missing — incomplete bundle."
+    exit 1
+  fi
+  # shellcheck source=/dev/null
+  . "$RELMAN_LIB"
+  if relman_have_sshsig; then HAVE_SSHSIG=1; fi
+
+  CLONE_SIG_OK=0
+  if [ -s "$CLONE_MANIFEST" ] && [ -s "$CLONE_SIG" ]; then
+    if [ "$HAVE_SSHSIG" = "0" ]; then
+      warn "ssh-keygen -Y is not available (OpenSSH >= 8.2 needed): this clone's release signature cannot be checked."
+      warn "The install proceeds (a manual install is your own deliberate act), but automatic updates will refuse to run until it is."
+      RELEASE_STATE="unverified"
+    elif relman_verify_sig "$CLONE_MANIFEST" "$CLONE_SIG" "$CLONE_SIGNERS"; then
+      CLONE_SIG_OK=1
+      # Tagged tree, or a master snapshot that moved past the last release? Compare the listed
+      # files. A Windows clone with core.autocrlf=true checks `text=auto` files out with CRLF, so a
+      # file also counts as equal when it matches with CR removed — this decides a label, not trust.
+      _mismatch=0
+      NL=$'\n'
+      _got="$(relman_section "$CLONE_MANIFEST" files | sed 's/^[0-9a-f]\{64\}  //' | relman_sha256_stdin_list "$INSTALLER_DIR" 2>/dev/null || true)"
+      while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        _want_h="${_line%%  *}"; _p="${_line#*  }"
+        case "$NL$_got$NL" in *"$NL$_want_h  $_p$NL"*) continue ;; esac
+        if [ -f "$INSTALLER_DIR/$_p" ] && [ "$(tr -d '\r' < "$INSTALLER_DIR/$_p" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)" = "$_want_h" ]; then
+          continue
+        fi
+        _mismatch=1; break
+      done <<CLONEFILES
+$(relman_section "$CLONE_MANIFEST" files)
+CLONEFILES
+      # The listed files matching is not enough: an extra file (a hook added beside a signed
+      # manifest) would be installed under a "signed" banner. The install map this installer is
+      # about to follow must be the signed one, entry for entry.
+      if [ "$_mismatch" = "0" ] && [ "$(relman_section "$CLONE_MANIFEST" install-map | tr -d '\r')" != "$INSTALL_MAP" ]; then
+        _mismatch=1
+      fi
+      if [ "$_mismatch" = "0" ]; then
+        RELEASE_STATE="tagged"
+        info "Installing signed release v$(relman_get "$CLONE_MANIFEST" version) (manifest verified under this clone's key)."
+      else
+        RELEASE_STATE="snapshot"
+        warn "Installing an UNRELEASED master snapshot: the files differ from the signed manifest of v$(relman_get "$CLONE_MANIFEST" version)."
+        warn "That is normal between releases. Automatic updates will replace it with the next signed release."
+      fi
+    else
+      error "This clone's RELEASE-MANIFEST does not verify under its OWN bundle/release/allowed_signers."
+      error "A clone whose manifest and key disagree is corrupt or tampered with. Refusing to install."
+      error "Re-clone Gold-b/claude-code-governance and compare the key fingerprint with README.md."
+      exit 1
+    fi
+  else
+    RELEASE_STATE="snapshot"
+    info "This clone carries no RELEASE-MANIFEST (never released from this tree): installing as a snapshot."
+  fi
+
+  if [ ! -s "$PINNED_SIGNERS" ]; then
+    PIN_ACTION="tofu"
+  elif cmp -s "$PINNED_SIGNERS" "$CLONE_SIGNERS"; then
+    PIN_ACTION="keep"
+  elif [ "$TRUST_NEW_KEY" = "1" ]; then
+    PIN_ACTION="replace"
+    warn "--trust-new-key: the pinned release key will be REPLACED by this clone's. Compare the fingerprint below with README.md."
+  elif [ "$CLONE_SIG_OK" = "1" ] && relman_verify_sig "$CLONE_MANIFEST" "$CLONE_SIG" "$PINNED_SIGNERS"; then
+    PIN_ACTION="replace"
+    info "Release key rotation: this release is signed by the key pinned now, so its new signers file is trusted."
+  else
+    error "This clone's release key differs from the one pinned on this machine ($PINNED_SIGNERS),"
+    error "and its manifest is not signed by the pinned key. That is either a key rotation after a"
+    error "compromise, or a clone you should not trust. Compare the fingerprints:"
+    error "  pinned: $(relman_fingerprints "$PINNED_SIGNERS" 2>/dev/null | tr '\n' ' ')"
+    error "  clone:  $(relman_fingerprints "$CLONE_SIGNERS" 2>/dev/null | tr '\n' ' ')"
+    error "with the 'Release signing key' section of README.md, then re-run with --trust-new-key."
+    exit 1
+  fi
 fi
 
 # ── Helper: safe copy with backup ────────────────────────────────────────────
@@ -319,7 +633,7 @@ copy_safe() {
 # ── 1. Install hooks ────────────────────────────────────────────────────────
 # The count is computed, not typed. "Installing Hooks (12 files)" was hardcoded and had
 # gone stale — same class as the "2 docs" and "12 skills" banners already fixed here.
-header "Installing Hooks ($( { find "$BUNDLE_DIR/hooks" -type f 2>/dev/null || true; } | grep -vc 'desktop\.ini' ) files)"
+header "Installing Hooks ($( { map_select hooks/ | grep -c . ; } || true ) files)"
 
 # Root-level hooks — ALLOW-LISTED from bundle/DISTRIBUTED [hooks].
 # This used to be one hardcoded copy_safe line for check-full-finish.sh, while the bundle
@@ -328,11 +642,7 @@ header "Installing Hooks ($( { find "$BUNDLE_DIR/hooks" -type f 2>/dev/null || t
 # public repo carrying a real container name. Reading the same allow-list the crossing reads
 # means "in the bundle" and "installed" can no longer disagree silently.
 for roothook in $DISTRIBUTED_ROOT_HOOKS; do
-  if [ -f "$BUNDLE_DIR/hooks/$roothook" ]; then
-    copy_safe "$BUNDLE_DIR/hooks/$roothook" \
-              "$CLAUDE_HOME/hooks/$roothook" \
-              "hooks/$roothook"
-  else
+  if [ ! -f "$BUNDLE_DIR/hooks/$roothook" ]; then
     warn "Root hook listed in bundle/DISTRIBUTED [hooks] but absent from the bundle: $roothook (skipping)"
   fi
 done
@@ -372,18 +682,16 @@ ROOTHOOKEOF
 # ORPHAN, and the sole justification for keeping it was a claim nobody had checked. That is why
 # governance-selftest.sh now VERIFIES every "invoked-by" declaration against its named caller
 # rather than believing it. Tracked as B11, with render-gate.sh and render-rules-read.sh.)
-if [ -d "$BUNDLE_DIR/hooks/governance" ]; then
-  while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    rel="${f#$BUNDLE_DIR/hooks/governance/}"
-    case "$rel" in *.bak|*.bak-*|*.tmp|*.orig|*.rej) continue ;; esac
-    dest="$CLAUDE_HOME/hooks/governance/$rel"
-    mkdir -p "$(dirname "$dest")" 2>/dev/null
-    copy_safe "$f" "$dest" "hooks/governance/$rel"
-  done <<HOOKFILES
-$(find "$BUNDLE_DIR/hooks/governance" -type f 2>/dev/null | sort)
+#
+# (2.0.0) The enumeration now lives in gov_install_map above — same `find`, same skip list — and
+# both the root hooks and hooks/governance/** are copied from its output, so the release manifest
+# and this loop are one list.
+while read -r _src _dest; do
+  [ -n "$_src" ] || continue
+  copy_safe "$INSTALLER_DIR/$_src" "$CLAUDE_HOME/$_dest" "$_dest"
+done <<HOOKFILES
+$(map_select hooks/)
 HOOKFILES
-fi
 
 # ── 1b. Assert the copy actually happened ────────────────────────────────────
 # EXISTENCE OF THE SOURCE IS NOT ARRIVAL AT THE DESTINATION. Every failure above was invisible
@@ -391,13 +699,11 @@ fi
 # DESTINATION and was therefore happy with whatever it had managed to write. This compares.
 HOOK_MISSING=""
 if [ "$DRY_RUN" = "0" ] && [ -d "$BUNDLE_DIR/hooks/governance" ]; then
-  while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    rel="${f#$BUNDLE_DIR/hooks/governance/}"
-    case "$rel" in *.bak|*.bak-*|*.tmp|*.orig|*.rej) continue ;; esac
-    [ -f "$CLAUDE_HOME/hooks/governance/$rel" ] || HOOK_MISSING="$HOOK_MISSING $rel"
+  while read -r _src _dest; do
+    [ -n "$_dest" ] || continue
+    [ -f "$CLAUDE_HOME/$_dest" ] || HOOK_MISSING="$HOOK_MISSING ${_dest#hooks/governance/}"
   done <<HOOKCHECK
-$(find "$BUNDLE_DIR/hooks/governance" -type f 2>/dev/null | sort)
+$(map_select hooks/governance/)
 HOOKCHECK
   if [ -n "$HOOK_MISSING" ]; then
     error "These bundled files did NOT reach ~/.claude/hooks/governance/:$HOOK_MISSING"
@@ -451,10 +757,12 @@ SKILL_COUNT=0
 for skill in $INSTALL_SKILLS; do
   src_dir="$BUNDLE_DIR/skills/$skill"
   if [ -d "$src_dir" ]; then
-    for f in "$src_dir"/*; do
-      fname="$(basename "$f")"
-      copy_safe "$f" "$CLAUDE_HOME/skills/$skill/$fname" "skills/$skill/$fname"
-    done
+    while read -r _src _dest; do
+      [ -n "$_src" ] || continue
+      copy_safe "$INSTALLER_DIR/$_src" "$CLAUDE_HOME/$_dest" "$_dest"
+    done <<SKILLFILES
+$(map_select "skills/$skill/")
+SKILLFILES
     SKILL_COUNT=$((SKILL_COUNT + 1))
   else
     warn "Skill bundle not found: $skill (skipping)"
@@ -481,14 +789,17 @@ if [ "$CORE_ONLY" = "1" ]; then
 elif [ -n "$DISTRIBUTED_AGENTS" ] && [ -d "$BUNDLE_DIR/agents" ]; then
   header "Installing Agents"
   for agent in $DISTRIBUTED_AGENTS; do
-    src_agent="$BUNDLE_DIR/agents/$agent.md"
-    if [ -f "$src_agent" ]; then
-      copy_safe "$src_agent" "$CLAUDE_HOME/agents/$agent.md" "agents/$agent.md"
-      AGENT_COUNT=$((AGENT_COUNT + 1))
-    else
+    if [ ! -f "$BUNDLE_DIR/agents/$agent.md" ]; then
       warn "Agent listed in bundle/DISTRIBUTED [agents] but absent from the bundle: $agent (skipping)"
     fi
   done
+  while read -r _src _dest; do
+    [ -n "$_src" ] || continue
+    copy_safe "$INSTALLER_DIR/$_src" "$CLAUDE_HOME/$_dest" "$_dest"
+    AGENT_COUNT=$((AGENT_COUNT + 1))
+  done <<AGENTFILES
+$(map_select agents/)
+AGENTFILES
   success "Agents installed: $AGENT_COUNT"
   # A NEW agents/ directory is not picked up by a RUNNING session: measured 2026-09-17, a
   # dispatch from the session that created the directory returned "Agent type not found",
@@ -500,10 +811,12 @@ fi
 # ── 3. Install docs ─────────────────────────────────────────────────────────
 header "Installing Governance Docs"
 
-for f in "$BUNDLE_DIR/docs/"*.md; do
-  fname="$(basename "$f")"
-  copy_safe "$f" "$CLAUDE_HOME/docs/$fname" "docs/$fname"
-done
+while read -r _src _dest; do
+  [ -n "$_src" ] || continue
+  copy_safe "$INSTALLER_DIR/$_src" "$CLAUDE_HOME/$_dest" "$_dest"
+done <<DOCFILES
+$(map_select docs/)
+DOCFILES
 
 # Count what the bundle actually carries. The summary line below used to hardcode "2", which
 # went stale the moment a third document was added — a summary that lies is worse than none.
@@ -549,39 +862,26 @@ else
     cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.json"
   fi
 
-  # Pass hooks JSON via stdin to avoid MSYS/Windows path mangling
-  cat "$HOOKS_FILE" | node -e "
-    const fs = require('fs');
-    const path = require('path');
-
-    // Read hooks template from stdin
-    let input = '';
-    const stdin = fs.readFileSync(0, 'utf8');
-    const hooksTemplate = JSON.parse(stdin);
-
-    // Resolve settings path (handles both Unix and Windows)
-    const settingsPath = path.resolve(process.env.HOME || process.env.USERPROFILE, '.claude', 'settings.json');
-
-    // Load or create settings
-    let settings = {};
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    } catch (e) {
-      // File doesn't exist or is invalid — start fresh
-    }
-
-    // Merge hooks (replace entire hooks section — our hooks are the source of truth)
-    settings.hooks = hooksTemplate.hooks;
-
-    // Set effort level if not already set
-    if (!settings.effortLevel) {
-      settings.effortLevel = hooksTemplate.effortLevel || 'max';
-    }
-
-    // Write back
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-    console.log('Settings merged successfully');
-  " 2>&1 && success "settings.json hooks merged" || { error "Failed to merge settings.json"; INSTALL_DEGRADED=1; SETTINGS_FAILED=1; }
+  # (2.0.0) A GOVERNANCE-ONLY merge, shared with the auto-updater: settings-merge.js replaces the
+  # framework's own entries and keeps every hook, matcher group and key the user added. The old
+  # inline merge here replaced `settings.hooks` wholesale — every manual install silently dropped
+  # the user's own hooks — and started from `{}` on a settings.json that failed to parse, which
+  # erased the whole file. The merge refuses that case instead (exit 1 -> DEGRADED, not stamped).
+  MERGE_JS="$BUNDLE_DIR/hooks/governance/settings-merge.js"
+  MERGE_PREV=()
+  if [ -f "$UPD_DIR/settings-hooks.installed.json" ]; then
+    MERGE_PREV=(--installed "$UPD_DIR/settings-hooks.installed.json")
+  fi
+  if [ ! -f "$MERGE_JS" ]; then
+    error "settings-merge.js is missing from the bundle ($MERGE_JS) — cannot merge settings.json."
+    INSTALL_DEGRADED=1; SETTINGS_FAILED=1
+  elif _merge_out="$(node "$MERGE_JS" --template "$HOOKS_FILE" --settings "$SETTINGS_FILE" ${MERGE_PREV[@]+"${MERGE_PREV[@]}"} --set-effort-if-absent 2>&1)"; then
+    success "settings.json hooks merged ($_merge_out; your own hooks and settings kept)"
+    SETTINGS_MERGED=1
+  else
+    error "Failed to merge settings.json: $_merge_out"
+    INSTALL_DEGRADED=1; SETTINGS_FAILED=1
+  fi
 fi
 
 # -- 5b. Seed the machine-local config a fresh install cannot work without ----
@@ -824,6 +1124,76 @@ elif [ "$INSTALL_DEGRADED" = "1" ]; then
 else
   printf '%s\n' "$BUNDLE_VERSION" > "$CLAUDE_HOME/.governance-version"
   success "Version stamped: $BUNDLE_VERSION"
+  STAMPED=1
+fi
+
+# ── 7b. Auto-update state (2.0.0) — only for a stamped install ──────────────
+# What the updater needs to decide safely later, all under ~/.claude/.governance-update/:
+#   install-mode                  which tags of the map this machine takes (full | core-only)
+#   installed.hashes              sha256 of every destination AS WRITTEN — the baseline for "was this
+#                                 file modified locally?". Never hashed from the clone: a Windows
+#                                 clone's CRLF copies would flag every file.
+#   installed.manifest            the signed manifest when this is a tagged tree, otherwise a
+#                                 synthesized one marked unsigned=1 (its install map is what the
+#                                 updater compares the next release against, to delete removed files)
+#   settings-hooks.installed.json the template just merged — settings-merge.js's ownership memory
+#   allowed_signers               the pinned release key (first install = trust on first use)
+#   terms-accepted                written below when this run obtained the acceptance
+if [ "${STAMPED:-0}" = "1" ]; then
+  mkdir -p "$UPD_DIR"
+  # A manual install supersedes any automatic one in flight: an interrupted apply's journal would
+  # otherwise make the next session start "recover" by restoring the OLD backup over this install,
+  # and a staged release may now be older than what was just installed.
+  if [ -f "$UPD_DIR/APPLYING" ] || [ -f "$UPD_DIR/READY" ]; then
+    rm -f "$UPD_DIR/APPLYING" "$UPD_DIR/READY"
+    rm -rf "$UPD_DIR/staged" "$UPD_DIR"/prep.* "$UPD_DIR"/gi-prep.*
+    info "Cleared an interrupted or staged automatic update (this manual install supersedes it)."
+  fi
+  printf '%s\n' "$INSTALL_MODE" > "$UPD_DIR/install-mode"
+  _hash_tmp="$UPD_DIR/installed.hashes.tmp.$$"
+  if map_select "" | awk '{print $2}' | {
+       if command -v sha256sum >/dev/null 2>&1; then (cd "$CLAUDE_HOME" && tr '\n' '\0' | xargs -0 sha256sum --)
+       else (cd "$CLAUDE_HOME" && tr '\n' '\0' | xargs -0 shasum -a 256 --); fi
+     } | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /' > "$_hash_tmp" && [ -s "$_hash_tmp" ]; then
+    mv -f "$_hash_tmp" "$UPD_DIR/installed.hashes"
+  else
+    rm -f "$_hash_tmp"
+    warn "Could not record installed.hashes — automatic updates will not be able to detect local changes."
+  fi
+  if [ "$RELEASE_STATE" = "tagged" ]; then
+    cp "$CLONE_MANIFEST" "$UPD_DIR/installed.manifest"
+  else
+    {
+      printf '# claude-code-governance release manifest v1\n'
+      printf 'version=%s\nunsigned=1\nsource=%s\n' "$BUNDLE_VERSION" "$RELEASE_STATE"
+      printf '[files]\n[install-map]\n'
+      printf '%s\n' "$INSTALL_MAP"
+    } > "$UPD_DIR/installed.manifest"
+  fi
+  if [ "$SETTINGS_MERGED" = "1" ]; then
+    cp "$BUNDLE_DIR/settings-hooks.json" "$UPD_DIR/settings-hooks.installed.json"
+  fi
+  case "$PIN_ACTION" in
+    tofu|replace)
+      cp "$CLONE_SIGNERS" "$UPD_DIR/allowed_signers.tmp.$$" && mv -f "$UPD_DIR/allowed_signers.tmp.$$" "$PINNED_SIGNERS"
+      if [ "$PIN_ACTION" = "tofu" ]; then
+        success "Release signing key PINNED (trust on first install). Fingerprint(s):"
+      else
+        success "Release signing key REPLACED. Fingerprint(s):"
+      fi
+      # `|| true`: under pipefail a missing ssh-keygen (127) or an unparseable line (255) here would
+      # kill the run AFTER the stamp and before the terms record — a silent, half-recorded install.
+      { relman_fingerprints "$PINNED_SIGNERS" 2>/dev/null || true; } | sed 's/^/     /' || true
+      info "Compare with the 'Release signing key' section of README.md. If they differ, do not trust this clone."
+      ;;
+    keep) info "Release signing key unchanged (already pinned)." ;;
+  esac
+fi
+if [ -n "$TERMS_METHOD" ] && [ "$DRY_RUN" = "0" ]; then
+  mkdir -p "$UPD_DIR"
+  printf 'terms_version=%s accepted_at=%s framework_version=%s method=%s\n' \
+    "$TERMS_V" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$BUNDLE_VERSION" "$TERMS_METHOD" > "$UPD_DIR/terms-accepted"
+  success "Terms v$TERMS_V acceptance recorded ($TERMS_METHOD) in ~/.claude/.governance-update/terms-accepted"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

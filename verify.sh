@@ -98,6 +98,16 @@ if command -v node &>/dev/null; then
 fi
 echo ""
 
+# Automatic updates (2.0.0). Existence checks, like the rest of this file: they catch an install
+# that never recorded its trust root or its baseline. The updater itself proves far more than this
+# (signature, checksums, file set) before it ever runs verify.sh.
+echo "Automatic updates:"
+check "  gov-update.sh present"               "[ -f ~/.claude/hooks/governance/gov-update.sh ]"
+check "  release key pinned"                  "[ -s ~/.claude/.governance-update/allowed_signers ]"
+check "  terms accepted"                      "[ -s ~/.claude/.governance-update/terms-accepted ]"
+check "  local-modification baseline"         "[ -s ~/.claude/.governance-update/installed.hashes ]"
+echo ""
+
 # Log directory
 echo "Runtime:"
 check "  logs directory exists"   "[ -d ~/.claude/logs ]"

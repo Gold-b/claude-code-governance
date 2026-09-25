@@ -321,6 +321,49 @@ case_fn_for() {
   esac
 }
 
+# --- gov-update.sh / gov-release.sh / release-manifest.sh / settings-merge.js (2.0.0) -----------
+case_gov_update() {
+  #
+  # The auto-updater is not a registered hook (pre-session.sh calls it), so the registration loop
+  # never executes it. Two layers, both run here:
+  #   1. `gov-update.sh --selftest` — offline controls of the verification chain with throwaway
+  #      keys: a valid archive verifies (positive control) and a tampered file, an extra file, a
+  #      wrong key and an unsafe install map are each refused with the right reason.
+  #   2. tests/test-gov-update.sh — the end-to-end suite in a sandbox HOME (fetch, apply, rollback,
+  #      halts, locks, deferral, terms, key rotation, settings merge, pre-push rule) including four
+  #      MUTANTS that must turn it red. The full suite takes ~20-30 min on Windows (every case builds
+  #      and applies real releases), too long for a run that recurs every 6 h on a working machine, so
+  #      this runs a representative subset by default — one valid apply (T1), the signature and
+  #      checksum refusals (T2, T3), the source-machine guard (T7), kill-mid-apply recovery both ways
+  #      (T13), the settings merge (T18), manifest determinism, and three mutants proving those can
+  #      fail. GOV_SELFTEST_UPDATE_CASES overrides it; set it EMPTY to run every case. The full
+  #      suite is run by hand before a release (README "Cutting a release").
+  # A suite that ran zero checks is a failure, not a pass: pass>0 is asserted, not assumed.
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/gov-update.sh --selftest"
+  _o=$(GOV_NO_STDIN=1 bash "$GOV_DIR/gov-update.sh" --selftest </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/.*selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/.*selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "gov-update.sh --selftest: pass=$_p fail=0 (positive AND negative controls)"
+  else
+    _bad "gov-update.sh --selftest" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E 'FAIL|pass=' | head -5)")"
+  fi
+  CUR_SCRIPT="$GOV_DIR/tests/test-gov-update.sh"
+  if [ ! -f "$GOV_DIR/tests/test-gov-update.sh" ]; then
+    _bad "tests/test-gov-update.sh exists" "missing at $GOV_DIR/tests/test-gov-update.sh - the updater would ship untested"
+    return 0
+  fi
+  _o=$(GOV_TEST_ONLY="${GOV_SELFTEST_UPDATE_CASES-T1 T2 T3 T7 T13 T18 MANIFEST M1 M2 M4}" bash "$GOV_DIR/tests/test-gov-update.sh" </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/^test-gov-update: pass=\([0-9]*\) fail=\([0-9]*\)$/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/^test-gov-update: pass=\([0-9]*\) fail=\([0-9]*\)$/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "tests/test-gov-update.sh: pass=$_p fail=0 (incl. mutants M1-M4 detected)"
+  else
+    _bad "tests/test-gov-update.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E '^  FAIL|pass=' | head -6)")"
+  fi
+}
+
 # --- enumerate-before-claiming.sh ---------------------------------------------------------------
 case_enumerate_before_claiming() {
   # A NEGATIVE CLAIM NEEDS AN ENUMERATION. This tool exists because a session filtered the
@@ -1689,6 +1732,10 @@ EOF
       pr-watch.sh)                 echo "TOOL: the PR watcher the session arms through the Monitor tool (pr-follow-through skill) - not a hook; pr-watch-guard.sh hands the session its exact command, and 'pr-watch.sh --selftest' runs its offline must-fire/must-not-fire controls (v1.4.0)" ;;
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
       wa-send.js)                  echo "invoked-by:_common.sh" ;;
+      gov-update.sh)               echo "invoked-by:pre-session.sh" ;;
+      gov-release.sh)              echo "TOOL: the maintainer's release tool, source machine only (2.0.0) - its preconditions and the manifest it signs are exercised by case_gov_update" ;;
+      release-manifest.sh)         echo "library: the release-manifest builder/parser, sourced by gov-update.sh, gov-release.sh and install.sh (2.0.0)" ;;
+      settings-merge.js)           echo "invoked-by:gov-update.sh" ;;
       *.test.sh)                   echo "test: a suite, not a hook" ;;
       *) echo "" ;;
     esac
@@ -1845,6 +1892,13 @@ EOF
 ' "$GOV_DIR/enumerate-before-claiming.sh"
     CUR_ORIG="$GOV_DIR/enumerate-before-claiming.sh"
     case_enumerate_before_claiming
+  fi
+  if command -v case_gov_update >/dev/null 2>&1; then
+    printf '
+  [tool] %s
+' "$GOV_DIR/gov-update.sh"
+    CUR_ORIG="$GOV_DIR/gov-update.sh"
+    case_gov_update
   fi
 
   # ── COPY PARITY ─────────────────────────────────────────────────────────────────────────────

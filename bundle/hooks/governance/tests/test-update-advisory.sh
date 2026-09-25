@@ -14,6 +14,15 @@ ok()   { printf '  ok   %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL+1)); }
 is()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got [$2] want [$3])"; fi; }
 
+# 2.0.0: the advisory can now SPAWN a real background download (gov-update.sh --fetch). Every case
+# below except [13] is about the advisory text, so automatic updates are OFF for them — otherwise
+# "behind -> advises" would start a real network fetch from the sandbox. [13] turns it on with a
+# stub curl. Terms are accepted by env so the sandbox installs in [8]/[11] are not stopped by the
+# terms gate (it has no terminal to ask on), and the source-machine signals are cleared so an
+# operator's environment cannot turn [13] into a silent "source machine" skip.
+export GOV_AUTO_UPDATE=0 GOV_ACCEPT_TERMS=1
+unset GOV_REPO_PATH GOV_RELEASE_KEY
+
 SANDBOX=$(mktemp -d 2>/dev/null || echo "/tmp/gov-adv-$$")
 mkdir -p "$SANDBOX/.claude/hooks/governance" "$SANDBOX/.claude/logs"
 cp "$GOV_DIR"/*.sh "$SANDBOX/.claude/hooks/governance/" 2>/dev/null
@@ -242,6 +251,57 @@ is "the ORPHANED temp is deleted"      "$([ -f "$SANDBOX/.claude/logs/.governanc
 is "a fresh temp survives"             "$([ -f "$SANDBOX/.claude/logs/.governance-latest.11111" ] && echo yes || echo no)" "yes"
 is "the cache file itself survives"    "$([ -f "$SANDBOX/.claude/logs/.governance-latest" ] && echo yes || echo no)" "yes"
 rm -f "$SANDBOX/.claude/logs/.governance-latest".* 2>/dev/null
+
+echo "[13] automatic updates ON: a behind machine spawns a DETACHED fetch (2.0.0)"
+# Proven by timing, like [6]: the stub curl sleeps 3 s, so a fetch on the critical path would show.
+# And proven to have RUN: the stub leaves a marker, and gov-update.sh records the attempt.
+# [12] aged the cache, so its pre-session run started a REAL detached VERSION fetch; it lands up to
+# 3 s later and would overwrite the cache set below (measured: [13] then saw the live version).
+sleep 4
+setv 1.0.0; setc 1.1.0
+rm -rf "$SANDBOX/.claude/.governance-update" "$SANDBOX/fetch-called"
+mkdir -p "$SANDBOX/stub13"
+# 6 s, not 3: on a loaded machine pre-session alone measured ~2.6 s, so a 3 s stub could not tell
+# detached from synchronous. The bound below stays well under the stub's sleep.
+printf '#!/bin/sh\ntouch "%s/fetch-called"\nsleep 6\nexit 7\n' "$SANDBOX" > "$SANDBOX/stub13/curl"; chmod +x "$SANDBOX/stub13/curl"
+_s=$(date +%s%N 2>/dev/null || echo 0)
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE=1 bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+_e=$(date +%s%N 2>/dev/null || echo 0)
+_ms=$(( (_e - _s) / 1000000 ))
+if [ "$_ms" -lt 5000 ]; then ok "returned in ${_ms}ms while the fetch's curl slept 6s (detached)"; else bad "took ${_ms}ms - the fetch is ON the critical path"; fi
+printf '%s' "$_t13" | grep -q 'downloaded and verified in the background' && ok "prints the automatic-update line" || bad "automatic-update line missing: $_t13"
+is "the legacy manual line is NOT printed" "$(printf '%s' "$_t13" | grep -c 'Update deliberately')" "0"
+_w=0; while [ ! -f "$SANDBOX/fetch-called" ] && [ "$_w" -lt 40 ]; do sleep 0.5; _w=$((_w + 1)); done
+is "the detached fetch really called curl"  "$([ -f "$SANDBOX/fetch-called" ] && echo yes || echo no)" "yes"
+sleep 8
+is "gov-update.sh recorded the attempt"     "$(cat "$SANDBOX/.claude/.governance-update/fetch-attempts-1.1.0" 2>/dev/null)" "1"
+rm -f "$SANDBOX/fetch-called"
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE=0 bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+sleep 1
+is "opt-out: the legacy manual line"        "$(printf '%s' "$_t13" | grep -c 'Update deliberately')" "1"
+is "opt-out: no fetch spawned"              "$([ -f "$SANDBOX/fetch-called" ] && echo spawned || echo none)" "none"
+printf 'GOV_AUTO_UPDATE=0\n' > "$SANDBOX/.claude/.governance-local.env"
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE= bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+sleep 1
+is "opt-out via the local env file: legacy line" "$(printf '%s' "$_t13" | grep -c 'Update deliberately')" "1"
+is "opt-out via the local env file: no fetch"    "$([ -f "$SANDBOX/fetch-called" ] && echo spawned || echo none)" "none"
+# Quoted, as people write env files: gov-update.sh strips the quotes, so the advisory must too, or it
+# promises a download the updater then refuses (review finding, 2026-09-25).
+printf 'GOV_AUTO_UPDATE="0"\n' > "$SANDBOX/.claude/.governance-local.env"
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE= bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+sleep 1
+is "opt-out quoted (\"0\"): legacy line"         "$(printf '%s' "$_t13" | grep -c 'Update deliberately')" "1"
+is "opt-out quoted (\"0\"): no fetch"            "$([ -f "$SANDBOX/fetch-called" ] && echo spawned || echo none)" "none"
+touch "$SANDBOX/.claude/.governance-source"; rm -f "$SANDBOX/.claude/.governance-local.env"
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE=1 bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+sleep 1
+is "the release source machine: legacy line, no fetch" "$(printf '%s' "$_t13" | grep -c 'Update deliberately')/$([ -f "$SANDBOX/fetch-called" ] && echo spawned || echo none)" "1/none"
+rm -f "$SANDBOX/.claude/.governance-source"
+rm -f "$SANDBOX/.claude/.governance-local.env"
+printf 'reason=no-tag at=x detail=y\n' > "$SANDBOX/.claude/.governance-update/HALT-1.1.0"
+_t13=$(PATH="$SANDBOX/stub13:$PATH" HOME="$SANDBOX" GOV_AUTO_UPDATE=1 bash "$SANDBOX/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp"}' 2>&1)
+printf '%s' "$_t13" | grep -q 'has no release tag' && ok "a halted version prints the halt line, not a fetch" || bad "halt line missing: $_t13"
+rm -rf "$SANDBOX/.claude/.governance-update"
 
 echo ""
 echo "passed=$PASS failed=$FAIL"

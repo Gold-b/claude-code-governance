@@ -13,7 +13,8 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/pre-session.sh",
-            "timeout": 10,
+            "timeout": 120,
+            "_timeout_note": "Raised 10 -> 120 in 2.0.0 for the automatic-update apply, which runs here in the foreground at a startup/resume session start when a verified release is staged. The normal path is unchanged (~0.5 s; two file tests when nothing is staged). The apply path is bounded by the updater's own time limits (50 s for the file changes, 20 s for verify.sh, then abort and roll back), journaled, and restored from a complete backup on any failure. Per the 2026-09-15 rule the remedy for a rare slow-but-correct path is a budget it can finish inside, not a watchdog. A separate SessionStart entry was rejected: it would need its own _common.sh stdin exception and an extra bash spawn every session.",
             "statusMessage": "Context Governance: pre-session check..."
           },
           {

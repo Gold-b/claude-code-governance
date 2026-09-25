@@ -257,6 +257,8 @@ Three tiers. Every tier runs at **HIGH effort** (already the per-model default i
   `init-governance`, `plan-and-execute`) carry a **Model routing** line near the top pointing at
   the right agent. A skill CANNOT switch models by itself — it is prose loaded into whatever model
   is already running; the only lever inside a skill is an explicit dispatch.
+- Approval-board reviewers (every role on a plan/process approval board, CEO included) are
+  dispatched to `subagent_type: "architect-planner"` — Fable 5.1, high effort — never run inline.
 
 ### The honest limitation
 **The base interactive session model cannot be force-switched mid-session** by any rule, skill or

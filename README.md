@@ -70,6 +70,9 @@ bash ~/.claude/governance-installer/install.sh
 | `--dry-run` | Preview what would be installed (no changes) |
 | `--no-claude-md` | Skip CLAUDE.md — keep your existing user instructions |
 | `--uninstall` | Remove all governance files (backs up before removal) |
+| `--accept-terms` | Accept `NOTICE-AUTO-UPDATE.md` without the typed `I ACCEPT` prompt, for a non-interactive install (env equivalent `GOV_ACCEPT_TERMS=1`). With neither and no terminal, the install refuses before writing anything (since 2.0.0) |
+| `--trust-new-key` | Replace the release key pinned on this machine with this clone's, even though the clone's manifest is not signed by the pinned key. Only after comparing fingerprints — see "Release signing key" (since 2.0.0) |
+| `--print-install-map` | Print `src -> dest  tag` for every file this installer copies, then exit. The release manifest embeds this output, so what the updater installs and what `install.sh` installs are one list (since 2.0.0) |
 
 ## What Gets Installed
 
@@ -82,7 +85,7 @@ distinct scripts.
 | Event | Script | Purpose |
 |---|---|---|
 | SessionStart | `canonical-cwd-check.sh` | Refuses a session opened on a stale or duplicate checkout |
-| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update |
+| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update. Since v2.0.0 it also drives the automatic update through `gov-update.sh`: a detached background download + verify when a newer version is published, and — at a `startup`/`resume` start with a verified release staged — the foreground apply. Budget **120 s** (was 10 s): the normal path is unchanged (~0.5 s, two file tests when nothing is staged); the apply path aborts and rolls back itself past its limits (50 s for the file changes, 20 s for verify.sh) |
 | SessionStart | `pr-watch-guard.sh` | If the repo has open PRs of yours and no live watcher: one context line with the exact `pr-watch.sh` command to arm (v1.4.0) |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
 | UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
@@ -116,6 +119,18 @@ server, so a local Windows popup had no reachable audience. Helpers called by ot
 (`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
 `file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
 `sync-governance.sh`) are installed but are not themselves hook entry points.
+Four more arrived with v2.0.0, none of them a registered hook:
+
+- `gov-update.sh` — the automatic updater, invoked by `pre-session.sh` (`--fetch <version>`
+  detached, `--apply-if-ready` in the foreground) and by hand (`--status`, `--rollback`,
+  `--apply [--force-live]`, `--accept-terms`, `--clear-halt`, `--verify-archive <tgz>`,
+  `--selftest`). The apply path runs inside `pre-session.sh`'s 120 s budget with its own 50 s (files) + 20 s (verify.sh)
+  abort-and-roll-back. See "Automatic updates".
+- `gov-release.sh` — a tool, run by hand on the release source machine only. See "Cutting a release".
+- `release-manifest.sh` — a library sourced by both of the above, so the writer and the reader of a
+  release manifest share one definition of the file set and one parser.
+- `settings-merge.js` — the governance-only `settings.json` merge, used by `install.sh` and by the
+  updater alike.
 `pr-watch.sh` (v1.4.0) is a tool, not a hook: the session arms it through the Monitor tool and
 it prints one line per PR change (comment, review, +1, CI, merge) for the caller's own open PRs on
 one repo, fast-forwards the clone on merge, and exits when none remain — or after
@@ -176,7 +191,17 @@ Two things are worth knowing before you rely on them:
 - **CLAUDE.md** — User-level instructions (session protocol, security, governance rules).
   Installed from `bundle/CLAUDE.md.template`, and **never overwritten** if you already have one
   — not even with `--force`. See "The CLAUDE.md marker" below for how that template is built.
-- **settings.json** — Hook registrations merged into existing settings
+- **settings.json** — Hook registrations merged into existing settings. Since v2.0.0 the merge
+  (`settings-merge.js`) replaces **only the framework's own entries**; hooks you registered
+  yourself, and every other key (`permissions`, `env`, `model`…), are kept. Before 2.0.0 the whole
+  `hooks` block was replaced, which dropped user hooks on every install.
+- **`~/.claude/.governance-update/`** (since 2.0.0) — the updater's state: the pinned release key
+  (`allowed_signers`), what is installed (`installed.manifest`, `installed.hashes` — the hashes of
+  every file as written, the baseline for "modified locally"), the last applied hooks template,
+  `install-mode`, your terms acceptance (`terms-accepted`), and while an update is in flight the
+  download, the staged tree, `READY`/`APPLYING`, any `HALT-<version>` and the lock. It sits at the
+  `~/.claude` root, outside every path the sync hook copies. Log:
+  `~/.claude/logs/governance-update.log`; backups: `~/.claude/backups/governance-update-<timestamp>/`.
 
 ## What ships, and who decides — `bundle/DISTRIBUTED` (v1.7.0)
 
@@ -298,30 +323,78 @@ To install on another machine:
 2. Run `bash ~/.claude/governance-installer/install.sh`
 
 All paths use `~/` notation — works on Windows (Git Bash/MSYS2), macOS, and Linux.
+Automatic updates (2.0.0) are verified on Windows (Git Bash) only so far; Linux and macOS are not yet
+verified. Without `ssh-keygen -Y` (OpenSSH 8.2+) the updater refuses and nothing is installed.
 
-## Versions & updates
+## Automatic updates
 
-The installed version is stamped at `~/.claude/.governance-version`; the published one is
-`bundle/VERSION` on `master`. At session start, `pre-session.sh` compares them and prints
-`[GOVERNANCE UPDATE]` when a newer version exists.
+From 2.0.0 the framework **updates itself**. Read `NOTICE-AUTO-UPDATE.md` before installing — it is
+the full disclosure of what runs, what is downloaded, what is written where, what is and is not
+protected, and the terms you accept by installing (`install.sh` asks you to type `I ACCEPT`; for a
+non-interactive install pass `--accept-terms` or set `GOV_ACCEPT_TERMS=1`).
 
-A machine with no usable marker is told so too — otherwise the machines most in need of the
-advisory (the ones predating versioning) would be the only ones never to get it.
+**How it works.** The installed version is stamped at `~/.claude/.governance-version`; the published
+one is `bundle/VERSION` on `master`. At session start `pre-session.sh` compares them (cached 12 hours,
+network call detached — nothing waits on it). When a newer version exists it starts a detached
+background download of that version's **tagged** archive
+(`https://github.com/Gold-b/claude-code-governance/archive/refs/tags/v<version>.tar.gz`, never
+`master`) and verifies it: the signature of `RELEASE-MANIFEST` under the release key pinned on your
+machine, the SHA-256 of every file, the exact file set, the safety of every install destination, and
+`bash -n` / `node --check` on every script. At a later session start (`startup` or `resume`, never
+`compact` or `clear`), when no other session of yours is live, it backs up every file it will
+replace, swaps the files, merges only the framework's own entries into `settings.json`, runs
+`verify.sh`, and prints one line. If anything fails it restores the backup, blocks that version, and
+says so. It refuses unsigned or tampered archives, downgrades, and installs whose framework files you
+modified locally (it names them).
 
-It **advises, never installs** — `install.sh` replaces the very hooks and skills that are running
-at that moment, so the update is always a deliberate action:
+**Opt out.**
+
+```bash
+GOV_AUTO_UPDATE=0            # advisory only — told about new versions, update by hand
+                             # (environment, or a line in ~/.claude/.governance-local.env)
+GOVERNANCE_UPDATE_CHECK=0    # no update check at all
+bash install.sh --uninstall  # remove the framework (backed up first)
+```
+
+**Roll back, and see the state.**
+
+```bash
+bash ~/.claude/hooks/governance/gov-update.sh --rollback   # restore the last update's backup
+bash ~/.claude/hooks/governance/gov-update.sh --status     # installed/staged/halted, last check, pinned key
+bash ~/.claude/hooks/governance/gov-update.sh --clear-halt # retry a version that was blocked
+```
+
+Every decision is logged in `~/.claude/logs/governance-update.log`; backups are in
+`~/.claude/backups/governance-update-<timestamp>/`.
+
+**Coming from 1.7.3 or earlier — one manual step.** Those versions have no updater; their session-start
+advisory tells you to update by hand, and 2.0.0 is the last time you do:
 
 ```bash
 cd /path/to/claude-code-governance && git pull
-bash install.sh --force        # backs up first
+bash install.sh --force --accept-terms   # backs up first; pins the release key and prints its fingerprint
 bash verify.sh
 ```
 
-The network call is detached and only refreshes a 12-hour cache, so what a session prints is the
-result of a previous run and nothing waits on the network. The check itself costs a measured
-**+77 ms / +106 ms** on Windows/MSYS2 (two interleaved A/B runs, n=12 each; under 40 ms on
-Linux/macOS, where forks are cheaper). Offline machines back off a full TTL rather than retrying
-every session. `GOVERNANCE_UPDATE_CHECK=0` removes the cost entirely.
+Compare the fingerprint `install.sh` prints with the one under "Release signing key" below. From then
+on, releases apply themselves at session start.
+
+**Updating by hand** still works (`git pull && bash install.sh --force`) and is your deliberate act; it
+is not protected by the release signature beyond a consistency check.
+
+**What the check costs.** The version comparison itself costs a measured **+77 ms / +106 ms** on
+Windows/MSYS2 (two interleaved A/B runs, n=12 each; under 40 ms on Linux/macOS, where forks are
+cheaper), and what a session prints is the result of a previous run's detached fetch. Offline
+machines back off a full TTL rather than retrying every session. When nothing is staged, the
+automatic-update part adds two file tests. A machine with no usable marker is told so too —
+otherwise the machines most in need of the advisory (the ones predating versioning) would be the
+only ones never to get it.
+
+**A master snapshot is not a release.** `install.sh` checks the clone's `RELEASE-MANIFEST` against
+the clone's own key and then against the files on disk. A clone that sits exactly on a release tag
+installs as that signed release; a clone of `master` that has moved on since the last release is
+reported as an **unreleased master snapshot** and installs unsigned — the updater replaces it with
+the next signed release. A clone whose manifest does not verify under its own key is refused.
 
 The marker is a **claim**, so `install.sh` only writes it when the claim is true. Three outcomes:
 
@@ -336,6 +409,106 @@ the installer, which would write the placeholder again — a loop with no exit. 
 fully succeed exits non-zero and does not say "ready". `--dry-run` previews all of it, exit code
 included. See Agent Guide §20.
 
+## Release signing key
+
+Releases are signed with an SSH ed25519 key (namespace `claude-code-governance-release`). Its
+fingerprint:
+
+    SHA256:mm0V5Ieg0cSy6BDjSwOQ4boTjsWnNthw6j1/LqeKzy4
+
+`install.sh` prints the fingerprint when it pins the key and `gov-update.sh --status` shows the pinned
+one. They should all match. What this signature does and does not protect against — including that the
+key is held without a passphrase on the maintainer's machine and that the first install is trust on
+first use — is stated in `NOTICE-AUTO-UPDATE.md` section 7.
+
+The signer principal and the signature namespace are both `claude-code-governance-release`; the
+pinned trust file is `~/.claude/.governance-update/allowed_signers`, in the standard `ssh-keygen -Y`
+`allowed_signers` format.
+
+**Trust on first use (TOFU).** The first `install.sh` run on a machine pins the key that ships in the
+clone you are installing (`bundle/release/allowed_signers`) — nothing already on your machine can
+vouch for it. Comparing the printed fingerprint with this section protects you against a tampered
+clone or mirror; it does not protect you if this repository itself was compromised before you
+cloned it, because this page would then be compromised too. After the first install, every release
+must verify under the key already pinned.
+
+**Planned rotation needs nothing from you.** A rotation takes two releases: the first ships the old
+and the new key together and is signed by the old one, so your machine verifies it and adopts the
+new trust file; the next release is signed by the new key.
+
+**Re-pinning by hand** is needed only after an emergency rotation (a release signed by a new key
+alone — for example after a suspected key theft). Your machine cannot verify it: it halts that
+version with reason `signature`, says so at the next session start, and changes nothing. To re-pin:
+
+```bash
+git clone https://github.com/Gold-b/claude-code-governance.git   # a FRESH clone, not an old checkout
+cd claude-code-governance
+bash install.sh --force                    # refuses before writing anything, printing the pinned
+                                           # and the clone's fingerprints
+# compare the clone's fingerprint with this section, read from GitHub, not from the clone
+bash install.sh --force --trust-new-key    # only if they match
+```
+
+There is no way to push a revocation to a machine whose only trust root is a stolen key; that is
+why this step is manual.
+
+## Cutting a release (maintainer)
+
+Source machine only — the machine that holds the release key. Clients never run this.
+
+```bash
+bash ~/.claude/hooks/governance/gov-release.sh <x.y.z> [--terms-bump] [--dry-run]
+```
+
+`--dry-run` prints every precondition as `PASS`/`FAIL` and writes nothing. `--terms-bump` also
+raises `bundle/TERMS-VERSION` by one, which makes every client hold the release until its human
+accepts the new terms (`gov-update.sh --accept-terms`).
+
+**Preconditions** — each is printed, and a single `FAIL` stops the run before any write:
+
+- `GOV_REPO_PATH` (the clone) and `GOV_RELEASE_KEY` (path of the private key) are set in the
+  environment or in `~/.claude/.governance-local.env` (read with `grep`, never sourced) and resolve
+- `gh` present and authenticated; `ssh-keygen -Y` available
+- the clone's working tree is clean, on `master`, and `HEAD` already contains `origin/master`
+- the publish queue is empty, and `end-session.sh --publish-preview` is clean (no `TARGET-AHEAD`)
+- staging `bundle/` equals the clone's `bundle/`
+- `~/.claude/logs/governance-selftest.result` says `verdict=GREEN` **and** its `hooks_fingerprint`
+  matches the live hooks tree now (a stale green does not count)
+- `check-no-pii.sh --tree bundle` is clean
+- `README.md` has a changelog entry containing `(v<x.y.z>)`; `LICENSE` and `NOTICE-AUTO-UPDATE.md`
+  exist, and the NOTICE carries the line `Terms version: <n>` for the terms version the release
+  will ship
+- `<x.y.z>` is newer than the newest tag, not older than `bundle/VERSION`, and its tag does not exist
+- the key's public half is in `bundle/release/allowed_signers`, has at least 90 days left before
+  its `valid-before` (or a successor key is already pinned there), and its fingerprint appears in
+  this README
+
+**What it does, in order.** Writes `bundle/VERSION` (and `TERMS-VERSION`) to staging first and then
+to the clone, same bytes. Builds `RELEASE-MANIFEST` from `git archive` of the exact tree to be
+tagged (never the working tree), embedding `install.sh --print-install-map`; signs it into
+`RELEASE-MANIFEST.sig`; proves the signature both ways (the bundle's key verifies it, a throwaway
+key's signature does not). Commits, re-verifies the committed tree, creates the signed tag
+`v<x.y.z>`, pushes **`master` and the tag in one push**, and creates a GitHub Release with both
+manifest files attached. The first successful run creates `~/.claude/.governance-source`, which
+stops this machine from ever auto-updating itself.
+
+`RELEASE-MANIFEST` and `RELEASE-MANIFEST.sig` live in the **clone root, not in `bundle/`** — they
+are build artifacts of the tag, written in the clone by the release tool. After a later ordinary
+publish they are stale relative to `master`; that is harmless, because clients only ever download
+tags.
+
+**Client-side rehearsal.** Last, the tool downloads the tag archive exactly as a client would and
+runs `gov-update.sh --verify-archive` on it under a sandbox `HOME` whose pinned key is the bundle's.
+If that fails the release is unusable: the tool prints the exact `git push --delete` and
+`gh release delete` commands and exits 1 without running them.
+
+**The `pre-push` VERSION/tag rule.** Clients learn that a release exists from `master`'s
+`bundle/VERSION` and then download the tag. A `VERSION` change that reaches `master` without its tag
+would make every client fetch a missing tag three times and halt. So `.githooks/pre-push` refuses a
+branch push whose range changes `bundle/VERSION` unless a local tag `v<new VERSION>` exists and is
+contained in the pushed tip — which is exactly what `gov-release.sh`'s single push provides. Kill
+switch (loud): `GOV_GIT_VERSION_TAG_GATE=0 git push ...`.
+
 ## Kill Switch
 
 Disable all governance hooks without uninstalling:
@@ -343,9 +516,15 @@ Disable all governance hooks without uninstalling:
 export GOVERNANCE_HOOKS=0
 ```
 
-Silence only the update advisory (hooks keep working):
+Silence the update check entirely — no advisory and no automatic update (hooks keep working):
 ```bash
 export GOVERNANCE_UPDATE_CHECK=0
+```
+
+Keep the advisory but never install automatically (v2.0.0; also honoured as a line in
+`~/.claude/.governance-local.env`):
+```bash
+export GOV_AUTO_UPDATE=0
 ```
 
 ## Uninstall
@@ -354,6 +533,8 @@ export GOVERNANCE_UPDATE_CHECK=0
 bash ~/.claude/governance-installer/install.sh --uninstall
 ```
 Backs up all files before removal. CLAUDE.md is NOT removed (manual decision).
+The automatic-update state in `~/.claude/.governance-update/` is backed up and removed, **except
+`terms-accepted`** — the record of which terms you accepted and when is kept (since 2.0.0).
 
 ## Testing the hooks (sandbox, never touches your real ~/.claude)
 
@@ -363,9 +544,13 @@ bash bundle/hooks/governance/tests/test-update-advisory.sh
 bash bundle/hooks/governance/tests/test-payload-root.sh
 bash bundle/hooks/governance/tests/test-success-token-optin.sh   # v1.7.1: no close deadlock, gate opt-in
 bash bundle/hooks/governance/tests/test-stdin-cli-mode.sh       # v1.7.3: hand-run tools never hang on stdin
+bash bundle/hooks/governance/tests/test-gov-update.sh           # v2.0.0: signed update, verify, apply, rollback
 ```
 
 ## Rolling out an update to a client machine
+
+From 2.0.0 a client machine updates itself (see "Automatic updates"). By hand — before 2.0.0, with
+`GOV_AUTO_UPDATE=0`, or to install a master snapshot:
 
 ```bash
 git pull
@@ -513,6 +698,37 @@ It does not prove it is the **newest** one — a stale bundle whose selftest sti
 verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
+
+- **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.** 2.0.0 is the last update you
+  install by hand. `git pull && bash install.sh --force --accept-terms`; from here on, releases
+  apply themselves at session start (signed, verified, rolled back on failure). Opt out:
+  `GOV_AUTO_UPDATE=0`.
+  **The updater** (`gov-update.sh`): `pre-session.sh` starts a detached download of the new
+  version's **tag** archive when one is published, verifies the SSH signature of its
+  `RELEASE-MANIFEST` under the key pinned on your machine, every file's SHA-256, the exact file set
+  and every install destination, and applies it at a later `startup`/`resume` session start when no
+  other session is live — backup first, one atomic rename per file, `verify.sh`, and a full
+  rollback plus a per-version halt on any failure. It never runs over files you modified locally
+  and never on the machine releases are cut from. `pre-session.sh`'s budget rose 10 s → 120 s for
+  the apply path; the normal path is unchanged. See "Automatic updates" and "Release signing key".
+  **Terms:** the repository is now under the **MIT `LICENSE`**, and `NOTICE-AUTO-UPDATE.md`
+  discloses in full what the updater runs, downloads and writes, what the signature does not
+  protect against, and the terms. `install.sh` asks you to type `I ACCEPT` before writing anything
+  (`--accept-terms` / `GOV_ACCEPT_TERMS=1` without a terminal); a later terms change holds updates
+  until you accept again with `gov-update.sh --accept-terms`.
+  **`install.sh`:** pins the release key on first install and prints its fingerprint
+  (`--trust-new-key` to re-pin after an emergency rotation); refuses a clone whose manifest does not
+  verify under its own key; labels an unreleased `master` checkout as a snapshot; records its state
+  in `~/.claude/.governance-update/`. The `settings.json` merge now keeps **your own hooks** — it
+  used to replace the whole `hooks` block, dropping them on every install — via
+  `settings-merge.js`, which the updater uses too. `--print-install-map` prints the one list of
+  files the installer copies; the release manifest embeds it, so a manual install and an automatic
+  one install the same files. `verify.sh` gained four checks (updater present, key pinned, terms
+  accepted, local-modification baseline recorded).
+  **Releases** are cut with `gov-release.sh` (see "Cutting a release"), and the tracked
+  `.githooks/pre-push` now refuses a push that changes `bundle/VERSION` without its release tag,
+  which would otherwise send every client after a tag that does not exist
+  (`GOV_GIT_VERSION_TAG_GATE=0` to override, loudly).
 
 - **2026-09-25 (v1.7.3) — hand-run tools no longer hang on an open stdin.** `_common.sh` reads the
   hook payload from stdin the moment it is sourced — right for a hook, whose stdin Claude Code

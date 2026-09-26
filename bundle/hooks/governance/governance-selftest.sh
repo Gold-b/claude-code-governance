@@ -808,6 +808,27 @@ case_pre_session() {
   run_hook "$ungov" "sid-ps-2" "$(pl_session "$ungov" sid-ps-2)"
   expect_rc 0 "ungoverned: never blocks"
   expect_has "init-governance" "ungoverned: demands the scaffold skill"
+
+  # SessionStart budget (2026-09-26). The cases above run with ~no other session dirs, which is how
+  # a 40 s pre-session.sh (8 forks per dir x 87 dirs) passed every check while the VS Code extension
+  # failed to start. tests/test-sessionstart-budget.sh times every SessionStart hook with a real
+  # session_id, 80-200 other dirs and stdout piped, and checks the registered timeouts.
+  # It times the REAL hooks, not the mutant, and costs ~2-3 min: a mutant run is judged above.
+  [ "${MUT:-0}" = "1" ] && return 0
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/tests/test-sessionstart-budget.sh"
+  if [ ! -f "$GOV_DIR/tests/test-sessionstart-budget.sh" ]; then
+    _bad "tests/test-sessionstart-budget.sh exists" "missing at $GOV_DIR/tests/ - SessionStart speed would ship unmeasured"
+  else
+    _o=$(bash "$GOV_DIR/tests/test-sessionstart-budget.sh" </dev/null 2>&1); _rc=$?
+    _p=$(printf '%s' "$_o" | sed -n 's/^pass=\([0-9]*\) fail=\([0-9]*\)$/\1/p' | tail -1)
+    _f=$(printf '%s' "$_o" | sed -n 's/^pass=\([0-9]*\) fail=\([0-9]*\)$/\2/p' | tail -1)
+    if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+      _ok "tests/test-sessionstart-budget.sh: pass=$_p fail=0 (timeouts, speed with many sessions, no growth)"
+    else
+      _bad "tests/test-sessionstart-budget.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E '^  FAIL|pass=' | head -6)")"
+    fi
+  fi
 }
 
 # --- pre-task.sh ------------------------------------------------------------------------------

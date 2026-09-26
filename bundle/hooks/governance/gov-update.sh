@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # gov-update.sh — signed, verified, rollback-safe automatic updates of this framework (2.0.0).
 #
-# invoked-by:pre-session.sh — `--fetch <ver>` detached when a newer version is published, and
-# `--apply-if-ready` in the foreground at a startup/resume SessionStart when a verified release is
-# staged. Every other mode is for a human or for the release tool / tests.
+# invoked-by:pre-session.sh — `--fetch <ver>` detached when a newer version is published. Since
+# 2026-09-26 pre-session.sh NEVER runs `--apply-if-ready`: a SessionStart hook blocks Claude Code's
+# start-up (the VS Code extension fails at 60 s), so it only reports READY/APPLYING and a human runs
+# `--apply` (until a new automatic trigger is chosen; SessionStart will not be it again).
+# Every other mode is for a human or for the release tool / tests.
 #
 # THE CONTRACT, in one paragraph. A release is installed only when its RELEASE-MANIFEST verifies
 # under the release key PINNED on this machine (~/.claude/.governance-update/allowed_signers,
@@ -16,8 +18,8 @@
 # runs on the release source machine, never while another session is live, never on compact/clear,
 # never over files the user modified locally, and never under terms the user has not accepted.
 #
-# Modes (every mode is a --flag, so _common.sh never waits on stdin — v1.7.3 rule; the session id
-# arrives in GOV_SESSION_ID from pre-session.sh):
+# Modes (every mode is a --flag, so _common.sh never waits on stdin — v1.7.3 rule; the session id,
+# when a caller has one, arrives in GOV_SESSION_ID; pre-session.sh passes none since 2026-09-26):
 #   --fetch <ver>          Phase A: download, verify, stage, write READY. Silent; logs only.
 #   --apply-if-ready       Phase B when READY exists and every guard passes; else one line or nothing.
 #   --apply [--force-live] Phase B now (human). --force-live ignores the live-session deferral.
@@ -44,15 +46,15 @@
 #   GOV_UPDATE_VERIFY_TIMEOUT    bound on verify.sh (default 20 s; it takes 1-3 s)
 #   GOV_UPDATE_ROLLBACK_ANY=1    let --rollback restore a backup that is not of the installed version
 #
-# THE TIME BUDGET. The automatic apply runs inside pre-session.sh, whose hook timeout is 120 s, and
-# a hook killed at its timeout leaves an unfinished apply for the next start to roll back. So every
+# THE TIME BUDGET. The automatic apply was designed to run inside pre-session.sh (timeout 120 s; no
+# longer - see the header), and a caller killed at its timeout leaves an unfinished apply to roll back. So every
 # phase is bounded against ONE clock, the script's own SECONDS (pre-checks included): backup + swap
 # + installer refresh must finish inside APPLY_BUDGET (50), verify.sh inside VERIFY_TIMEOUT (20),
 # and a rollback's own re-verify inside 10. The RESTORE itself is deliberately NOT interruptible —
 # a half-restored tree is the one state worse than a half-applied one — and it costs about what the
 # swap cost (the same per-directory renames; 17-18 s for a whole release, MEASURED idle). So the
-# worst case is roughly 50 + 20 + swap-time + 10, inside 120 unless the machine is several times
-# slower than measured; T12 measures it under load. Files move in per-directory batches of renames
+# worst case is roughly 50 + 20 + swap-time + 10 (the old 120 s hook budget held it unless the machine
+# was several times slower than measured); T12 measures it under load. Files move in per-directory batches of renames
 # (one process per directory, not three per file), which is what keeps this in seconds on Windows,
 # where a fork costs 20-70 ms.
 #
@@ -560,8 +562,9 @@ upd_recover() {
 }
 
 # upd_other_live: one line per OTHER open session with a file written in the last 10 minutes.
-# `find -mmin` rather than gov_other_sessions: that helper needs GNU find -printf / stat -c, and on
-# a BSD userland it reports every session as age 0 — which would defer an apply forever.
+# `find -mmin` rather than gov_other_sessions: that helper's fast path needs GNU find -printf, and
+# its fallback reads ages through stat, which a BSD userland has only in its own dialect — portable
+# find is the one thing both agree on, and a wrong age here would defer an apply forever.
 upd_other_live() {
   local me d sid
   me=$(gov_session_id)
@@ -636,10 +639,12 @@ upd_apply() {  # upd_apply <auto 1|0> <force_live 1|0>
       upd_write "$UPD/deferrals" "$nd"
       names=""
       [ "$nd" -ge 3 ] && names=" Live: $(printf '%s' "$others" | tr '\n' ' ' | sed 's/ $//')."
-      if [ "$nd" -gt "$DEFER_MAX" ]; then
-        names="$names To apply now anyway: bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
+      if [ "$auto" = "0" ] || [ "$nd" -gt "$DEFER_MAX" ]; then
+        # A session dir counts as live for 10 minutes after its last hook write, closed or not, so a
+        # human who has just closed every session needs the override to get anywhere.
+        names="$names If every Claude Code session is closed, apply now: bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
       fi
-      say "v$ver is verified and staged; it applies at a session start when no other Claude Code session is active (deferred $nd time(s)).$names"
+      say "v$ver is verified and staged; it is not applied while another Claude Code session looks active (deferred $nd time(s)).$names"
       upd_log apply "deferred v$ver: $(printf '%s\n' "$others" | grep -c .) live session(s), deferral $nd"
       return 0
     fi
@@ -777,7 +782,7 @@ upd_do_apply() {
     if [ "$slow" -ge 3 ]; then
       say "v$ver is staged but this machine was too busy to apply it $slow times in a row. Nothing changed. Apply it when the machine is idle: bash ~/.claude/hooks/governance/gov-update.sh --apply"
     else
-      say "v$ver not applied: the machine is too busy to finish in time. Nothing changed; it retries at the next session start."
+      say "v$ver not applied: the machine is too busy to finish in time. Nothing changed; run the apply again when it is idle: bash ~/.claude/hooks/governance/gov-update.sh --apply"
     fi
     return 0
   fi
@@ -974,7 +979,7 @@ upd_accept_terms() {
   mkdir -p "$UPD"
   upd_write "$UPD/terms-accepted" "terms_version=$tv accepted_at=$(now_iso) framework_version=$(upd_installed_version) method=$method"
   upd_log terms "terms v$tv accepted ($method)"
-  say "terms v$tv accepted ($method). The staged release applies at the next session start."
+  say "terms v$tv accepted ($method). To install the staged release: close every Claude Code session, then run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
 }
 
 upd_clear_halt() {

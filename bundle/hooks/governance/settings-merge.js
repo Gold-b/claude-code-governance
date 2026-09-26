@@ -127,6 +127,18 @@ for (const ev of events) {
   if (kept.length) merged[ev] = kept;
 }
 
+// pre-session.sh is capped at 10 s whatever a template says (owner, 2026-09-26). A SessionStart hook
+// blocks Claude Code's start-up and the VS Code extension fails it at 60 s; 2.0.0's template raised
+// this one to 120 and broke VS Code start-up on the owner's machine. The cap lives HERE, in the one
+// merge both install.sh and gov-update.sh use, so no future template can reintroduce it.
+const PRE_SESSION_MAX_TIMEOUT = 10;
+for (const g of (merged.SessionStart || [])) {
+  for (const h of (Array.isArray(g.hooks) ? g.hooks : [])) {
+    if (!isOwned(h) || !/(^|[\\/])pre-session\.sh(\s|$)/.test(h.command)) continue;
+    if (!(typeof h.timeout === 'number' && h.timeout > 0 && h.timeout <= PRE_SESSION_MAX_TIMEOUT)) h.timeout = PRE_SESSION_MAX_TIMEOUT;
+  }
+}
+
 const result = {};
 let placed = false;
 for (const k of Object.keys(settings)) {

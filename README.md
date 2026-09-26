@@ -85,7 +85,7 @@ distinct scripts.
 | Event | Script | Purpose |
 |---|---|---|
 | SessionStart | `canonical-cwd-check.sh` | Refuses a session opened on a stale or duplicate checkout |
-| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update. Since v2.0.0 it also drives the automatic update through `gov-update.sh`: a detached background download + verify when a newer version is published, and — at a `startup`/`resume` start with a verified release staged — the foreground apply. Budget **120 s** (was 10 s): the normal path is unchanged (~0.5 s, two file tests when nothing is staged); the apply path aborts and rolls back itself past its limits (50 s for the file changes, 20 s for verify.sh) |
+| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update. Since v2.0.0 it also starts the automatic update's detached background download + verify when a newer version is published, and reports a verified release that is waiting (or an interrupted apply) in one line. It never runs the apply itself: SessionStart hooks block Claude Code's start-up, and the VS Code extension fails a start-up that takes 60 s. Budget **10 s, never more** — `settings-merge.js` enforces it, and `tests/test-sessionstart-budget.sh` times every SessionStart hook with 80-200 other session dirs |
 | SessionStart | `pr-watch-guard.sh` | If the repo has open PRs of yours and no live watcher: one context line with the exact `pr-watch.sh` command to arm (v1.4.0) |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
 | UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
@@ -122,10 +122,11 @@ server, so a local Windows popup had no reachable audience. Helpers called by ot
 Four more arrived with v2.0.0, none of them a registered hook:
 
 - `gov-update.sh` — the automatic updater, invoked by `pre-session.sh` (`--fetch <version>`
-  detached, `--apply-if-ready` in the foreground) and by hand (`--status`, `--rollback`,
+  detached) and by hand (`--status`, `--rollback`,
   `--apply [--force-live]`, `--accept-terms`, `--clear-halt`, `--verify-archive <tgz>`,
-  `--selftest`). The apply path runs inside `pre-session.sh`'s 120 s budget with its own 50 s (files) + 20 s (verify.sh)
-  abort-and-roll-back. See "Automatic updates".
+  `--selftest`). The apply aborts and rolls back past its own limits (files: 50 s for
+  `--apply-if-ready`, 600 s for `--apply` by hand; verify.sh: 20 s); it never runs inside
+  `pre-session.sh` (10 s budget). See "Automatic updates".
 - `gov-release.sh` — a tool, run by hand on the release source machine only. See "Cutting a release".
 - `release-manifest.sh` — a library sourced by both of the above, so the writer and the reader of a
   release manifest share one definition of the file set and one parser.
@@ -699,18 +700,19 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
-- **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.** 2.0.0 is the last update you
-  install by hand. `git pull && bash install.sh --force --accept-terms`; from here on, releases
-  apply themselves at session start (signed, verified, rolled back on failure). Opt out:
+- **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.**
+  `git pull && bash install.sh --force --accept-terms`; from here on, new releases are downloaded
+  and verified by themselves (signed, verified, rolled back on failure). Opt out:
   `GOV_AUTO_UPDATE=0`.
   **The updater** (`gov-update.sh`): `pre-session.sh` starts a detached download of the new
   version's **tag** archive when one is published, verifies the SSH signature of its
   `RELEASE-MANIFEST` under the key pinned on your machine, every file's SHA-256, the exact file set
-  and every install destination, and applies it at a later `startup`/`resume` session start when no
-  other session is live — backup first, one atomic rename per file, `verify.sh`, and a full
+  and every install destination, and stages it; the apply installs it when no other session is
+  live — backup first, one atomic rename per file, `verify.sh`, and a full
   rollback plus a per-version halt on any failure. It never runs over files you modified locally
-  and never on the machine releases are cut from. `pre-session.sh`'s budget rose 10 s → 120 s for
-  the apply path; the normal path is unchanged. See "Automatic updates" and "Release signing key".
+  and never on the machine releases are cut from. `pre-session.sh` keeps its 10 s budget and never runs
+  the apply (2026-09-26: a 120 s budget broke VS Code start-up, which gives up at 60 s); it prints
+  one line when a verified release is waiting. See "Automatic updates" and "Release signing key".
   **Terms:** the repository is now under the **MIT `LICENSE`**, and `NOTICE-AUTO-UPDATE.md`
   discloses in full what the updater runs, downloads and writes, what the signature does not
   protect against, and the terms. `install.sh` asks you to type `I ACCEPT` before writing anything

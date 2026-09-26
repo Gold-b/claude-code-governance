@@ -567,6 +567,13 @@ has "  ... by the new text" "$_cmds" "new text"
 hasnt "a governance entry the new template dropped disappears" "$_cmds" "retired-hook.sh"
 has "a new governance event is added" "$_cmds" "SessionStart|~/.claude/hooks/governance/pre-session.sh"
 is "permissions untouched" "$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify(s.permissions)+JSON.stringify(s.env))' "$T/settings.json")" '{"allow":["Bash(ls:*)"]}{"X":"1"}'
+# pre-session.sh is capped at 10 s by the merge itself (2026-09-26): the template above says 120.
+_pst() { node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const g of s.hooks.SessionStart||[])for(const h of g.hooks)if(/pre-session\.sh/.test(h.command))console.log(h.timeout)' "$1"; }
+is "a template's pre-session timeout 120 is clamped to 10" "$(_pst "$T/settings.json")" "10"
+sed 's/"timeout":120/"timeout":7/' "$T/new.json" > "$T/new7.json"
+node "$M" --template "$T/new7.json" --settings "$T/settings.json" --installed "$T/new.json" >/dev/null 2>&1
+is "  control: a timeout already under the cap (7) is kept" "$(_pst "$T/settings.json")" "7"
+node "$M" --template "$T/new.json" --settings "$T/settings.json" --installed "$T/new7.json" >/dev/null 2>&1
 touch -d '1 hour ago' "$T/settings.json"; _m1=$(stat -c %Y "$T/settings.json" 2>/dev/null || stat -f %m "$T/settings.json")
 _o=$(node "$M" --template "$T/new.json" --settings "$T/settings.json" --installed "$T/new.json" 2>&1)
 _m2=$(stat -c %Y "$T/settings.json" 2>/dev/null || stat -f %m "$T/settings.json")
@@ -688,28 +695,36 @@ fi
 
 # ── review round 1 (2026-09-25): cases for every finding that was a real defect ───────────────
 if want PRESESSION; then
-echo "(${SECONDS}s) [PRESESSION] pre-session.sh drives the apply (READY staged)"
-# GOV_NO_STDIN=0: the suite exports 1 for the tools it runs, but a HOOK must read its payload —
-# with 1 the "source" in the payload never arrived and compact looked like startup (MEASURED).
+echo "(${SECONDS}s) [PRESESSION] pre-session.sh REPORTS a staged release and never applies it (2026-09-26)"
+# SessionStart blocks Claude Code's start-up and the VS Code extension fails it at 60 s, so since
+# 2026-09-26 the hook only prints a line; the apply is `gov-update.sh --apply`, run by a human.
+# GOV_NO_STDIN=0: the suite exports 1 for the tools it runs, but a HOOK must read its payload.
 ps_run() { HOME="$H" GOV_NO_STDIN=0 GOV_UPDATE_SKIP_DEEP_VERIFY=1 bash "$H/.claude/hooks/governance/pre-session.sh" <<< "$1" 2>&1; }
 use_home "$STAGED"; printf '2.0.0\n' > "$H/.claude/logs/.governance-latest"
-_o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"compact"}')
-hasnt "source=compact in the payload: not applied" "$_o" "Applied v2.0.0"
-is "  marker unchanged" "$(marker)" "1.9.0"
-# The CURRENT session's own directory is fresh. Only the GOV_SESSION_ID plumbing tells the updater
-# that this is itself: without it, it would count as "another live session" and defer forever.
 mkdir -p "$H/.claude/logs/sessions/sess-a"; touch "$H/.claude/logs/sessions/sess-a/f"
+_t0=$SECONDS
 _o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}')
-has "source=startup: applied through pre-session (own session not counted)" "$_o" "Applied v2.0.0"
+hasnt "source=startup, READY staged: NOT applied by the hook" "$_o" "Applied v2.0.0"
+is "  marker unchanged" "$(marker)" "1.9.0"
+has "  the hook names the staged version and the command" "$_o" "v2.0.0 is downloaded and its signature verified, but it is NOT applied at session start"
+has "  ... and the command a human runs" "$_o" "gov-update.sh --apply --force-live"
+is "  it returned inside the 10 s SessionStart budget" "$([ $((SECONDS - _t0)) -lt 10 ] && echo yes || echo "no ($((SECONDS - _t0)) s)")" "yes"
+_o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"compact"}')
+hasnt "source=compact: not applied either" "$_o" "Applied v2.0.0"
+_o=$(HOME="$H" GOVERNANCE_UPDATE_CHECK=0 GOV_NO_STDIN=0 bash "$H/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}' 2>&1)
+hasnt "  update check OFF: the READY line is silent" "$_o" "is downloaded and its signature verified"
+# A human runs the command from a terminal: no session id, and the session that printed the line
+# is still fresh on disk. That is why the line names --force-live.
+touch "$H/.claude/logs/sessions/sess-a/f"
+_o=$(SID=terminal upd --apply)
+hasnt "a plain --apply beside the fresh session dir defers (why the line says --force-live)" "$_o" "Applied v2.0.0"
+_o=$(SID=terminal upd --apply --force-live)
+has "control: the command the line names applies it" "$_o" "Applied v2.0.0"
 is "  marker 2.0.0" "$(marker)" "2.0.0"
-use_home "$STAGED"; printf '2.0.0\n' > "$H/.claude/logs/.governance-latest"
-mkdir -p "$H/.claude/logs/sessions/sess-other"; touch "$H/.claude/logs/sessions/sess-other/f"
-_o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}')
-has "another live session: deferred through pre-session" "$_o" "deferred 1 time(s)"
 fi
 
 if want PRESESSION && [ -f "$SB/stubmv/mv" ]; then
-echo "  (an interrupted apply is recovered by pre-session even with GOVERNANCE_UPDATE_CHECK=0)"
+echo "  (an interrupted apply is REPORTED by pre-session, even with GOVERNANCE_UPDATE_CHECK=0, and restored by --apply)"
 use_home "$STAGED"; _before=$(treehash); rm -f "$SB/mvcount"
 HOME="$H" GOV_UPDATE_SKIP_DEEP_VERIFY=1 GOV_SESSION_SOURCE=startup GOV_SESSION_ID=test-self PATH="$SB/stubmv:$PATH" \
   bash "$H/.claude/hooks/governance/gov-update.sh" --apply-if-ready </dev/null >/dev/null 2>&1 &
@@ -718,7 +733,10 @@ while [ "$(_nswap)" -lt 5 ] && [ "$_w" -lt 240 ]; do sleep 0.5; _w=$((_w + 1)); 
 kill -9 "$_ap" 2>/dev/null; wait "$_ap" 2>/dev/null; sleep 1
 [ -f "$SB/stub-sleeper.pid" ] && kill "$(cat "$SB/stub-sleeper.pid")" 2>/dev/null
 _o=$(HOME="$H" GOV_NO_STDIN=0 GOVERNANCE_UPDATE_CHECK=0 GOV_UPDATE_SKIP_DEEP_VERIFY=1 bash "$H/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}' 2>&1)
-has "recovered through pre-session with the update check OFF" "$_o" "could NOT be applied (interrupted)"
+has "interrupted apply reported with the update check OFF" "$_o" "was INTERRUPTED while being applied"
+is "  the hook restored nothing (the journal is still there)" "$([ -f "$H/.claude/.governance-update/APPLYING" ] && echo kept || echo gone)" "kept"
+_o=$(upd --apply)
+has "control: --apply restores it" "$_o" "could NOT be applied (interrupted)"
 is "  tree byte-identical to before" "$(treehash)" "$_before"
 fi
 

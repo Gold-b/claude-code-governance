@@ -39,10 +39,19 @@ mkdir -p "$(dirname "$GOVERNANCE_LOG")" 2>/dev/null || true
 # Sanitizes message to prevent log injection (strips newlines/control chars).
 gov_log() {
   local hook="$1"
-  local msg
-  msg=$(printf '%s' "$2" | tr -d '\n\r' | tr -cd '[:print:]')
-  local ts
-  ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown-time")
+  local msg="" ts=""   # assigned here: callers run under `set -u` (sync-governance.sh), and the
+                       # bash < 4.2 branch below never sets ts itself
+  # Builtins, not `tr | tr` + `date` (2026-09-26): three forks per line, called ~6 times by
+  # pre-session.sh alone, a SessionStart hook that blocks Claude Code's start-up. LC_ALL=C keeps
+  # [:print:] byte-based, exactly as tr was, so the logged bytes are unchanged.
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
+    local LC_ALL=C
+    msg="${2//[$'\n\r']/}"; msg="${msg//[^[:print:]]/}"
+    printf -v ts '%(%Y-%m-%d %H:%M:%S)T' -1 2>/dev/null || ts=""
+  else
+    msg=$(printf '%s' "$2" | tr -d '\n\r' | tr -cd '[:print:]')
+  fi
+  [ -n "$ts" ] || ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown-time")
   # Refuse to write if log is a symlink
   [ -L "$GOVERNANCE_LOG" ] && return 0
   echo "[$ts] [$hook] $msg" >> "$GOVERNANCE_LOG" 2>/dev/null || true
@@ -137,7 +146,9 @@ gov_find_project_root() {
       echo "$d"
       return 0
     fi
-    d="$(dirname "$d")"
+    # ${d%/*}, not $(dirname): one fork per level cost 1.6 s under load in a SessionStart hook
+    # (2026-09-26). Same dirs visited: "/c/x" -> "/c" -> "" ends where dirname's "/" did.
+    case "$d" in */*) d="${d%/*}" ;; *) d="" ;; esac
   done
   echo "$PWD"
 }
@@ -262,32 +273,45 @@ gov_is_governed() {
 # line differently the subtraction would silently match nothing and the block would return.
 # Size (not mtime, which this hook family deliberately never trusts) is what makes a
 # pre-existing file that got edited AGAIN this session still count as this session's work.
+#
+# COST (2026-09-26): a constant number of processes, not ~6 per dirty path. The per-line loop it
+# replaces cost 2.7 s for 8 dirty files inside pre-session.sh, a SessionStart hook that blocks
+# Claude Code's start-up; a tree with a hundred would have outlived the hook's 10 s. One awk parses,
+# ONE `wc -c` sizes every file, one find per untracked DIRECTORY (rare) totals its bytes, and a final
+# awk joins them in git's order. Same output, byte for byte, as the loop (tests/test-sessionstart-budget.sh).
 gov_dirty_snapshot() {
-  local root="$1" line st p sz
+  local root="$1"
   [ -n "$root" ] && [ -d "$root/.git" ] || return 0
   ( cd "$root" 2>/dev/null || exit 0
-    git status --porcelain 2>/dev/null | while IFS= read -r line; do
-      st=$(printf '%s' "$line" | cut -c1-2)
-      # Same normalisation close-completeness.sh applies: strip the status column, and for a
-      # rename keep the destination path.
-      p=$(printf '%s' "$line" | sed 's/^...//' | sed 's/.* -> //' | sed 's#\\#/#g')
-      [ -z "$p" ] && continue
-      # A DELETED path has no bytes to read. Guard on existence rather than letting the stat
-      # fail: an unreadable path still yields "-" so the comparison stays correct, but the
-      # failure would print to stderr on every session - the same log-noise defect already on
-      # record for the notifier's marker path.
-      if [ -d "$p" ]; then
+    # Same normalisation close-completeness.sh applies: strip the status column, and for a rename
+    # keep the destination path.
+    _l=$(git status --porcelain 2>/dev/null | awk '{
+      st = substr($0, 1, 2); p = substr($0, 4); sub(/.* -> /, "", p); gsub(/\\/, "/", p)
+      if (p != "") print st "\t" p }')
+    [ -n "$_l" ] || exit 0
+    _files=(); _dirs=""
+    while IFS=$'\t' read -r _st _p; do
+      # A DELETED path has no bytes to read: it is neither -d nor -f and stays "-" below.
+      if [ -d "$_p" ]; then
         # An untracked DIRECTORY is reported as a single entry; total its bytes so a new file
         # appearing inside it changes the size and is not masked by the parent's baseline.
-        sz=$(find "$p" -type f -exec wc -c {} \; 2>/dev/null | awk '{s+=$1} END{print s+0}')
-      elif [ -f "$p" ]; then
-        sz=$(wc -c < "$p" 2>/dev/null | tr -d ' ')
-      else
-        sz="-"
+        _dirs="$_dirs$(find "$_p" -type f -exec cat {} + 2>/dev/null | wc -c | tr -d ' ')"$'\t'"$_p"$'\n'
+      elif [ -f "$_p" ]; then
+        _files+=("$_p")
       fi
-      [ -z "$sz" ] && sz="-"
-      printf '%s\t%s\t%s\n' "$st" "$sz" "$p"
-    done )
+    done <<< "$_l"
+    { [ "${#_files[@]}" -gt 0 ] && wc -c -- "${_files[@]}" 2>/dev/null
+      printf '@@GOV-DIRS@@\n%s@@GOV-LIST@@\n%s\n' "$_dirs" "$_l"
+    } | awk '
+      $0 == "@@GOV-DIRS@@" { sec = 1; next }
+      $0 == "@@GOV-LIST@@" { sec = 2; next }
+      $0 == "" { next }
+      sec == 0 { l = $0; sub(/^[ \t]+/, "", l); n = l; sub(/[ \t].*/, "", n); nm = substr(l, length(n) + 2)
+                 if (!(nm in sz)) sz[nm] = n; next }   # first hit wins: a file named "total" beats the summary line
+      { t = index($0, "\t"); a = substr($0, 1, t - 1); b = substr($0, t + 1) }
+      sec == 1 { sz[b] = a; next }
+      { s = (b in sz) ? sz[b] : "-"; if (s == "") s = "-"; printf "%s\t%s\t%s\n", a, s, b }'
+  )
 }
 
 # gov_detect_role [project_root]
@@ -758,14 +782,94 @@ gov_mtime() {
 
 # gov_other_sessions
 # One line per OTHER session dir: "<sid>\t<age_seconds>\t<open|closed>\t<changes>"
-# age = seconds since the newest file in that dir; changes = lines in its change log.
+# age = seconds since the newest file in that dir (the dir's own mtime when it holds no file);
+# changes = non-empty lines in its change log. Sorted by sid.
+#
+# ONE find + ONE awk for all dirs, however many there are (2026-09-26). The previous loop forked
+# ~8 processes PER DIR; at 87 dirs that was 30 s on Windows, inside a SessionStart hook that blocks
+# Claude Code's start-up — the VS Code extension gave up at 60 s. Keep it constant in forks.
+# The fast path needs GNU `find -printf`. Without it (stock macOS find) the pre-2026-09-26 loops run
+# unchanged (_gov_*_sessions_loop): slower, but a silent empty scan would switch off parallel and
+# crash detection and the prune with no message. They behave on BSD exactly as they always did: the
+# prune works (-mtime/-quit), ages read 0 (every session "parallel", nothing ever archived as
+# crashed — the safe failure). GOV_FIND_PRINTF=0 forces them (tests; that proves the loop's
+# meaning with GNU find, not BSD behaviour).
+_gov_find_printf_ok() {
+  [ "${GOV_FIND_PRINTF:-}" = "0" ] && return 1
+  find "$1" -maxdepth 0 -printf '' >/dev/null 2>&1
+}
 gov_other_sessions() {
+  local me now base
+  base="$HOME/.claude/logs/sessions"
+  [ -d "$base" ] || return 0
+  _gov_find_printf_ok "$base" || { _gov_other_sessions_loop; return 0; }
+  me=$(gov_session_id); now=$(date +%s)
+  find "$base" -mindepth 1 -printf '%y\t%T@\t%P\n' 2>/dev/null | awk -F'\t' -v me="$me" -v now="$now" -v base="$base" '
+    {
+      p = $3; for (i = 4; i <= NF; i++) p = p "\t" $i
+      sid = p; rest = ""
+      k = index(p, "/"); if (k) { sid = substr(p, 1, k - 1); rest = substr(p, k + 1) }
+      if (sid == "" || substr(sid, 1, 1) == "." || sid == me) next
+      m = int($2)
+      if (!k) { if ($1 == "d") { isdir[sid] = 1; dmt[sid] = m } ; next }
+      if ($1 != "f") next
+      if (!(sid in newest) || m > newest[sid]) newest[sid] = m
+      if (rest == ".gov-session-closed") closed[sid] = 1
+      if (rest == ".gov-session-changes") chf[sid] = 1
+    }
+    END {
+      for (sid in isdir) {
+        t = (sid in newest) ? newest[sid] : dmt[sid]
+        age = now - t; if (age < 0) age = 0
+        ch = 0
+        if (sid in chf) {
+          f = base "/" sid "/.gov-session-changes"
+          while ((getline line < f) > 0) if (line != "") ch++
+          close(f)
+        }
+        printf "%s\t%d\t%s\t%d\n", sid, age, ((sid in closed) ? "closed" : "open"), ch
+      }
+    }' | LC_ALL=C sort
+}
+
+# gov_prune_sessions [days]  -> delete session dirs untouched for N days (default 14)
+# "Untouched" = no entry inside it, the dir itself included, modified in the last N days (a fresh,
+# still-empty session dir must survive). One find + one awk, then one rm per stale dir only.
+gov_prune_sessions() {
+  local days="${1:-14}" base now sid
+  gov_dry && return 0
+  case "$days" in ''|*[!0-9]*) days=14 ;; esac
+  base="$HOME/.claude/logs/sessions"
+  [ -d "$base" ] || return 0
+  _gov_find_printf_ok "$base" || { _gov_prune_sessions_loop "$days"; return 0; }
+  now=$(date +%s)
+  find "$base" -mindepth 1 -printf '%y\t%T@\t%P\n' 2>/dev/null | awk -F'\t' -v now="$now" -v lim="$((days * 86400))" '
+    {
+      p = $3; for (i = 4; i <= NF; i++) p = p "\t" $i
+      sid = p; k = index(p, "/"); if (k) sid = substr(p, 1, k - 1)
+      if (sid == "" || substr(sid, 1, 1) == ".") next
+      if (!k && $1 != "d") next
+      if (!k) isdir[sid] = 1
+      m = int($2); if (!(sid in newest) || m > newest[sid]) newest[sid] = m
+    }
+    END { for (sid in isdir) if (now - newest[sid] >= lim) print sid }' \
+  | while IFS= read -r sid; do
+      case "$sid" in ''|.|..|*/*) continue ;; esac
+      rm -rf "$base/$sid" 2>/dev/null || true
+    done
+}
+
+# The pre-2026-09-26 loops, kept verbatim for a find without -printf (see _gov_find_printf_ok).
+_gov_other_sessions_loop() {
   local me now d sid newest age st ch
   me=$(gov_session_id); now=$(date +%s)
   for d in "$HOME"/.claude/logs/sessions/*/; do
     [ -d "$d" ] || continue
     sid=$(basename "$d"); [ "$sid" = "$me" ] && continue
     newest=$(find "$d" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
+    # NOT `stat -f %m` (BSD): a dir's mtime ignores files rewritten in place, so a live session would
+    # age past 6 h and be archived as crashed, its change log emptied (MEASURED in review 2026-09-26).
+    # Age 0 (every session "parallel", nothing archived) is the safe failure, and was the old one.
     [ -z "$newest" ] && newest=$(stat -c %Y "$d" 2>/dev/null || echo "$now")
     age=$((now - newest)); [ "$age" -lt 0 ] && age=0
     st=open; [ -f "$d/.gov-session-closed" ] && st=closed
@@ -773,11 +877,8 @@ gov_other_sessions() {
     printf '%s\t%s\t%s\t%s\n' "$sid" "$age" "$st" "$ch"
   done
 }
-
-# gov_prune_sessions [days]  -> delete session dirs untouched for N days (default 14)
-gov_prune_sessions() {
+_gov_prune_sessions_loop() {
   local days="${1:-14}" d
-  gov_dry && return 0
   for d in "$HOME"/.claude/logs/sessions/*/; do
     [ -d "$d" ] || continue
     # the dir entry itself counts (a fresh, still-empty session dir must survive)

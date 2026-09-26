@@ -306,7 +306,7 @@ if [ "$PRINT_MAP" = "0" ]; then
     _apid=$( { sed -n 's/^pid=\([0-9]*\).*/\1/p' "$_pf" 2>/dev/null || true; } | head -1)
     if [ -n "$_apid" ] && kill -0 "$_apid" 2>/dev/null; then
       error "An automatic update is running right now (pid $_apid, $_pf)."
-      error "Wait for it to finish (it prints one line at session start), then re-run. Nothing was changed."
+      error "Wait for it to finish (about 30 s), then re-run. Nothing was changed."
       exit 1
     fi
   done

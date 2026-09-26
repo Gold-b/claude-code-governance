@@ -80,40 +80,52 @@ if [ "$_GOV_ROLE_CACHED" != "FROZEN" ] \
   fi
 fi
 
-# --- Interrupted automatic update: recovered whatever the advisory's gates say (2.0.0) ---
-# An apply killed mid-swap leaves a half-applied tree and its journal (APPLYING). Restoring it is not
-# an update, so a FROZEN role or GOVERNANCE_UPDATE_CHECK=0 must not leave it in place forever. One
-# builtin file test when nothing was interrupted, which is every session.
-if [ -f "$HOME/.claude/.governance-update/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ] && ! gov_dry; then
-  _GOV_SRC=""
-  _GOV_SRC_RE='"source"[[:space:]]*:[[:space:]]*"([A-Za-z_-]*)"'
-  if [[ "${_GOV_HOOK_INPUT:-}" =~ $_GOV_SRC_RE ]]; then _GOV_SRC="${BASH_REMATCH[1]}"; fi
-  GOV_SESSION_ID="$(gov_session_id)" GOV_SESSION_SOURCE="${_GOV_SRC:-startup}" \
-    bash "$SCRIPT_DIR/gov-update.sh" --apply-if-ready </dev/null 2>&1
+# --- The updater NEVER runs in this hook's foreground (2026-09-26) ---
+# 2.0.0 applied a staged release (and recovered an interrupted one) right here, with the hook's
+# timeout raised 10 -> 120 s to fit it. SessionStart hooks block Claude Code's start-up, and the
+# VS Code extension gives the whole start-up 60 s before failing with "Subprocess initialization did
+# not complete within 60000ms" — an apply measures 18-28 s and a restore ~17 s, on top of this hook.
+# So this hook only REPORTS, with builtins, and the timeout is back to 10 s, never more. Until a
+# new automatic trigger is chosen, the apply is a command a human runs (gov-update.sh --apply).
+_GOV_UPD_DIR="$HOME/.claude/.governance-update"
+# An interrupted apply is reported whatever the advisory's gates say: a half-applied tree is not an
+# update, so a FROZEN role or GOVERNANCE_UPDATE_CHECK=0 must not hide it. One builtin file test
+# when nothing was interrupted, which is every session.
+if [ -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
+  _GOV_JPID=""
+  # The braces put the redirect under 2>/dev/null: an apply finishing between the -f test and this
+  # read removes the file, and a bare `done < file 2>/dev/null` still prints "No such file".
+  { while IFS= read -r _GOV_JL; do
+      case "$_GOV_JL" in pid=*) _GOV_JPID="${_GOV_JL#pid=}" ;; esac
+    done < "$_GOV_UPD_DIR/APPLYING"; } 2>/dev/null
+  case "$_GOV_JPID" in ''|*[!0-9]*) _GOV_JPID="" ;; esac
+  if [ -n "$_GOV_JPID" ] && kill -0 "$_GOV_JPID" 2>/dev/null; then
+    echo "[GOVERNANCE UPDATE] An update is being applied right now (pid $_GOV_JPID). Hook files may change under this session for the next ~30 s; if a hook misbehaves, restart the session once it is done."
+  elif [ ! -f "$_GOV_UPD_DIR/APPLYING" ]; then
+    :   # it finished (or was restored) while we looked: nothing to report
+  else
+    echo "[GOVERNANCE UPDATE] An automatic update was INTERRUPTED while being applied, so the governance hooks may be half-updated. Restore them now from a terminal (about 20 s, no network needed): bash ~/.claude/hooks/governance/gov-update.sh --apply   - then restart this session."
+  fi
+elif [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ -f "$_GOV_UPD_DIR/READY" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
+  _GOV_RV=""
+  { while IFS= read -r _GOV_JL; do
+      case "$_GOV_JL" in version=*) _GOV_RV="${_GOV_JL#version=}"; _GOV_RV="${_GOV_RV%% *}"; break ;; esac
+    done < "$_GOV_UPD_DIR/READY"; } 2>/dev/null
+  gov_is_semver "$_GOV_RV" || _GOV_RV=""
+  # An opt-out made after the download silences the line (the updater would refuse anyway). The
+  # env file is grepped, never sourced, and only on this rare READY path.
+  _GOV_AUTO="${GOV_AUTO_UPDATE:-}"
+  if [ -z "$_GOV_AUTO" ] && [ -n "$_GOV_RV" ] && [ -f "$HOME/.claude/.governance-local.env" ]; then
+    _GOV_AUTO=$(grep -E '^[[:space:]]*(export[[:space:]]+)?GOV_AUTO_UPDATE=' "$HOME/.claude/.governance-local.env" 2>/dev/null | tail -1 | sed -e 's/^[^=]*=//' | tr -d '"' | tr -d "'" | sed -e 's/^[[:space:]]*//' -e 's/[^0-9].*$//')
+  fi
+  if [ -n "$_GOV_RV" ] && [ "$_GOV_AUTO" != "0" ]; then
+    # --force-live, because until 10 minutes after the last hook write the updater cannot tell a
+    # closed session from a live one - including the one that printed this line.
+    echo "[GOVERNANCE UPDATE] Context Governance v$_GOV_RV is downloaded and its signature verified, but it is NOT applied at session start (start-up must stay under 10 s; an apply takes 20-30 s). To install it: close every Claude Code session, then in a terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live   (backup first, automatic rollback on failure). Opt out: GOV_AUTO_UPDATE=0."
+  fi
 fi
 
 if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
-  # --- Automatic update, apply half (2.0.0) ---
-  # Costs two builtin file tests when nothing is staged, which is every session but a handful.
-  # When a verified release IS staged (READY; an interrupted apply was handled above), gov-update.sh
-  # decides everything itself: opt-out, source machine, other live sessions, terms, local edits.
-  # It runs in the FOREGROUND on purpose: this is the one moment a human reads the output, and an
-  # apply that dies in the background has no reporter. Budget: the hook's 120 s timeout, with the
-  # updater's own limits inside it (50 s for the file changes + 20 s verify.sh, then roll back).
-  # GOV_SESSION_ID is passed by env because a --flag invocation skips the stdin read (v1.7.3), so
-  # without it the updater could not tell THIS session from another live one and would defer
-  # forever. GOV_SESSION_SOURCE carries the SessionStart source: compact/clear fire mid-task and
-  # never apply; absent means startup.
-  _GOV_UPD_DIR="$HOME/.claude/.governance-update"
-  if [ -f "$_GOV_UPD_DIR/READY" ] && [ ! -f "$_GOV_UPD_DIR/APPLYING" ]; then
-    if [ -f "$SCRIPT_DIR/gov-update.sh" ] && ! gov_dry; then
-      _GOV_SRC=""
-      _GOV_SRC_RE='"source"[[:space:]]*:[[:space:]]*"([A-Za-z_-]*)"'
-      if [[ "${_GOV_HOOK_INPUT:-}" =~ $_GOV_SRC_RE ]]; then _GOV_SRC="${BASH_REMATCH[1]}"; fi
-      GOV_SESSION_ID="$(gov_session_id)" GOV_SESSION_SOURCE="${_GOV_SRC:-startup}" \
-        bash "$SCRIPT_DIR/gov-update.sh" --apply-if-ready </dev/null 2>&1
-    fi
-  fi
 
   _GOV_LATEST="$HOME/.claude/logs/.governance-latest"
   # B13: overridable so a private-repo operator can point it at an authenticated/raw-with-token
@@ -222,7 +234,7 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
                   *) _GOV_UPD_LINE="[GOVERNANCE UPDATE] v$_REMOTE_V was NOT installed (halted: ${_GOV_HALT:-unknown}) - nothing changed on this machine, it stays on v$_LOCAL_V. Read ~/.claude/logs/governance-update.log. To retry after the cause is fixed: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt" ;;
                 esac
               elif [ -f "$_GOV_UPD_DIR/READY" ]; then
-                _GOV_UPD_LINE="-"   # a verified release is staged; the apply call above already spoke
+                _GOV_UPD_LINE="-"   # a verified release is staged; the READY notice above already spoke
               else
                 _GOV_ATT=0
                 read -r _GOV_ATT < "$_GOV_UPD_DIR/fetch-attempts-$_REMOTE_V" 2>/dev/null || true
@@ -244,7 +256,7 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
                       ( bash "$SCRIPT_DIR/gov-update.sh" --fetch "$_REMOTE_V" ) </dev/null >/dev/null 2>&1 &
                     fi
                   fi
-                  _GOV_UPD_LINE="[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. It is being downloaded and verified in the background (signed release) and applies automatically at a later session start, with a backup and automatic rollback. Opt out: GOV_AUTO_UPDATE=0."
+                  _GOV_UPD_LINE="[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. It is being downloaded and verified in the background (signed release); a later session start tells you when it is ready to install (backup first, automatic rollback). Opt out: GOV_AUTO_UPDATE=0."
                 fi
               fi
             fi
@@ -369,7 +381,9 @@ ORPHAN_COUNT=0
 # it. A dir touched in the last 10 min belongs to a session that is ALIVE right now:
 # that is a parallel session on this machine (maybe this very tree) - not a crash.
 if [ -n "$GOV_SID" ]; then
-  while IFS="$(printf '\t')" read -r o_sid o_age o_state o_changes; do
+  # $'\t', not "$(printf '\t')": the condition is re-evaluated on every iteration, and a command
+  # substitution there forked once per session dir (~120 ms each on Windows, 2026-09-26).
+  while IFS=$'\t' read -r o_sid o_age o_state o_changes; do
     [ -z "$o_sid" ] && continue
     if [ "$o_age" -le 600 ] && [ "$o_state" = "open" ]; then
       PARALLEL_HINT="${PARALLEL_HINT:+$PARALLEL_HINT; }session ${o_sid%%-*}… active ${o_age}s ago"
@@ -425,11 +439,10 @@ if [ -d "$_GOV_ROOT/.git" ]; then
   # earlier session's close is then measured against commits it never made. That is not
   # hypothetical: on 2026-07-28 a parallel session stamped its own SHA at 18:01, and the first
   # session's close was blocked for "changing code" that belonged entirely to the other one.
-  _GOV_SID=$(printf '%s' "${_GOV_HOOK_INPUT:-}" | timeout 5 python3 -c "
-import sys, json
-try: print((json.load(sys.stdin) or {}).get('session_id',''))
-except Exception: print('')
-" 2>/dev/null)
+  # The id gov_session_id already read at the top (GOV_SID), not a second parse of the same payload
+  # in a python process (2026-09-26: ~300 ms on Windows, in a hook that blocks start-up). It is also
+  # the id every other hook uses, which is what a reader of this stamp compares it with.
+  _GOV_SID="$GOV_SID"
   [ -n "$_GOV_SHA" ] && ! gov_dry && printf '%s %s %s sid=%s\n' \
     "$_GOV_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_GOV_ROOT" "$_GOV_SID" > "$_GOV_START" 2>/dev/null
 fi
@@ -519,7 +532,8 @@ esac
 _GOV_DRIFT_DESTS="$HOME/.claude/governance-installer/bundle/hooks/governance"
 if [ -f "$HOME/.claude/.governance-mirrors" ]; then
   while IFS= read -r _m; do
-    _m="$(printf '%s' "$_m" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    # comment, then leading and trailing whitespace - builtins, not a sed per line
+    _m="${_m%%#*}"; _m="${_m#"${_m%%[![:space:]]*}"}"; _m="${_m%"${_m##*[![:space:]]}"}"
     if [ -n "$_m" ] && [ -d "$_m/.claude/hooks/governance" ]; then
       _GOV_DRIFT_DESTS="$_GOV_DRIFT_DESTS
 $_m/.claude/hooks/governance"
@@ -536,20 +550,18 @@ if [ "$_GOV_LIVE_N" -gt 0 ]; then
     [ -d "$_d" ] || continue
     _GOV_DEST_N=$((_GOV_DEST_N + 1))
     _o="$(_gov_dir_hashes "$_d")"
-    _diff=0; _abs=0; _names=""
-    while IFS= read -r _line; do
-      [ -n "$_line" ] || continue
-      _h="${_line%% *}"
-      _n="${_line#* }"
-      _oh="$(printf '%s' "$_o" | awk -v k="$_n" '{h=$1; $1=""; sub(/^ /,""); if ($0==k) {print h; exit}}')"
-      if [ -z "$_oh" ]; then
-        _abs=$((_abs+1)); _names="$_names $_n(absent)"
-      elif [ "$_oh" != "$_h" ]; then
-        _diff=$((_diff+1)); _names="$_names $_n"
-      fi
-    done <<GOVDRIFTEOF
-$_GOV_LIVE_H
-GOVDRIFTEOF
+    # ONE awk per destination (2026-09-26). The per-file loop forked an awk for every live file
+    # against every destination - 62 files x 2 destinations = 124 forks, seconds on Windows, inside a
+    # SessionStart hook that blocks start-up. Output: "<differing> <absent>[ name...]".
+    _res="$(printf '%s\n@@GOV-LIVE@@\n%s\n' "$_o" "$_GOV_LIVE_H" | awk '
+      $0 == "@@GOV-LIVE@@" { live = 1; next }
+      $0 == "" { next }
+      { h = $0; sub(/ .*/, "", h); n = substr($0, length(h) + 2) }
+      !live { if (!(n in o)) o[n] = h; next }
+      { if (!(n in o)) { abs++; names = names " " n "(absent)" } else if (o[n] != h) { dif++; names = names " " n } }
+      END { printf "%d %d%s", dif, abs, names }')"
+    _diff="${_res%% *}"; _res="${_res#* }"; _abs="${_res%% *}"; _names="${_res#"$_abs"}"
+    case "$_diff$_abs" in ''|*[!0-9]*) _diff=0; _abs=1; _names=" (drift comparison failed)" ;; esac
     if [ "$_diff" -gt 0 ] || [ "$_abs" -gt 0 ]; then
       _GOV_DRIFT_MSG="$_GOV_DRIFT_MSG
   $_d - $_diff differing, $_abs absent:$(printf '%s' "$_names" | cut -c1-220)"

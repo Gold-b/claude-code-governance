@@ -931,10 +931,11 @@ gov_memory_dir() {
 # --sync-all, file-collision-guard.test.sh --list and end-session.sh --publish-preview all hit
 # rc=124. A registered hook always gets a closed payload pipe from Claude Code, so it never saw
 # this. `$1` here is the SOURCING script's first argument (every hook sources with no args).
-# The one registered hook that passes a flag keeps its payload - listed explicitly, and any new
+# The registered hooks that pass a flag keep their payload - listed explicitly, and any new
 # flag used in a registered hook command must be added here. GOV_NO_STDIN=1 forces the skip.
 case "${1:-}" in
   --sync-if-drifted) _gov_cli_mode=0 ;;   # registered Stop hook (settings-hooks.json): has a payload
+  --apply-at-session-end) _gov_cli_mode=0 ;;   # gov-update.sh, registered SessionEnd hook: has a payload
   --*)               _gov_cli_mode=1 ;;
   *)                 _gov_cli_mode=0 ;;
 esac

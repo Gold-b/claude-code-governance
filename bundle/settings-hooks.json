@@ -14,13 +14,25 @@
             "type": "command",
             "command": "~/.claude/hooks/governance/pre-session.sh",
             "timeout": 10,
-            "_timeout_note": "10 s and NEVER more (owner, 2026-09-26). SessionStart hooks block Claude Code's start-up, and the VS Code extension fails the whole start-up at 60 s ('Subprocess initialization did not complete within 60000ms'); it ignores asyncRewake (anthropics/claude-code#96980). 2.0.0 raised this to 120 s to run the automatic-update apply here; that broke VS Code start-up, so the apply no longer runs in this hook. settings-merge.js clamps it to 10 whatever a template says, and tests/test-sessionstart-budget.sh fails on any SessionStart hook that is slow or registered above its cap.",
+            "_timeout_note": "10 s and NEVER more (owner, 2026-09-26). SessionStart hooks block Claude Code's start-up, and the VS Code extension fails the whole start-up at 60 s ('Subprocess initialization did not complete within 60000ms'); it ignores asyncRewake (anthropics/claude-code#96980). 2.0.0 raised this to 120 s to run the automatic-update apply here; that broke VS Code start-up, so the apply no longer runs in this hook - it runs at SessionEnd, detached (gov-update.sh --apply-at-session-end). settings-merge.js clamps it to 10 whatever a template says, and tests/test-sessionstart-budget.sh fails on any SessionStart hook that is slow or registered above its cap.",
             "statusMessage": "Context Governance: pre-session check..."
           },
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/gov-update.sh --apply-at-session-end",
+            "timeout": 10,
+            "_note": "The automatic-update trigger (2026-09-27). A launcher: a few file tests, one log line, and - only when a verified release is staged or an apply was interrupted - one detached spawn of gov-update.sh --apply-if-ready (nohup, stdin /dev/null, output to ~/.claude/.governance-update/REPORT, no session tokens, nice 19, a 600 s ceiling where `timeout` exists). Returns in about a second (0.5 s idle, up to ~1.5 s under load, MEASURED on Windows); the apply (18-40 s) runs after this session has ended and defers while any other session is live, so the last session to close installs it. pre-session.sh prints the result at the next start. Never at SessionStart: those hooks block start-up, and the VS Code extension fails a start that takes 60 s."
           }
         ]
       }

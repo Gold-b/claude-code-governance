@@ -80,16 +80,26 @@ if [ "$_GOV_ROLE_CACHED" != "FROZEN" ] \
   fi
 fi
 
-# --- The updater NEVER runs in this hook's foreground (2026-09-26) ---
+# --- The updater NEVER runs in this hook's foreground (2026-09-26/27) ---
 # 2.0.0 applied a staged release (and recovered an interrupted one) right here, with the hook's
 # timeout raised 10 -> 120 s to fit it. SessionStart hooks block Claude Code's start-up, and the
 # VS Code extension gives the whole start-up 60 s before failing with "Subprocess initialization did
 # not complete within 60000ms" — an apply measures 18-28 s and a restore ~17 s, on top of this hook.
-# So this hook only REPORTS, with builtins, and the timeout is back to 10 s, never more. Until a
-# new automatic trigger is chosen, the apply is a command a human runs (gov-update.sh --apply).
+# The apply now runs when a session ENDS (gov-update.sh --apply-at-session-end, registered on
+# SessionEnd, detached). This hook only reports, with builtins, and its timeout is 10 s, never more.
 _GOV_UPD_DIR="$HOME/.claude/.governance-update"
-# An interrupted apply is reported whatever the advisory's gates say: a half-applied tree is not an
-# update, so a FROZEN role or GOVERNANCE_UPDATE_CHECK=0 must not hide it. One builtin file test
+# This session is live again (a resume, or compact/clear mid-task): drop the `.gov-session-closed`
+# marker its own SessionEnd may have left, so the updater never treats it as closed. HERE, before any
+# role gate - the later reset (Step 2) runs only on a SOURCE project, and on any other a resumed
+# session would stay "closed" and have hooks swapped under it.
+# A builtin regex on the payload _common.sh already read - not $(gov_session_id), a subshell plus a
+# four-process pipeline on every start in every project (~0.4 s under load, review 2026-09-27).
+_GOV_SID0="${GOV_SESSION_ID:-}"
+_GOV_SID_RE='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]*)"'
+if [ -z "$_GOV_SID0" ] && [[ "${_GOV_HOOK_INPUT:-}" =~ $_GOV_SID_RE ]]; then _GOV_SID0="${BASH_REMATCH[1]}"; fi
+case "$_GOV_SID0" in ''|*[!A-Za-z0-9_-]*) ;; *) gov_dry || rm -f "$HOME/.claude/logs/sessions/$_GOV_SID0/.gov-session-closed" 2>/dev/null ;; esac
+# An interrupted apply is handled whatever the advisory's gates say: a half-applied tree is not an
+# update, so a FROZEN role or GOVERNANCE_UPDATE_CHECK=0 must not leave it. One builtin file test
 # when nothing was interrupted, which is every session.
 if [ -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
   _GOV_JPID=""
@@ -100,13 +110,37 @@ if [ -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
     done < "$_GOV_UPD_DIR/APPLYING"; } 2>/dev/null
   case "$_GOV_JPID" in ''|*[!0-9]*) _GOV_JPID="" ;; esac
   if [ -n "$_GOV_JPID" ] && kill -0 "$_GOV_JPID" 2>/dev/null; then
-    echo "[GOVERNANCE UPDATE] An update is being applied right now (pid $_GOV_JPID). Hook files may change under this session for the next ~30 s; if a hook misbehaves, restart the session once it is done."
+    echo "[GOVERNANCE UPDATE] An update is being applied in the background right now (pid $_GOV_JPID); its result prints at the next session start. Hook files may change under this session for the next ~30 s - if a hook misbehaves, restart the session once it is done."
   elif [ ! -f "$_GOV_UPD_DIR/APPLYING" ]; then
     :   # it finished (or was restored) while we looked: nothing to report
+  elif gov_dry; then
+    echo "[GOVERNANCE UPDATE] (dry-run) An update was INTERRUPTED while being applied; a real start would roll it back in the background."
   else
-    echo "[GOVERNANCE UPDATE] An automatic update was INTERRUPTED while being applied, so the governance hooks may be half-updated. Restore them now from a terminal (about 20 s, no network needed): bash ~/.claude/hooks/governance/gov-update.sh --apply   - then restart this session."
+    # The apply died mid-swap (the machine was shut down, the process killed). Running this session
+    # whole on a half-updated tree is worse than a restore in the background: one short bash that
+    # only spawns the detached rollback and returns (board, 2026-09-27). It rolls back; it never
+    # starts an apply (source `recovery`, refused by upd_apply).
+    bash "$SCRIPT_DIR/gov-update.sh" --recover-detached </dev/null >/dev/null 2>&1
+    echo "[GOVERNANCE UPDATE] An automatic update was INTERRUPTED while being applied; it is being rolled back to its backup in the background now (about 20 s). The result prints at the next session start (or: bash ~/.claude/hooks/governance/gov-update.sh --status). Restart this session once it is done."
   fi
-elif [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ -f "$_GOV_UPD_DIR/READY" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
+elif [ -s "$_GOV_UPD_DIR/REPORT" ] && [ ! -L "$_GOV_UPD_DIR/REPORT" ] && [ ! -d "$_GOV_UPD_DIR/lock.d" ]; then
+  # The result of an update that ran in the background after an earlier session ended. Not while an
+  # apply or a fetch holds the lock: its last line may not be written yet. Only the updater's own
+  # line shape is echoed, at most 20 lines, printable characters only - this text enters the model's
+  # context, so nothing else in the file may ride along.
+  _GOV_RN=0
+  { while IFS= read -r _GOV_JL; do
+      case "$_GOV_JL" in "[GOVERNANCE UPDATE] "*) ;; *) continue ;; esac
+      _GOV_JL="${_GOV_JL//[^[:print:]]/}"
+      [ "${#_GOV_JL}" -gt 600 ] && _GOV_JL="${_GOV_JL:0:600}..."
+      echo "$_GOV_JL"
+      _GOV_RN=$((_GOV_RN + 1)); [ "$_GOV_RN" -ge 20 ] && break
+    done < "$_GOV_UPD_DIR/REPORT"; } 2>/dev/null
+  # Emptied IN PLACE, not removed: a child spawned a moment ago may already hold it open, and its
+  # line then lands in this same file and prints next time instead of vanishing with an unlinked one.
+  gov_dry || : > "$_GOV_UPD_DIR/REPORT" 2>/dev/null
+fi
+if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ -f "$_GOV_UPD_DIR/READY" ] && [ ! -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
   _GOV_RV=""
   { while IFS= read -r _GOV_JL; do
       case "$_GOV_JL" in version=*) _GOV_RV="${_GOV_JL#version=}"; _GOV_RV="${_GOV_RV%% *}"; break ;; esac
@@ -119,9 +153,9 @@ elif [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ -f "$_GOV_UPD_DIR/READY" ] && [ -f
     _GOV_AUTO=$(grep -E '^[[:space:]]*(export[[:space:]]+)?GOV_AUTO_UPDATE=' "$HOME/.claude/.governance-local.env" 2>/dev/null | tail -1 | sed -e 's/^[^=]*=//' | tr -d '"' | tr -d "'" | sed -e 's/^[[:space:]]*//' -e 's/[^0-9].*$//')
   fi
   if [ -n "$_GOV_RV" ] && [ "$_GOV_AUTO" != "0" ]; then
-    # --force-live, because until 10 minutes after the last hook write the updater cannot tell a
-    # closed session from a live one - including the one that printed this line.
-    echo "[GOVERNANCE UPDATE] Context Governance v$_GOV_RV is downloaded and its signature verified, but it is NOT applied at session start (start-up must stay under 10 s; an apply takes 20-30 s). To install it: close every Claude Code session, then in a terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live   (backup first, automatic rollback on failure). Opt out: GOV_AUTO_UPDATE=0."
+    # --force-live for the hand-run, because a session dir counts as live for 10 minutes after its
+    # last hook write - including the one that printed this line.
+    echo "[GOVERNANCE UPDATE] Context Governance v$_GOV_RV is downloaded and its signature verified. It installs itself in the background when the last Claude Code session on this machine ends (nothing runs at session start; backup first, automatic rollback on failure). To install now instead: close every Claude Code session, then in a terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live   Opt out: GOV_AUTO_UPDATE=0."
   fi
 fi
 
@@ -256,7 +290,7 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
                       ( bash "$SCRIPT_DIR/gov-update.sh" --fetch "$_REMOTE_V" ) </dev/null >/dev/null 2>&1 &
                     fi
                   fi
-                  _GOV_UPD_LINE="[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. It is being downloaded and verified in the background (signed release); a later session start tells you when it is ready to install (backup first, automatic rollback). Opt out: GOV_AUTO_UPDATE=0."
+                  _GOV_UPD_LINE="[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. It is being downloaded and verified in the background (signed release), and installs itself when the last Claude Code session on this machine ends (backup first, automatic rollback). Opt out: GOV_AUTO_UPDATE=0."
                 fi
               fi
             fi

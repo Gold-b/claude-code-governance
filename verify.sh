@@ -95,6 +95,12 @@ if command -v node &>/dev/null; then
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.TaskCompleted ? 0 : 1)\""
   check "  Stop hook registered" \
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.Stop ? 0 : 1)\""
+  # 2026-09-27: SessionStart hooks block Claude Code's start-up (the VS Code extension fails at 60 s),
+  # so pre-session.sh is registered at 10 s or less, and the automatic update is triggered at SessionEnd.
+  check "  pre-session.sh timeout <= 10 s" \
+    "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); const h=(s.hooks?.SessionStart||[]).flatMap(g=>g.hooks||[]).filter(h=>/pre-session\\\\.sh/.test(h.command||'')); process.exit(h.length && h.every(x=>typeof x.timeout==='number' && x.timeout>0 && x.timeout<=10) ? 0 : 1)\""
+  check "  SessionEnd auto-update hook registered" \
+    "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit((s.hooks?.SessionEnd||[]).flatMap(g=>g.hooks||[]).some(h=>/gov-update\\\\.sh --apply-at-session-end/.test(h.command||'')) ? 0 : 1)\""
 fi
 echo ""
 

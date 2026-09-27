@@ -17,17 +17,20 @@ you from, and what you agree to by installing it. Read it before you type `I ACC
 Once installed, the framework keeps itself up to date. At the start of a Claude Code session it
 checks whether a newer version has been published. If there is one, it downloads that release in
 the background, checks that it was signed by the maintainer's release key and that every file is
-exactly what the signed list says, and prepares it. At a later session start — and only when no
-other Claude Code session of yours is active — it installs the prepared release, checks that the
-result works, and puts everything back the way it was if it does not. You can turn this off at
+exactly what the signed list says, and prepares it. When a Claude Code session of yours **ends** —
+and only when no other session of yours is still active — it installs the prepared release in the
+background, checks that the result works, and puts everything back the way it was if it does not.
+A session start never installs anything (an install begun when an earlier session ended may still
+be finishing when you open a new one; the new session then tells you so). You can turn this off at
 any time, and you can undo any update.
 
 ---
 
 ## 2. What runs, and when
 
-Everything starts from one hook that is already part of the framework: `pre-session.sh`, which
-Claude Code runs at the start of every session (the `SessionStart` event).
+Two hooks drive it: `pre-session.sh`, which Claude Code runs at the start of every session (the
+`SessionStart` event), checks and downloads; `gov-update.sh --apply-at-session-end`, which Claude
+Code runs when a session ends (the `SessionEnd` event), installs.
 
 1. **Version check (existing behaviour).** `pre-session.sh` compares the version you have
    installed (`~/.claude/.governance-version`) with the version published in the repository. The
@@ -39,23 +42,35 @@ Claude Code runs at the start of every session (the `SessionStart` event).
    its own working folder (section 5). As part of that verification it runs the release's own
    self-checks, so the downloaded code — after its signature and checksums have been verified —
    executes on your machine in the background.
-3. **Install (foreground).** At a later session start, if a verified release is waiting,
-   `pre-session.sh` runs `gov-update.sh --apply-if-ready` in the foreground. It installs only when
-   **all** of these hold:
-   - the session was started fresh or resumed (not on `compact` or `clear`, which happen
-     mid-task);
+3. **Install (background, when a session ends).** When a session ends and a verified release is
+   waiting, the `SessionEnd` hook starts `gov-update.sh --apply-if-ready` as a **detached
+   background process** and returns at once; the install runs after that session has closed. It
+   runs with low priority, without the session's API or GitHub tokens in its environment, and —
+   where the system has the `timeout` command (Git Bash, Linux; not stock macOS) — is stopped after
+   at most 10 minutes. It installs only when **all** of these hold:
+   - the session really ended (not on `/clear`, which happens mid-task);
    - no other Claude Code session of yours has been active in the last 10 minutes (otherwise it
-     waits and tells you so);
+     waits; with several sessions open, the last one to end installs it);
    - none of the installed framework files were modified by you since the last install
      (otherwise it refuses and names the files);
    - you have accepted the current version of these terms;
    - automatic updates are not switched off (section 8).
 
-   The install normally takes seconds. It aborts on its own and restores the previous state if it
-   runs past its time limit (50 seconds for the file changes, 20 more for the final check). When it finishes it prints one line saying which version was
-   applied, where the backup is, and how to roll back.
-4. **Nothing else.** No new scheduled task, service, cron entry or background daemon is added.
-   Nothing runs when Claude Code is not running.
+   The install normally takes 20-40 seconds. It aborts on its own and restores the previous state
+   if it runs past its time limit (50 seconds for the file changes, 20 more for the final check).
+   Its result — which version was applied, where the backup is, how to roll back, or why nothing
+   was installed — is written to a small report file and **shown at the start of your next
+   session**.
+4. **An install that was cut off.** If the install is interrupted part-way (for example, the
+   computer is shut down right after the session ends), the next session start begins restoring
+   the backup in the background, and says so; nothing new is installed at that moment. An install
+   that was cut off, or ran out of time, is tried again at a later session end: three attempts in
+   all, and after the third failed one that version is blocked until you clear it (section 9).
+5. **Nothing else.** No new scheduled task, service, cron entry or background daemon is added.
+   Nothing starts while Claude Code is not running. An install that a session end started keeps
+   running after Claude Code has closed: usually under a minute, but it first waits (up to about
+   2.5 minutes) for any other update process to finish, so it can take a few minutes in all — at
+   most 10 minutes where `timeout` exists.
 
 ---
 
@@ -129,6 +144,9 @@ All locations are inside `~/.claude`:
   - `READY`, `APPLYING`, `HALT-<version>`, `fetch-attempts-<version>`, `deferrals` — small status
     files (a release is ready; an install is in progress; a version is blocked; retry and deferral
     counters);
+  - `REPORT` — the result of the last background install, shown once at your next session start
+    and then emptied (trimmed to its last 50 lines before each new background install);
+  - `retry-<version>` — how many times an install of that version was cut off or ran out of time;
   - `lock.d/` — a lock so that only one process updates at a time.
 - `~/.claude/backups/governance-update-<timestamp>/` — a complete backup of every file an update
   replaces or removes, taken **before** the first file is replaced.
@@ -169,6 +187,11 @@ All locations are inside `~/.claude`:
 
 Automatic updates are verified on Windows (Git Bash). Linux and macOS have not been verified yet;
 on a system without `ssh-keygen -Y` (OpenSSH 8.2 or later) nothing is ever installed automatically.
+That the background install keeps running after Claude Code closes has been verified on Windows
+with the terminal version of Claude Code; it has not yet been verified in the VS Code extension, on
+Linux or on macOS. Where it does not keep running, nothing breaks: the release simply stays
+waiting, an install cut off part-way is restored at the next session start, and the start message
+tells you how to install it by hand (`gov-update.sh --apply --force-live`).
 
 ---
 
@@ -186,8 +209,8 @@ overwriting of files you changed yourself.
 - **Compromise of the maintainer's machine.** The release signing key is kept on the maintainer's
   machine **without a passphrase**, so that releases can be signed without a human typing one.
   Anyone who can read that key file — malware on that machine, a stolen disk image, a backup that
-  includes the key — can sign a release that **every installed copy applies automatically at its
-  next session start**. The safeguards are how the key is kept, a limited validity period with
+  includes the key — can sign a release that **every installed copy applies automatically the
+  next time one of its sessions ends**. The safeguards are how the key is kept, a limited validity period with
   rotation, and blocking a version after any failed check. They reduce the risk; they do not
   prevent it. This scheme protects against a compromise of GitHub or of the maintainer's GitHub
   account. It **does not** protect against a compromise of the maintainer's machine.
@@ -232,6 +255,9 @@ overwriting of files you changed yourself.
 - **Roll back the last update:**
   `bash ~/.claude/hooks/governance/gov-update.sh --rollback`
   (or name a specific folder under `~/.claude/backups/`).
+- **Unblock a version** that was blocked (after the third failed attempt, or a failed check):
+  `bash ~/.claude/hooks/governance/gov-update.sh --clear-halt`
+  — it is then tried again at the next session end.
 - **See the state:**
   `bash ~/.claude/hooks/governance/gov-update.sh --status`
   — installed version, any release waiting, any blocked version, when the last check ran, the
@@ -269,7 +295,8 @@ below, then ask you to type `I ACCEPT`. It is a summary; the sections above are 
 
 <!-- terms-summary:begin -->
  1. This software installs hooks and skills that run with YOUR user privileges.
- 2. It updates ITSELF: newer releases are downloaded from GitHub and installed at session start.
+ 2. It updates ITSELF: newer releases are downloaded from GitHub and installed in the background
+    when a Claude Code session ends.
  3. Each release is checked against a signing key held by the maintainer before it is installed.
  4. That key is kept WITHOUT a passphrase; if the maintainer's machine is compromised, a malicious
     release could install itself on your machine automatically.

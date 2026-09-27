@@ -7,8 +7,11 @@
 # (claude-code-governance-<ver>/ top directory) served over file://.
 #
 # Cases (plan §8): T1-T11, T13-T18, mutants M1-M4, plus the release-manifest determinism check
-# (step 4), install-map parity (step 5) and the pre-push VERSION/tag rule (step 9).
-# T12 (apply under load) is a measurement, run by hand: GOV_TEST_T12=1.
+# (step 4), install-map parity (step 5) and the pre-push VERSION/tag rule (step 9). 2026-09-27:
+# [SESSIONEND] (the automatic trigger: detached apply at SessionEnd, both directions) and mutants
+# M5-M9 of it (id not passed, synchronous, inherited stdout, session not marked closed).
+# T12 (apply under load) is a measurement, run by hand: GOV_TEST_T12=1 (GOV_TEST_T12_NICE=1 runs it
+# the way the SessionEnd child does, under nice -n 19).
 # GOV_TEST_SLOW=1 adds one fetch with the real deep verify (~80 s).
 # GOV_TEST_ONLY="T1 T2 ..." runs a subset (case names as printed).
 #
@@ -126,6 +129,8 @@ upd() {  # upd <args...> — the INSTALLED gov-update.sh (or $UPD_SCRIPT) under 
 }
 halt_reason() { sed -n 's/^reason=\([^ ]*\).*/\1/p' "$H/.claude/.governance-update/HALT-$1" 2>/dev/null; }
 marker() { tr -d '[:space:]' < "$H/.claude/.governance-version" 2>/dev/null; }
+# wait_until <seconds> <condition>: polls every 0.5 s; rc 0 once the condition holds (detached children).
+wait_until() { local n=0 lim=$(( $1 * 2 )); while ! eval "$2" && [ "$n" -lt "$lim" ]; do sleep 0.5; n=$((n + 1)); done; eval "$2"; }
 
 echo "building fixture releases ..."
 mkrel base 1.9.0 k1 || exit 1
@@ -299,7 +304,7 @@ echo "(${SECONDS}s) [T6] verify.sh fails after the swap -> byte-identical rollba
 pre_v_fail()  { pre_t1 "$1"; printf '#!/usr/bin/env bash\nexit 1\n' > "$1/verify.sh"; }
 pre_v_skill() { pre_t1 "$1"; rm -rf "$1/bundle/skills/bootstrapper"; }
 pre_v_sleep() { pre_t1 "$1"; printf '#!/usr/bin/env bash\nsleep 20\n' > "$1/verify.sh"; }
-for v in fail:verify-failed skill:verify-failed sleep:timeout; do
+for v in fail:verify-failed skill:verify-failed sleep:verify-timeout; do
   n="${v%%:*}"; want_r="${v#*:}"
   mkrel "v$n" 2.0.0 k1 "pre_v_$n" >/dev/null
   use_home "$BASE"; URL=$(url_of "$SB/remote-v$n")
@@ -311,7 +316,16 @@ for v in fail:verify-failed skill:verify-failed sleep:timeout; do
   is "$n: tree byte-identical to before" "$(treehash)" "$_before"
   is "$n: settings.json identical" "$(cmp -s "$SB/settings.before" "$H/.claude/settings.json" && echo same || echo differs)" "same"
   is "$n: marker unchanged" "$(marker)" "1.9.0"
-  is "$n: HALT reason=$want_r" "$(halt_reason 2.0.0)" "$want_r"
+  if [ "$want_r" = "verify-timeout" ]; then
+    # Out of time is retried (a loaded machine at nice 19), halted only on the third failure.
+    is "$n: first time out -> NOT halted, retried" "$(halt_reason 2.0.0)" ""
+    has "$n:   and it says it will be tried again" "$_o" "failed attempt 1 of 3"
+    printf '2\n' > "$H/.claude/.governance-update/retry-2.0.0"
+    _o=$(GOV_UPDATE_VERIFY_TIMEOUT=3 upd --apply-if-ready)
+    is "$n: third time out -> HALT reason=$want_r" "$(halt_reason 2.0.0)" "$want_r"
+  else
+    is "$n: HALT reason=$want_r" "$(halt_reason 2.0.0)" "$want_r"
+  fi
   has "$n: the notice names the backup" "$_o" "could NOT be applied ($want_r)"
 done
 URL=$(url_of "$SB/remote-good")
@@ -444,9 +458,30 @@ is "precondition: the apply process is dead" "$(kill -0 "$_ap" 2>/dev/null && ec
 _o=$(GOV_AUTO_UPDATE=0 upd --apply-if-ready)
 has "the next start rolls back and says so (even with GOV_AUTO_UPDATE=0)" "$_o" "could NOT be applied (interrupted)"
 is "tree byte-identical to before the apply" "$(treehash)" "$_before"
-is "HALT reason=interrupted" "$(halt_reason 2.0.0)" "interrupted"
+# 2026-09-27: an interruption says nothing about the release (the apply now runs at session end,
+# when people shut down) - retried, not halted, until the third time.
+is "first interruption: NOT halted" "$(halt_reason 2.0.0)" ""
+is "  READY kept for a retry at the next SessionEnd" "$([ -f "$H/.claude/.governance-update/READY" ] && echo kept || echo gone)" "kept"
+# This recovery ran with GOV_AUTO_UPDATE=0: no automatic retry will happen, so none is promised.
+has "  and it says so - with the hand command, since automatic updates are off here" "$_o" "retry it by hand: bash ~/.claude/hooks/governance/gov-update.sh --apply (failed attempt 1 of 3)"
+hasnt "  no automatic retry promised while opted out" "$_o" "tried again when a Claude Code session next ends"
 is "the journal is gone" "$([ -f "$H/.claude/.governance-update/APPLYING" ] && echo present || echo gone)" "gone"
+_o=$(upd --apply-if-ready)
+has "  the retry applies it" "$_o" "Applied v2.0.0"
+is "  the retry counter is cleared on success" "$(ls "$H/.claude/.governance-update"/retry-* 2>/dev/null | wc -l | tr -d ' ')" "0"
 [ -f "$SB/stub-sleeper.pid" ] && kill "$(cat "$SB/stub-sleeper.pid")" 2>/dev/null
+echo "  (the THIRD interruption halts the version)"
+use_home "$STAGED"; rm -f "$SB/mvcount"; printf '2\n' > "$H/.claude/.governance-update/retry-2.0.0"
+HOME="$H" GOV_UPDATE_SKIP_DEEP_VERIFY=1 GOV_SESSION_SOURCE=startup GOV_SESSION_ID=test-self PATH="$SB/stubmv:$PATH" \
+  bash "$H/.claude/hooks/governance/gov-update.sh" --apply-if-ready </dev/null >/dev/null 2>&1 &
+_ap=$!; _w=0
+while [ "$(_nswap)" -lt 5 ] && [ "$_w" -lt 240 ]; do sleep 0.5; _w=$((_w + 1)); done
+kill -9 "$_ap" 2>/dev/null; wait "$_ap" 2>/dev/null; sleep 1
+[ -f "$SB/stub-sleeper.pid" ] && kill "$(cat "$SB/stub-sleeper.pid")" 2>/dev/null
+_o=$(upd --apply-if-ready)
+is "third interruption: HALT reason=interrupted" "$(halt_reason 2.0.0)" "interrupted"
+has "  and it says it will not be retried" "$_o" "will not be retried"
+is "  READY removed" "$([ -f "$H/.claude/.governance-update/READY" ] && echo kept || echo gone)" "gone"
 echo "  (the apply process is still ALIVE: nothing may be touched)"
 t13_alive() {  # the alive scenario with $1 = the gov-update.sh to use; output -> $SB/t13.out
   # NOT called inside $( ): the tree hash taken here must reach the caller, and a backgrounded
@@ -490,14 +525,14 @@ has "a closed session does not count" "$_o" "Applied v2.0.0"
 fi
 
 if want T14b; then
-echo "(${SECONDS}s) [T14b] SessionStart source"
-for s in compact clear; do
+echo "(${SECONDS}s) [T14b] session source (recovery = the detached rollback started at session start: never an apply)"
+for s in compact clear recovery; do
   use_home "$STAGED"; _before=$(treehash)
   SRCKIND="$s" upd --apply-if-ready >/dev/null
   is "source=$s: not applied" "$(treehash)" "$_before"
   is "source=$s: READY kept" "$([ -f "$H/.claude/.governance-update/READY" ] && echo kept || echo gone)" "kept"
 done
-for s in startup resume ""; do
+for s in session-end startup resume ""; do
   use_home "$STAGED"
   _o=$(SRCKIND="$s" upd --apply-if-ready)
   has "source=${s:-<absent>}: applied" "$_o" "Applied v2.0.0"
@@ -574,6 +609,19 @@ sed 's/"timeout":120/"timeout":7/' "$T/new.json" > "$T/new7.json"
 node "$M" --template "$T/new7.json" --settings "$T/settings.json" --installed "$T/new.json" >/dev/null 2>&1
 is "  control: a timeout already under the cap (7) is kept" "$(_pst "$T/settings.json")" "7"
 node "$M" --template "$T/new.json" --settings "$T/settings.json" --installed "$T/new7.json" >/dev/null 2>&1
+# SessionEnd (2026-09-27): a settings.json from 2.0.0 (pre-session at 120, no SessionEnd) gains the
+# trigger; a user's own SessionEnd hook survives byte for byte.
+cat > "$T/tpl-end.json" <<'J'
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/governance/pre-session.sh","timeout":10}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"~/.claude/hooks/governance/gov-update.sh --apply-at-session-end","timeout":10}]}]}}
+J
+cat > "$T/s-end.json" <<'J'
+{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"~/my-end.sh","timeout":3,"x":"keep me"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/governance/pre-session.sh","timeout":120}]}]}}
+J
+node "$M" --template "$T/tpl-end.json" --settings "$T/s-end.json" >/dev/null 2>&1
+_se=$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const e=(s.hooks.SessionEnd||[]).flatMap(g=>g.hooks);console.log(e.map(h=>JSON.stringify(h)).join("\n"))' "$T/s-end.json")
+has "SessionEnd: the governance trigger is added" "$_se" '"command":"~/.claude/hooks/governance/gov-update.sh --apply-at-session-end"'
+has "  the user's own SessionEnd hook survives byte for byte" "$_se" '{"type":"command","command":"~/my-end.sh","timeout":3,"x":"keep me"}'
+is "  and pre-session drops from 120 to 10 in the same merge" "$(_pst "$T/s-end.json")" "10"
 touch -d '1 hour ago' "$T/settings.json"; _m1=$(stat -c %Y "$T/settings.json" 2>/dev/null || stat -f %m "$T/settings.json")
 _o=$(node "$M" --template "$T/new.json" --settings "$T/settings.json" --installed "$T/new.json" 2>&1)
 _m2=$(stat -c %Y "$T/settings.json" 2>/dev/null || stat -f %m "$T/settings.json")
@@ -695,9 +743,9 @@ fi
 
 # ── review round 1 (2026-09-25): cases for every finding that was a real defect ───────────────
 if want PRESESSION; then
-echo "(${SECONDS}s) [PRESESSION] pre-session.sh REPORTS a staged release and never applies it (2026-09-26)"
-# SessionStart blocks Claude Code's start-up and the VS Code extension fails it at 60 s, so since
-# 2026-09-26 the hook only prints a line; the apply is `gov-update.sh --apply`, run by a human.
+echo "(${SECONDS}s) [PRESESSION] pre-session.sh REPORTS a staged release and never applies it (2026-09-26/27)"
+# SessionStart blocks Claude Code's start-up and the VS Code extension fails it at 60 s, so the hook
+# only prints a line; the apply runs at SessionEnd, detached ([SESSIONEND] below), or by hand.
 # GOV_NO_STDIN=0: the suite exports 1 for the tools it runs, but a HOOK must read its payload.
 ps_run() { HOME="$H" GOV_NO_STDIN=0 GOV_UPDATE_SKIP_DEEP_VERIFY=1 bash "$H/.claude/hooks/governance/pre-session.sh" <<< "$1" 2>&1; }
 use_home "$STAGED"; printf '2.0.0\n' > "$H/.claude/logs/.governance-latest"
@@ -706,8 +754,8 @@ _t0=$SECONDS
 _o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}')
 hasnt "source=startup, READY staged: NOT applied by the hook" "$_o" "Applied v2.0.0"
 is "  marker unchanged" "$(marker)" "1.9.0"
-has "  the hook names the staged version and the command" "$_o" "v2.0.0 is downloaded and its signature verified, but it is NOT applied at session start"
-has "  ... and the command a human runs" "$_o" "gov-update.sh --apply --force-live"
+has "  the hook names the staged version and when it installs" "$_o" "v2.0.0 is downloaded and its signature verified. It installs itself in the background when the last Claude Code session on this machine ends"
+has "  ... and the command to install now instead" "$_o" "gov-update.sh --apply --force-live"
 is "  it returned inside the 10 s SessionStart budget" "$([ $((SECONDS - _t0)) -lt 10 ] && echo yes || echo "no ($((SECONDS - _t0)) s)")" "yes"
 _o=$(ps_run '{"cwd":"/tmp","session_id":"sess-a","source":"compact"}')
 hasnt "source=compact: not applied either" "$_o" "Applied v2.0.0"
@@ -724,20 +772,178 @@ is "  marker 2.0.0" "$(marker)" "2.0.0"
 fi
 
 if want PRESESSION && [ -f "$SB/stubmv/mv" ]; then
-echo "  (an interrupted apply is REPORTED by pre-session, even with GOVERNANCE_UPDATE_CHECK=0, and restored by --apply)"
-use_home "$STAGED"; _before=$(treehash); rm -f "$SB/mvcount"
-HOME="$H" GOV_UPDATE_SKIP_DEEP_VERIFY=1 GOV_SESSION_SOURCE=startup GOV_SESSION_ID=test-self PATH="$SB/stubmv:$PATH" \
-  bash "$H/.claude/hooks/governance/gov-update.sh" --apply-if-ready </dev/null >/dev/null 2>&1 &
-_ap=$!; _w=0
-while [ "$(_nswap)" -lt 5 ] && [ "$_w" -lt 240 ]; do sleep 0.5; _w=$((_w + 1)); done
-kill -9 "$_ap" 2>/dev/null; wait "$_ap" 2>/dev/null; sleep 1
-[ -f "$SB/stub-sleeper.pid" ] && kill "$(cat "$SB/stub-sleeper.pid")" 2>/dev/null
-_o=$(HOME="$H" GOV_NO_STDIN=0 GOVERNANCE_UPDATE_CHECK=0 GOV_UPDATE_SKIP_DEEP_VERIFY=1 bash "$H/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}' 2>&1)
-has "interrupted apply reported with the update check OFF" "$_o" "was INTERRUPTED while being applied"
-is "  the hook restored nothing (the journal is still there)" "$([ -f "$H/.claude/.governance-update/APPLYING" ] && echo kept || echo gone)" "kept"
-_o=$(upd --apply)
-has "control: --apply restores it" "$_o" "could NOT be applied (interrupted)"
-is "  tree byte-identical to before" "$(treehash)" "$_before"
+echo "  (an interrupted apply: pre-session starts the ROLLBACK detached and returns - even with GOVERNANCE_UPDATE_CHECK=0)"
+# kill_mid_apply: an apply killed after 5 swapped files -> a half-applied tree with its journal.
+kill_mid_apply() {
+  use_home "$STAGED"; KMA_BEFORE=$(treehash); rm -f "$SB/mvcount"
+  HOME="$H" GOV_UPDATE_SKIP_DEEP_VERIFY=1 GOV_SESSION_SOURCE=startup GOV_SESSION_ID=test-self PATH="$SB/stubmv:$PATH" \
+    bash "$H/.claude/hooks/governance/gov-update.sh" --apply-if-ready </dev/null >/dev/null 2>&1 &
+  local ap=$! w=0
+  while [ "$(_nswap)" -lt 5 ] && [ "$w" -lt 240 ]; do sleep 0.5; w=$((w + 1)); done
+  kill -9 "$ap" 2>/dev/null; wait "$ap" 2>/dev/null; sleep 1
+  [ -f "$SB/stub-sleeper.pid" ] && kill "$(cat "$SB/stub-sleeper.pid")" 2>/dev/null
+}
+kill_mid_apply
+# (Not "the tree differs": the first files swapped can be byte-identical between the two versions.)
+is "precondition: an apply died mid-swap and left its journal" "$([ -f "$H/.claude/.governance-update/APPLYING" ] && [ "$(_nswap)" -ge 5 ] && echo yes || echo no)" "yes"
+_t0=$(date +%s%3N)
+_o=$(HOME="$H" GOV_NO_STDIN=0 GOVERNANCE_UPDATE_CHECK=0 GOV_UPDATE_SKIP_DEEP_VERIFY=1 bash "$H/.claude/hooks/governance/pre-session.sh" <<< '{"cwd":"/tmp","session_id":"sess-a","source":"startup"}' 2>&1 | cat)
+_dt=$(( $(date +%s%3N) - _t0 ))
+has "interrupted apply: rollback started in the background, with the update check OFF" "$_o" "it is being rolled back to its backup in the background now"
+is "  the hook returned inside the 10 s budget (stdout closed; the restore alone is ~17 s)" "$([ "$_dt" -lt 10000 ] && echo yes || echo "no (${_dt} ms)")" "yes"
+wait_until 120 '[ ! -f "$H/.claude/.governance-update/APPLYING" ] && [ "$(treehash)" = "$KMA_BEFORE" ]'
+is "  within 120 s the tree is byte-identical to before" "$(treehash)" "$KMA_BEFORE"
+wait_until 20 'grep -q "could NOT be applied (interrupted)" "$H/.claude/.governance-update/REPORT" 2>/dev/null'
+has "  REPORT says so" "$(cat "$H/.claude/.governance-update/REPORT" 2>/dev/null)" "could NOT be applied (interrupted)"
+_o=$(ps_run '{"cwd":"/tmp","session_id":"sess-b","source":"startup"}')
+has "the next start prints the REPORT line" "$_o" "could NOT be applied (interrupted)"
+is "  and consumes it (emptied in place)" "$([ -s "$H/.claude/.governance-update/REPORT" ] && echo kept || echo gone)" "gone"
+_o=$(ps_run '{"cwd":"/tmp","session_id":"sess-b","source":"startup"}')
+hasnt "  a second start prints it no more" "$_o" "could NOT be applied (interrupted)"
+fi
+
+# ── 2026-09-27: the automatic trigger is SessionEnd, detached ────────────────────────────────
+if want SESSIONEND; then
+echo "(${SECONDS}s) [SESSIONEND] gov-update.sh --apply-at-session-end starts the apply detached and returns"
+# sess_end <payload> [script]: runs the launcher as Claude Code does (payload on stdin), through `| cat`
+# so a child that kept stdout open would be timed; output -> $SB/se.out, ms -> $SB/se.ms, marker at
+# return -> $SB/se.marker. Env passes through (GOV_AUTO_UPDATE, GOVERNANCE_HOOKS, GOV_RELEASE_KEY).
+sess_end() {
+  local t0; t0=$(date +%s%3N)
+  printf '%s' "$1" | env -u GOV_SESSION_ID -u GOV_SESSION_SOURCE HOME="$H" GOV_NO_STDIN=0 GOV_UPDATE_ALLOW_FILE=1 \
+    GOV_UPDATE_SKIP_DEEP_VERIFY="${DEEP_SKIP-1}" GOV_UPDATE_ATTEMPT_SPACING=0 GOV_UPDATE_ARCHIVE_URL="$URL" \
+    bash "${2:-$H/.claude/hooks/governance/gov-update.sh}" --apply-at-session-end 2>&1 | cat > "$SB/se.out"
+  echo $(( $(date +%s%3N) - t0 )) > "$SB/se.ms"; marker > "$SB/se.marker"
+}
+U_="$H/.claude/.governance-update"
+pl_end() { printf '{"session_id":"%s","hook_event_name":"SessionEnd","reason":"%s"}' "$1" "$2"; }
+live_sess() { mkdir -p "$H/.claude/logs/sessions/$1"; touch "$H/.claude/logs/sessions/$1/f"; }
+# Positive: the ending session is the only one on the machine.
+use_home "$STAGED"; live_sess sess-a
+sess_end "$(pl_end sess-a prompt_input_exit)"
+_t1=$(date +%s%3N)
+wait_until 60 '[ -d "$U_/lock.d" ] || [ -f "$U_/APPLYING" ] || [ "$(marker)" = "2.0.0" ]'
+SE_FIRST_MS=$(( $(date +%s%3N) - _t1 )); SE_NEG_WAIT=$(( (SE_FIRST_MS * 2 + 999) / 1000 )); [ "$SE_NEG_WAIT" -lt 5 ] && SE_NEG_WAIT=5
+has "prints that it applies in the background" "$(cat "$SB/se.out")" "applying v2.0.0 in the background now that this session has ended"
+is "detached: the launcher returned (stdout closed) before the apply changed anything" "$(cat "$SB/se.marker")" "1.9.0"
+is "  and quickly (< 5 s to EOF through | cat)" "$([ "$(cat "$SB/se.ms")" -lt 5000 ] && echo yes || echo "no ($(cat "$SB/se.ms") ms)")" "yes"
+wait_until 120 '[ "$(marker)" = "2.0.0" ] && grep -q "Applied v2.0.0" "$U_/REPORT" 2>/dev/null && [ ! -d "$U_/lock.d" ]'
+is "within 120 s the release is applied (own session not counted)" "$(marker)" "2.0.0"
+has "  REPORT holds the Applied line for the next start" "$(cat "$U_/REPORT" 2>/dev/null)" "Applied v2.0.0"
+is "  the ending session is marked closed" "$([ -f "$H/.claude/logs/sessions/sess-a/.gov-session-closed" ] && echo yes || echo no)" "yes"
+is "  READY consumed" "$([ -f "$U_/READY" ] && echo kept || echo gone)" "gone"
+has "  the raw reason is logged" "$(cat "$H/.claude/logs/governance-update.log" 2>/dev/null)" "reason=prompt_input_exit session=sess-a"
+echo "  (first sign of the child after ${SE_FIRST_MS} ms; no-child cases wait ${SE_NEG_WAIT} s)"
+# no_child <label>: after the adaptive wait, nothing was started and nothing changed.
+no_child() {
+  sleep "$SE_NEG_WAIT"
+  is "$1: no lock, no journal, no REPORT" "$([ -d "$U_/lock.d" ] || [ -f "$U_/APPLYING" ] || [ -f "$U_/REPORT" ] && echo started || echo none)" "none"
+  is "$1: marker unchanged" "$(marker)" "1.9.0"
+}
+use_home "$STAGED"; live_sess sess-a
+sess_end "$(pl_end sess-a clear)"
+is "reason=clear: silent" "$(cat "$SB/se.out")" ""
+no_child "reason=clear"
+is "  READY kept" "$([ -f "$U_/READY" ] && echo kept || echo gone)" "kept"
+is "  the session is NOT marked closed (/clear is mid-task)" "$([ -f "$H/.claude/logs/sessions/sess-a/.gov-session-closed" ] && echo closed || echo open)" "open"
+has "  logged" "$(cat "$H/.claude/logs/governance-update.log" 2>/dev/null)" "reason=clear (mid-task)"
+use_home "$BASE"; live_sess sess-a
+sess_end "$(pl_end sess-a other)"
+is "nothing staged: silent" "$(cat "$SB/se.out")" ""
+no_child "nothing staged"
+is "  the session is still marked closed" "$([ -f "$H/.claude/logs/sessions/sess-a/.gov-session-closed" ] && echo yes || echo no)" "yes"
+use_home "$STAGED"; live_sess sess-a
+GOV_AUTO_UPDATE=0 sess_end "$(pl_end sess-a other)"
+is "GOV_AUTO_UPDATE=0: silent" "$(cat "$SB/se.out")" ""
+no_child "GOV_AUTO_UPDATE=0"
+is "  READY kept" "$([ -f "$U_/READY" ] && echo kept || echo gone)" "kept"
+use_home "$STAGED"; live_sess sess-a
+GOVERNANCE_HOOKS=0 sess_end "$(pl_end sess-a other)"
+# (The framework's own "hooks are DISABLED" notice may print - that is _common.sh, not this hook.)
+hasnt "GOVERNANCE_HOOKS=0: nothing started, no 'applying' line" "$(cat "$SB/se.out")" "applying"
+no_child "GOVERNANCE_HOOKS=0"
+use_home "$STAGED"; live_sess sess-a
+GOV_RELEASE_KEY=/nonexistent/key sess_end "$(pl_end sess-a other)"
+is "source machine: silent (no 'applying' line)" "$(cat "$SB/se.out")" ""
+no_child "source machine"
+is "  the session is marked closed" "$([ -f "$H/.claude/logs/sessions/sess-a/.gov-session-closed" ] && echo yes || echo no)" "yes"
+has "  logged" "$(cat "$H/.claude/logs/governance-update.log" 2>/dev/null)" "source machine"
+use_home "$STAGED"; mkdir -p "$H/.claude/logs/sessions"
+sess_end '{"session_id":"..","hook_event_name":"SessionEnd","reason":"other"}'
+is "session_id '..': no marker written outside the sessions dir" "$([ -f "$H/.claude/logs/.gov-session-closed" ] && echo written || echo none)" "none"
+wait_until 120 '[ "$(marker)" = "2.0.0" ] && [ ! -d "$U_/lock.d" ]'
+is "  (and with no other session, it still applies)" "$(marker)" "2.0.0"
+# Two sessions: the first to end defers (the other is live), the last to end applies.
+se_two() {  # se_two [script]
+  use_home "$STAGED"; live_sess sess-a; live_sess sess-b
+  sess_end "$(pl_end sess-a other)" "${1:-}"
+  wait_until 60 'grep -q "deferred v2.0.0" "$H/.claude/logs/governance-update.log" 2>/dev/null && [ ! -d "$U_/lock.d" ]'
+  SE2_FIRST_MARKER=$(marker); SE2_FIRST_REPORT=$(cat "$U_/REPORT" 2>/dev/null)
+  sess_end "$(pl_end sess-b other)" "${1:-}"
+  wait_until 120 '[ "$(marker)" = "2.0.0" ] && [ ! -d "$U_/lock.d" ]'
+}
+se_two
+is "two sessions: the first to end defers" "$SE2_FIRST_MARKER" "1.9.0"
+hasnt "  and the deferral is NOT in REPORT (log only)" "$SE2_FIRST_REPORT" "deferred"
+is "  the last to end applies" "$(marker)" "2.0.0"
+# An apply that died mid-swap is rolled back by the next SessionEnd too.
+if [ -f "$SB/stubmv/mv" ] && command -v kill_mid_apply >/dev/null 2>&1; then
+  kill_mid_apply
+  sess_end "$(pl_end sess-z other)"
+  has "interrupted apply at SessionEnd: rolled back in the background" "$(cat "$SB/se.out")" "an interrupted update is being rolled back in the background"
+  wait_until 120 '[ ! -f "$U_/APPLYING" ] && [ "$(treehash)" = "$KMA_BEFORE" ]'
+  is "  tree byte-identical to before" "$(treehash)" "$KMA_BEFORE"
+fi
+# Two sessions ending close together (review 2026-09-27): the second child finds the first holding the
+# lock. It must WAIT and then decide afresh - returning at the lock left nobody to apply.
+# The holder lives 40 s: charged to the apply's 50 s budget, that wait would time the apply out
+# mid-swap (review round 2) - the budget clock restarts after the wait.
+use_home "$STAGED"; live_sess sess-a
+sleep 40 >/dev/null 2>&1 </dev/null & _hold=$!
+mkdir -p "$U_/lock.d"; printf 'pid=%s since=x mode=apply\n' "$_hold" > "$U_/lock.d/info"
+sess_end "$(pl_end sess-a other)"
+wait_until 200 '[ "$(marker)" = "2.0.0" ] && [ ! -d "$U_/lock.d" ]'
+is "lock held 40 s by another live update process: the SessionEnd child waits, then applies" "$(marker)" "2.0.0"
+has "  and logs the wait" "$(cat "$H/.claude/logs/governance-update.log" 2>/dev/null)" "session-end: waited"
+hasnt "  the wait is not charged to the apply budget (no timeout rollback)" "$(cat "$H/.claude/logs/governance-update.log" 2>/dev/null)" "reason=timeout"
+kill "$_hold" 2>/dev/null; wait "$_hold" 2>/dev/null
+# A LIVE apply is not "interrupted", and its journal must not come back as "still running - nothing done".
+use_home "$STAGED"; live_sess sess-a
+sleep 6 >/dev/null 2>&1 </dev/null & _hold=$!
+printf 'version=2.0.0\nfrom=1.9.0\nstarted=x\nbackup=%s/none\npid=%s\n' "$SB" "$_hold" > "$U_/APPLYING"
+mkdir -p "$U_/lock.d"; printf 'pid=%s since=x mode=apply\n' "$_hold" > "$U_/lock.d/info"
+sess_end "$(pl_end sess-a other)"
+has "live apply at SessionEnd: 'already being applied', not 'interrupted'" "$(cat "$SB/se.out")" "an update is already being applied in the background (pid $_hold)"
+wait "$_hold" 2>/dev/null
+wait_until 60 '[ ! -d "$U_/lock.d" ] && [ ! -f "$U_/APPLYING" ]'
+hasnt "  REPORT never says 'still running - nothing done'" "$(cat "$U_/REPORT" 2>/dev/null)" "nothing done"
+rm -rf "$U_/lock.d"
+# A second SessionEnd while a child is writing REPORT must not lose that child's line: rotation is
+# in place and skipped while the lock is held.
+use_home "$STAGED"; live_sess sess-a
+printf '[GOVERNANCE UPDATE] line from a running child\n' > "$U_/REPORT"
+exec 7>>"$U_/REPORT"
+mkdir -p "$U_/lock.d"; sleep 6 >/dev/null 2>&1 </dev/null & _hold=$!; printf 'pid=%s since=x mode=apply\n' "$_hold" > "$U_/lock.d/info"
+sess_end "$(pl_end sess-a other)"
+printf '[GOVERNANCE UPDATE] Applied vX by the running child\n' >&7; exec 7>&-
+has "a second SessionEnd keeps the running child's REPORT line" "$(cat "$U_/REPORT" 2>/dev/null)" "Applied vX by the running child"
+wait "$_hold" 2>/dev/null; wait_until 120 '[ ! -d "$U_/lock.d" ] && [ "$(marker)" = "2.0.0" ]'
+# REPORT is bounded: the launcher keeps its last 50 lines before the child appends.
+use_home "$STAGED"; live_sess sess-a
+for _i in $(seq 1 80); do echo "[GOVERNANCE UPDATE] old line $_i"; done > "$U_/REPORT"
+sess_end "$(pl_end sess-a other)"
+wait_until 120 '[ "$(marker)" = "2.0.0" ] && [ ! -d "$U_/lock.d" ]'
+is "REPORT bounded (<= 50 old lines + the new result)" "$([ "$(grep -c 'old line' "$U_/REPORT")" -le 50 ] && echo yes || echo "no ($(grep -c 'old line' "$U_/REPORT"))")" "yes"
+has "  the newest result is kept" "$(cat "$U_/REPORT")" "Applied v2.0.0"
+use_home "$STAGED"; live_sess sess-a
+ln -s "$SB/elsewhere" "$U_/REPORT" 2>/dev/null
+if [ -L "$U_/REPORT" ]; then
+  sess_end "$(pl_end sess-a other)"
+  sleep "$SE_NEG_WAIT"
+  is "REPORT as a symlink: refused, nothing started, nothing written through it" "$([ -e "$SB/elsewhere" ] || [ -d "$U_/lock.d" ] || [ "$(marker)" != "1.9.0" ] && echo written || echo refused)" "refused"
+else
+  echo "  (no real symlinks on this filesystem - symlink case skipped)"
+fi
 fi
 
 if want BUDGET; then
@@ -982,6 +1188,62 @@ else
   fi
 fi
 fi
+# ── mutants of the SessionEnd trigger (2026-09-27): each must turn a [SESSIONEND] assertion red ──
+if want M5 || want M6 || want M7 || want M9; then
+  command -v sess_end >/dev/null 2>&1 || bad "M5-M9 need [SESSIONEND]'s helpers - run them with SESSIONEND"
+fi
+if want M5 && command -v sess_end >/dev/null 2>&1; then
+echo "(${SECONDS}s) [M5] mutant: the child is not told which session ended"
+m=$(mutant M5 's/GOV_SESSION_ID="\$sid" GOV_SESSION_SOURCE="\$src"/GOV_SESSION_SOURCE="$src"/')
+if [ -z "$m" ]; then bad "M5: the sed did not change gov-update.sh - the mutant is void"
+else
+  # The closed marker normally excludes the ending session on its own; the id passed to the child is
+  # the second layer, for when the marker cannot be written. Make it unwritable (a directory by that
+  # name), prove the real script still applies, then that the mutant defers.
+  use_home "$STAGED"; live_sess sess-a; mkdir -p "$H/.claude/logs/sessions/sess-a/.gov-session-closed"
+  sess_end "$(pl_end sess-a other)"
+  wait_until 120 '[ "$(marker)" = "2.0.0" ] && [ ! -d "$U_/lock.d" ]'
+  is "closed marker unwritable: the ending session is still excluded by its id -> applied" "$(marker)" "2.0.0"
+  use_home "$STAGED"; live_sess sess-a; mkdir -p "$H/.claude/logs/sessions/sess-a/.gov-session-closed"
+  sess_end "$(pl_end sess-a other)" "$m"
+  wait_until 60 'grep -q "deferred v2.0.0" "$H/.claude/logs/governance-update.log" 2>/dev/null && [ ! -d "$U_/lock.d" ]'
+  is "M5: without the id the ending session counts as live and the apply defers (so the case above can fail)" "$(marker)" "1.9.0"
+fi
+fi
+if want M6 && command -v sess_end >/dev/null 2>&1; then
+echo "(${SECONDS}s) [M6] mutant: the apply runs synchronously inside the hook"
+m=$(mutant M6 's|>> "\$rep" 2>&1 </dev/null &$|>> "$rep" 2>\&1 </dev/null|')
+if [ -z "$m" ]; then bad "M6: the sed did not change gov-update.sh - the mutant is void"
+else
+  use_home "$STAGED"; live_sess sess-a
+  sess_end "$(pl_end sess-a other)" "$m"
+  is "M6: the launcher returns only after the apply (so 'detached' can fail)" "$(cat "$SB/se.marker")" "2.0.0"
+fi
+fi
+if want M7 && command -v sess_end >/dev/null 2>&1; then
+echo "(${SECONDS}s) [M7] mutant: the child inherits the hook's stdout"
+m=$(mutant M7 's|>> "\$rep" 2>&1 </dev/null &$|\&|')
+if [ -z "$m" ]; then bad "M7: the sed did not change gov-update.sh - the mutant is void"
+else
+  use_home "$STAGED"; live_sess sess-a
+  sess_end "$(pl_end sess-a other)" "$m"
+  is "M7: the pipe stays open until the child exits (so the < 5 s EOF check can fail)" "$([ "$(cat "$SB/se.ms")" -ge 5000 ] || [ "$(cat "$SB/se.marker")" = "2.0.0" ] && echo held || echo "closed ($(cat "$SB/se.ms") ms)")" "held"
+  wait_until 60 '[ ! -d "$U_/lock.d" ]'
+fi
+fi
+if want M9 && command -v sess_end >/dev/null 2>&1; then
+echo "(${SECONDS}s) [M9] mutant: the ending session is not marked closed"
+m=$(mutant M9 's|: > "\$CH/logs/sessions/\$sid/.gov-session-closed" 2>/dev/null|:|')
+if [ -z "$m" ]; then bad "M9: the sed did not change gov-update.sh - the mutant is void"
+else
+  use_home "$STAGED"; live_sess sess-a; live_sess sess-b
+  sess_end "$(pl_end sess-a other)" "$m"
+  wait_until 60 '[ "$(grep -c "deferred v2.0.0" "$H/.claude/logs/governance-update.log" 2>/dev/null)" -ge 1 ] && [ ! -d "$U_/lock.d" ]'
+  sess_end "$(pl_end sess-b other)" "$m"
+  wait_until 60 '[ "$(grep -c "deferred v2.0.0" "$H/.claude/logs/governance-update.log" 2>/dev/null)" -ge 2 ] && [ ! -d "$U_/lock.d" ]'
+  is "M9: the first session still looks live, so the last to end defers too (so the two-session case can fail)" "$(marker)" "1.9.0"
+fi
+fi
 
 if [ "${GOV_TEST_SLOW:-0}" = "1" ] && want SLOW; then
 echo "(${SECONDS}s) [SLOW] one fetch with the REAL deep verify (scanner selftest on the staged tree)"
@@ -994,7 +1256,11 @@ if [ "${GOV_TEST_T12:-0}" = "1" ]; then
 echo "(${SECONDS}s) [T12] apply wall time (run on the owner's box, under load, by hand)"
 for i in $(seq 1 "${GOV_TEST_T12_RUNS:-10}"); do
   use_home "$STAGED"
-  _s=$(date +%s%N); _o=$(upd --apply-if-ready); _e=$(date +%s%N)
+  if [ "${GOV_TEST_T12_NICE:-0}" = "1" ]; then
+    _s=$(date +%s%N); _o=$(SRCKIND=session-end UPD_SCRIPT= nice -n 19 bash -c "$(declare -f upd); $(declare -p H URL 2>/dev/null); upd --apply-if-ready"); _e=$(date +%s%N)
+  else
+    _s=$(date +%s%N); _o=$(upd --apply-if-ready); _e=$(date +%s%N)
+  fi
   _r=$(grep -o 'mv retries [0-9]*' "$H/.claude/logs/governance-update.log" | tail -1)
   printf '  T12 run %s: %s ms, %s, %s\n' "$i" "$(( (_e - _s) / 1000000 ))" "$_r" "$(case "$_o" in *Applied*) echo applied ;; *) echo "NOT APPLIED: $_o" ;; esac)"
 done

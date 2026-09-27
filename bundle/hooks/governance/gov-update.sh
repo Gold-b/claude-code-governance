@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # gov-update.sh — signed, verified, rollback-safe automatic updates of this framework (2.0.0).
 #
-# invoked-by:pre-session.sh — `--fetch <ver>` detached when a newer version is published. Since
-# 2026-09-26 pre-session.sh NEVER runs `--apply-if-ready`: a SessionStart hook blocks Claude Code's
-# start-up (the VS Code extension fails at 60 s), so it only reports READY/APPLYING and a human runs
-# `--apply` (until a new automatic trigger is chosen; SessionStart will not be it again).
+# invoked-by:pre-session.sh — `--fetch <ver>` detached when a newer version is published, and
+# `--recover-detached` when an apply died mid-swap. REGISTERED on SessionEnd as
+# `--apply-at-session-end` (2026-09-27): the automatic apply runs in the background after a session
+# ends, never at session start (a SessionStart hook blocks Claude Code's start-up and the VS Code
+# extension fails at 60 s; an apply takes 18-28 s). pre-session.sh prints the result from REPORT at
+# the next start. NOT CHECKED yet: that the VS Code extension fires SessionEnd and lets the detached
+# child live, and Linux/macOS (MEASURED on Windows with the terminal CLI) - if the child dies, the
+# update waits and the start line offers `--apply --force-live`; a half-done apply is restored.
 # Every other mode is for a human or for the release tool / tests.
 #
 # THE CONTRACT, in one paragraph. A release is installed only when its RELEASE-MANIFEST verifies
@@ -22,6 +26,9 @@
 # when a caller has one, arrives in GOV_SESSION_ID; pre-session.sh passes none since 2026-09-26):
 #   --fetch <ver>          Phase A: download, verify, stage, write READY. Silent; logs only.
 #   --apply-if-ready       Phase B when READY exists and every guard passes; else one line or nothing.
+#   --apply-at-session-end The SessionEnd hook: reads its payload, marks its session closed, and starts
+#                          --apply-if-ready detached when a release is staged (or an apply died).
+#   --recover-detached     pre-session.sh: roll an interrupted apply back, detached. Never applies.
 #   --apply [--force-live] Phase B now (human). --force-live ignores the live-session deferral.
 #   --rollback [<dir>]     Restore the last (or the named) update backup and halt that version.
 #   --status               What is installed, staged, halted, pinned, accepted.
@@ -64,8 +71,14 @@ set +e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR="."
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { echo "[GOVERNANCE UPDATE] cannot load _common.sh beside $0 - nothing done" >&2; exit 1; }
-# shellcheck source=/dev/null
-. "$SCRIPT_DIR/release-manifest.sh" 2>/dev/null || { echo "[GOVERNANCE UPDATE] cannot load release-manifest.sh beside $0 - nothing done" >&2; exit 1; }
+# The SessionEnd launcher and the recovery spawner verify nothing themselves (their detached child
+# loads this again), and every Claude Code exit waits for the launcher: skip ~0.1-0.3 s of parsing.
+case "${1:-}" in
+  --apply-at-session-end|--recover-detached) ;;
+  *)
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/release-manifest.sh" 2>/dev/null || { echo "[GOVERNANCE UPDATE] cannot load release-manifest.sh beside $0 - nothing done" >&2; exit 1; } ;;
+esac
 
 CH="$HOME/.claude"
 UPD="$CH/.governance-update"
@@ -97,11 +110,20 @@ MV_RETRIES=0
 
 # ── small helpers ────────────────────────────────────────────────────────────────────────────
 upd_log() {
-  local m
-  m=$(printf '%s' "$2" | tr -d '\n\r' | tr -cd '[:print:]')
+  local m="" ts=""
+  # Builtins on bash >= 4.2 (the same byte-for-byte result as `tr | tr` + `date`, see gov_log): the
+  # SessionEnd launcher logs on every Claude Code exit, and three forks each are ~0.1 s on Windows.
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
+    local LC_ALL=C
+    m="${2//[$'\n\r']/}"; m="${m//[^[:print:]]/}"
+    printf -v ts '%(%Y-%m-%d %H:%M:%S)T' -1 2>/dev/null || ts=""
+  else
+    m=$(printf '%s' "$2" | tr -d '\n\r' | tr -cd '[:print:]')
+  fi
+  [ -n "$ts" ] || ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
   [ -d "${LOGF%/*}" ] || mkdir -p "${LOGF%/*}" 2>/dev/null
   [ -L "$LOGF" ] && return 0
-  printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$1" "$m" >> "$LOGF" 2>/dev/null
+  printf '[%s] [%s] %s\n' "$ts" "$1" "$m" >> "$LOGF" 2>/dev/null
 }
 say() { printf '[GOVERNANCE UPDATE] %s\n' "$*"; }
 # upd_tilde <path> -> the path with $HOME shown as ~. NOT ${p/#$HOME/~}: bash tilde-expands that
@@ -527,17 +549,45 @@ upd_restore() {
 
 # upd_rollback <ver> <reason> <backup-dir> [detail]
 upd_rollback() {
-  local ver="$1" reason="$2" bk="$3" detail="${4:-}" ok="restored"
+  local ver="$1" reason="$2" bk="$3" detail="${4:-}" ok="restored" n=0 retry=0
   upd_restore "$bk" || ok="PARTIALLY restored (see the log)"
   rm -rf "$UPD"/prep.* "$UPD"/gi-prep.* 2>/dev/null
-  rm -f "$UPD/APPLYING" "$UPD/READY"
-  upd_halt "$ver" "$reason" "$detail"
+  rm -f "$UPD/APPLYING"
+  # interrupted / timeout / verify-timeout say nothing about the RELEASE: the process was killed, or the machine was
+  # shut down, slept or overloaded mid-apply - and since 2026-09-27 the apply runs exactly when people
+  # close sessions and shut down. Blocking the version on the first such event would stop automatic
+  # updates until a human ran --clear-halt. So those two are retried at the next SessionEnd (READY and
+  # the staged tree are kept; the tree is re-verified before any retry) and halt on the 3rd. Every
+  # other reason is about the release itself and halts at once, as before.
+  case "$reason" in
+    interrupted|timeout|verify-timeout)
+      if gov_is_semver "$ver" && [ "$ok" = "restored" ]; then
+        n=$(( $(upd_count "$UPD/retry-$ver") + 1 )); upd_write "$UPD/retry-$ver" "$n"
+        [ "$n" -lt 3 ] && retry=1
+      fi ;;
+  esac
+  if [ "$retry" = "1" ]; then
+    :   # READY kept
+  else
+    rm -f "$UPD/READY"
+    upd_halt "$ver" "$reason" "$detail"
+  fi
   if [ -f "$GI/verify.sh" ] && command -v timeout >/dev/null 2>&1; then
     timeout 10 bash "$GI/verify.sh" >/dev/null 2>&1 </dev/null
     upd_log rollback "post-rollback verify.sh rc=$?"
   fi
-  upd_log rollback "ROLLED-BACK v$ver reason=$reason backup=$bk ($ok) $detail"
-  say "v$ver could NOT be applied ($reason) - everything was $ok from $(upd_tilde "$bk"). Details: ~/.claude/logs/governance-update.log. v$ver will not be retried; after fixing the cause run: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt"
+  upd_log rollback "ROLLED-BACK v$ver reason=$reason backup=$bk ($ok) $detail$([ "$retry" = "1" ] && printf ' - retry %s of 3 at the next SessionEnd' "$n")"
+  if [ "$retry" = "1" ]; then
+    # Three attempts in all: failures 1 and 2 are retried, the 3rd halts. Only promise an automatic
+    # retry where one will actually happen (not opted out, not the release source machine).
+    if upd_auto_enabled && ! upd_is_source; then
+      say "v$ver could NOT be applied ($reason) - everything was $ok from $(upd_tilde "$bk"). Nothing to do: it is tried again when a Claude Code session next ends (failed attempt $n of 3; the third halts it)."
+    else
+      say "v$ver could NOT be applied ($reason) - everything was $ok from $(upd_tilde "$bk"). Automatic updates are off here, so retry it by hand: bash ~/.claude/hooks/governance/gov-update.sh --apply (failed attempt $n of 3)."
+    fi
+  else
+    say "v$ver could NOT be applied ($reason) - everything was $ok from $(upd_tilde "$bk"). Details: ~/.claude/logs/governance-update.log. v$ver will not be retried; after fixing the cause run: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt"
+  fi
 }
 
 # upd_recover: an APPLYING journal survived its process (hook killed at its timeout, a crash).
@@ -577,11 +627,107 @@ upd_other_live() {
   done
 }
 
+# ── The automatic trigger: SessionEnd, detached (2026-09-27) ─────────────────────────────────
+# Not SessionStart: its hooks block Claude Code's start-up and the VS Code extension fails a start
+# that takes 60 s, while an apply takes 18-28 s. At SessionEnd the session that triggers the swap is
+# over, so the only sessions that could be running hooks mid-swap are OTHER sessions, and those make
+# the apply defer (upd_other_live). With several sessions open, the last one to end applies.
+#
+# upd_spawn_detached <sid> <source>: starts `--apply-if-ready` in the background and returns at
+# once. The child owns nothing of the caller: stdin /dev/null, stdout+stderr appended to REPORT
+# (printed by pre-session.sh at the next start), no session secrets, low priority, 600 s ceiling.
+# MEASURED 2026-09-27 (Windows, terminal CLI): a nohup child of a SessionEnd hook kept running 25 s
+# after claude exited (ppid 1). NOT CHECKED: the VS Code extension, Linux, macOS (OPEN-PROBLEMS).
+upd_spawn_detached() {
+  local sid="$1" src="$2" rep="$UPD/REPORT" pre=()
+  mkdir -p "$UPD" 2>/dev/null || return 1
+  [ -L "$rep" ] && { upd_log spawn "REPORT is a symlink - refusing to write through it"; return 1; }
+  # Bound it before the child appends: the last 50 lines, rewritten IN PLACE (same file, never a
+  # rename: an earlier child may still hold it open for appending, and a replaced file would take
+  # that child's result line with it). Skipped while another update process holds the lock.
+  # Only when it has actually grown past the bound, which keeps the small check-then-rewrite window
+  # (another child could write a quick line inside it) to a rare event rather than every SessionEnd.
+  if [ -f "$rep" ] && [ ! -d "$LOCK" ] && [ "$(wc -l < "$rep" 2>/dev/null | tr -d ' ')" -gt 50 ] 2>/dev/null; then
+    tail -n 50 "$rep" > "$rep.tmp.$$" 2>/dev/null && cat "$rep.tmp.$$" > "$rep" 2>/dev/null
+    rm -f "$rep.tmp.$$" 2>/dev/null
+  fi
+  command -v timeout >/dev/null 2>&1 && pre+=(timeout 600)
+  command -v nice >/dev/null 2>&1 && pre+=(nice -n 19)
+  GOV_SESSION_ID="$sid" GOV_SESSION_SOURCE="$src" GOV_UPDATE_DETACHED=1 \
+    nohup env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
+    ${pre[@]+"${pre[@]}"} bash "$SCRIPT_DIR/gov-update.sh" --apply-if-ready >> "$rep" 2>&1 </dev/null &
+  disown 2>/dev/null
+  return 0
+}
+
+# upd_session_end: the registered SessionEnd hook (--apply-at-session-end). Returns in about a second
+# (0.5 s idle, up to ~1.5 s under load on Windows, mostly bash + _common.sh start-up): a few file
+# tests, one log line, at most one spawn.
+upd_session_end() {
+  local sid reason re='"reason"[[:space:]]*:[[:space:]]*"([A-Za-z_-]*)"' ver=""; local jp=""
+  gov_disabled && return 0
+  gov_dry && return 0
+  # Only a plain id becomes a path below: no dots at all, so "." / ".." cannot name a parent.
+  sid=$(gov_session_id); case "$sid" in ''|*[!A-Za-z0-9_-]*) sid="" ;; esac
+  reason=""; [[ "${_GOV_HOOK_INPUT:-}" =~ $re ]] && reason="${BASH_REMATCH[1]}"
+  upd_log session-end "reason=${reason:-<none>} session=${sid:-<none>}"
+  # /clear ends a conversation, not the session: the human is mid-task. Checked BEFORE the closed
+  # marker - on a node whose pre-session never clears that marker, a live session would read closed.
+  if [ "$reason" = "clear" ]; then
+    upd_log session-end "reason=clear (mid-task): nothing marked, nothing applied"
+    return 0
+  fi
+  # This session is over: later SessionEnds (and the apply's own live check) must not count it.
+  if [ -n "$sid" ] && [ -d "$CH/logs/sessions/$sid" ]; then
+    : > "$CH/logs/sessions/$sid/.gov-session-closed" 2>/dev/null
+  fi
+  [ -f "$UPD/READY" ] || [ -f "$UPD/APPLYING" ] || return 0
+  # An interrupted apply is restored whatever the opt-out says; a new apply is not started for an
+  # opted-out machine or on the machine releases are cut from - and nothing says "applying" there.
+  if [ ! -f "$UPD/APPLYING" ]; then
+    upd_auto_enabled || { upd_log session-end "READY present but automatic updates are off - nothing started"; return 0; }
+    if upd_is_source; then upd_log session-end "source machine ($SRC_REASON) - nothing started"; return 0; fi
+    ver=$(sed -n 's/^version=\([0-9.]*\).*/\1/p' "$UPD/READY" 2>/dev/null | head -1)
+    gov_is_semver "$ver" || ver=""
+  fi
+  upd_spawn_detached "$sid" session-end || return 0
+  upd_log session-end "started --apply-if-ready in the background${ver:+ for v$ver}"
+  jp=""; [ -f "$UPD/APPLYING" ] && jp=$(upd_journal pid)
+  if [ -n "$jp" ] && upd_alive "$jp"; then
+    # Not interrupted - running. The child just started waits for it, then decides afresh.
+    say "an update is already being applied in the background (pid $jp); its result prints at the next session start."
+  elif [ -f "$UPD/APPLYING" ]; then
+    say "an interrupted update is being rolled back in the background now that this session has ended; the result prints at the next session start."
+  else
+    say "applying ${ver:+v$ver }in the background now that this session has ended; the result prints at the next session start."
+  fi
+}
+
 # ── Phase B ──────────────────────────────────────────────────────────────────────────────────
 upd_apply() {  # upd_apply <auto 1|0> <force_live 1|0>
   local auto="$1" force_live="$2" src ver inst cmp st need have others nd names mod mode hashlist jp \
         need_kb avail_kb newmap known coll
   [ -n "$APPLY_BUDGET" ] || { if [ "$auto" = "1" ]; then APPLY_BUDGET=50; else APPLY_BUDGET=600; fi; }
+  # Two sessions ending close together: the first one's child may hold the lock (applying, or about
+  # to defer because the second session still looked live). Returning at `upd_lock` below would
+  # leave nobody to apply - so a SessionEnd child WAITS for a live lock holder to finish, then
+  # decides afresh. Bounded (the holder's own budget is < 2 min; the spawn's timeout is 600 s), and
+  # nobody is waiting on this process. Before the APPLYING check, so a live apply's journal is not
+  # reported as "still running - nothing done" into REPORT.
+  if [ "$auto" = "1" ] && [ "${GOV_SESSION_SOURCE:-}" = "session-end" ]; then
+    local w=0 lp=""
+    while [ -d "$LOCK" ] && [ "$w" -lt 150 ]; do
+      lp=$(sed -n 's/^pid=\([0-9]*\).*/\1/p' "$LOCK/info" 2>/dev/null | head -1)
+      [ -n "$lp" ] && ! kill -0 "$lp" 2>/dev/null && break   # a dead holder: upd_lock breaks it
+      sleep 2; w=$((w + 2))
+    done
+    if [ "$w" -gt 0 ]; then
+      upd_log apply "session-end: waited ${w}s for another update process (pid ${lp:-?})"
+      # The budget below is measured on SECONDS: the wait must not be charged to the apply, or a
+      # child that waited 30 s would time out mid-swap (and count a retry against a valid release).
+      SECONDS=0
+    fi
+  fi
   # An interrupted apply is recovered FIRST, whatever else is true: restoring a half-applied tree
   # is not an update, so opting out, the source flag or a compact/clear start must not leave it.
   if [ -f "$UPD/APPLYING" ]; then
@@ -595,10 +741,15 @@ upd_apply() {  # upd_apply <auto 1|0> <force_live 1|0>
   fi
   if upd_is_source; then upd_log apply "reason=source-machine ($SRC_REASON)"; return 0; fi
   if [ "$auto" = "1" ]; then
+    # session-end is the production trigger (2026-09-27): the SessionEnd launcher, detached, after the
+    # session is over. startup/resume are no longer passed by anything shipped (pre-session.sh never
+    # applies) but stay valid for the tests and a hand-run. compact/clear fire mid-task, and
+    # `recovery` is pre-session's detached restore: it may roll an interrupted apply BACK (handled
+    # above, before this) but must never start a new apply at session start.
     src="${GOV_SESSION_SOURCE:-startup}"
     case "$src" in
-      startup|resume) ;;
-      *) upd_log apply "not applied at SessionStart source=$src (mid-task); READY kept"; return 0 ;;
+      session-end|startup|resume) ;;
+      *) upd_log apply "not applied, source=$src (mid-task or session start); READY kept"; return 0 ;;
     esac
   fi
   [ -f "$UPD/READY" ] || { [ "$auto" = "0" ] && say "nothing is staged - no verified release is waiting to be applied."; return 0; }
@@ -644,7 +795,12 @@ upd_apply() {  # upd_apply <auto 1|0> <force_live 1|0>
         # human who has just closed every session needs the override to get anywhere.
         names="$names If every Claude Code session is closed, apply now: bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
       fi
-      say "v$ver is verified and staged; it is not applied while another Claude Code session looks active (deferred $nd time(s)).$names"
+      # From the SessionEnd launcher this is the common case (another session is still open) and its
+      # stdout lands in REPORT, printed at the next start: the log only, or every start is noise. The
+      # READY line at session start already says what is waiting; --status shows the count.
+      if [ "$auto" = "1" ] && [ "$src" = "session-end" ]; then :; else
+        say "v$ver is verified and staged; it is not applied while another Claude Code session looks active (deferred $nd time(s)).$names"
+      fi
       upd_log apply "deferred v$ver: $(printf '%s\n' "$others" | grep -c .) live session(s), deferral $nd"
       return 0
     fi
@@ -782,7 +938,7 @@ upd_do_apply() {
     if [ "$slow" -ge 3 ]; then
       say "v$ver is staged but this machine was too busy to apply it $slow times in a row. Nothing changed. Apply it when the machine is idle: bash ~/.claude/hooks/governance/gov-update.sh --apply"
     else
-      say "v$ver not applied: the machine is too busy to finish in time. Nothing changed; run the apply again when it is idle: bash ~/.claude/hooks/governance/gov-update.sh --apply"
+      say "v$ver not applied: the machine is too busy to finish in time. Nothing changed; it is tried again when the next Claude Code session ends."
     fi
     return 0
   fi
@@ -843,7 +999,10 @@ upd_do_apply() {
   else
     bash "$st/verify.sh" >/dev/null 2>&1 </dev/null; vrc=$?
   fi
-  if [ "$vrc" = "124" ]; then upd_rollback "$ver" timeout "$bk" "verify.sh did not finish in ${VERIFY_TIMEOUT}s"; return 0; fi
+  # Its own reason (verify-timeout), and RETRIED like `timeout`: at nice 19 on a loaded machine a
+  # healthy verify.sh can outrun its 20 s, and blocking a valid release for that would be wrong. A
+  # verify.sh that really hangs still halts - on the third attempt (upd_rollback).
+  if [ "$vrc" = "124" ]; then upd_rollback "$ver" verify-timeout "$bk" "verify.sh did not finish in ${VERIFY_TIMEOUT}s"; return 0; fi
   if [ "$vrc" != "0" ]; then upd_rollback "$ver" verify-failed "$bk" "verify.sh exit $vrc"; return 0; fi
 
   # 7. Commit the new state.
@@ -856,7 +1015,7 @@ upd_do_apply() {
     upd_log apply "pinned release key(s) updated by v$ver (chained trust)"
   fi
   upd_write "$CH/.governance-version" "$ver"
-  rm -f "$UPD/READY" "$UPD/APPLYING" "$UPD/deferrals" "$UPD/apply-slow" "$UPD"/fetch-attempts-* "$UPD"/fetch-404-* 2>/dev/null
+  rm -f "$UPD/READY" "$UPD/APPLYING" "$UPD/deferrals" "$UPD/apply-slow" "$UPD"/fetch-attempts-* "$UPD"/fetch-404-* "$UPD"/retry-* 2>/dev/null
   rm -rf "$st"
   upd_log apply "APPLIED v$from -> v$ver ($(relman_get "$UPD/installed.manifest" files) files verified, $UPD_PLACED dir batches, $(printf '%s\n' "$dels" | grep -c .) removed, mv retries $MV_RETRIES, ${SECONDS}s) backup=$bk"
   say "Applied v$ver automatically (was v$from; signed release, $(relman_get "$UPD/installed.manifest" files) files verified). Backup: $(upd_tilde "$bk"). Roll back: bash ~/.claude/hooks/governance/gov-update.sh --rollback. Opt out of automatic updates: GOV_AUTO_UPDATE=0. Restart Claude Code if a hook or agent was added.${GI_NOTE:-}"
@@ -940,6 +1099,7 @@ upd_status() {
   fi
   if [ -f "$LOCK/info" ]; then echo "  lock:             $(head -1 "$LOCK/info")"; fi
   if [ -f "$UPD/APPLYING" ]; then echo "  APPLYING:         v$(upd_journal version) pid $(upd_journal pid) since $(upd_journal started)"; fi
+  if [ -s "$UPD/REPORT" ]; then echo "  pending report:   $(grep -m1 -F '[GOVERNANCE UPDATE]' "$UPD/REPORT" 2>/dev/null | cut -c1-160)"; fi
   if [ -f "$UPD/terms-accepted" ]; then echo "  terms:            $(head -1 "$UPD/terms-accepted")"; else echo "  terms:            not accepted"; fi
   echo "  install mode:     $(head -1 "$UPD/install-mode" 2>/dev/null || echo unknown)"
   echo "  deferrals:        $(upd_count "$UPD/deferrals")"
@@ -979,12 +1139,12 @@ upd_accept_terms() {
   mkdir -p "$UPD"
   upd_write "$UPD/terms-accepted" "terms_version=$tv accepted_at=$(now_iso) framework_version=$(upd_installed_version) method=$method"
   upd_log terms "terms v$tv accepted ($method)"
-  say "terms v$tv accepted ($method). To install the staged release: close every Claude Code session, then run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
+  say "terms v$tv accepted ($method). The staged release installs itself when the last Claude Code session ends; to install now instead, close every session and run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
 }
 
 upd_clear_halt() {
   local f n=0
-  for f in "$UPD"/HALT-* "$UPD"/fetch-attempts-* "$UPD"/fetch-404-* "$UPD/deferrals" "$UPD/apply-slow" "$UPD"/.advised-gaveup-*; do
+  for f in "$UPD"/HALT-* "$UPD"/fetch-attempts-* "$UPD"/fetch-404-* "$UPD/deferrals" "$UPD/apply-slow" "$UPD"/retry-* "$UPD"/.advised-gaveup-*; do
     [ -e "$f" ] || continue
     rm -f "$f" && n=$((n + 1))
   done
@@ -1058,6 +1218,15 @@ case "${1:-}" in
   --apply-if-ready)
     gov_disabled && exit 0
     upd_apply 1 0; exit 0 ;;
+  --apply-at-session-end)
+    upd_session_end; exit 0 ;;
+  --recover-detached)
+    # pre-session.sh, when an apply died mid-swap: restore it in the background (the restore is ~17 s
+    # and never interruptible, so it cannot run inside a 10 s SessionStart hook). Source `recovery`
+    # rolls back only - upd_apply refuses to START an apply for it.
+    gov_disabled && exit 0
+    [ -f "$UPD/APPLYING" ] || exit 0
+    upd_spawn_detached "" recovery; exit 0 ;;
   --apply)
     if [ "${2:-}" = "--force-live" ]; then upd_apply 0 1; else upd_apply 0 0; fi; exit 0 ;;
   --rollback)       upd_manual_rollback "${2:-}"; exit $? ;;
@@ -1068,5 +1237,8 @@ case "${1:-}" in
   --selftest)       upd_selftest; exit $? ;;
   *)
     sed -n '/^# Modes/,/^# Environment/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
-    exit 2 ;;
+    # On its own line: the selftest's NOBLOCK mutant rewrites `exit 2` lines, and case_gov_update_hook
+    # asserts rc=2 here - so an unknown flag can never be silently taken as success.
+    exit 2
+    ;;
 esac

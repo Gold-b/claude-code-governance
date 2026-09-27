@@ -226,6 +226,7 @@ _run() {
       GOV_NOTIFY=0 GOV_WHATSAPP=0 GOVERNANCE_UPDATE_CHECK=0 \
       GOVERNANCE_HOOKS=1 GOV_ROLE_FRAMEWORK=1 GOV_COLLISION_GUARD=1 \
       GOV_SESSION_ID="$sid" GIT_TERMINAL_PROMPT=0 \
+      ${_RUN_ENV[@]+"${_RUN_ENV[@]}"} \
       "${runner[@]}"
   ) > "$IO_OUT" 2> "$IO_ERR"
   RC=$?
@@ -321,6 +322,7 @@ case_fn_for() {
     cross-session-guard.sh)     echo case_cross_session_guard ;;
     render-gate.sh)             echo case_render_gate ;;
     render-rules-read.sh)       echo case_render_rules_read ;;
+    gov-update.sh)              echo case_gov_update_hook ;;   # SessionEnd --apply-at-session-end (2026-09-27)
     *) echo "" ;;
   esac
 }
@@ -366,6 +368,38 @@ case_gov_update() {
   else
     _bad "tests/test-gov-update.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E '^  FAIL|pass=' | head -6)")"
   fi
+}
+
+# --- gov-update.sh --apply-at-session-end: the registered SessionEnd trigger (2026-09-27) ---------
+case_gov_update_hook() {
+  # The runner exports GOVERNANCE_UPDATE_CHECK=0 for every hook; this one is inert under it, so it is
+  # switched back on here, with the source-machine signals emptied (the owner's machine IS one) and a
+  # version marker planted. A READY with no staged tree is the fast must-fire: the detached child
+  # removes it in well under a second ("READY without a staged tree"), proving the child really ran.
+  local proj="$SBX/proj" U="$SBX_HOME/.claude/.governance-update" n=0
+  fx_project "$proj" SOURCE "$(_winform "$proj")"
+  fx_state_reset
+  mkdir -p "$U"; rm -f "$U/READY" "$U/APPLYING" "$U/REPORT"; rm -rf "$U/lock.d"
+  printf '1.0.0\n' > "$SBX_HOME/.claude/.governance-version"
+  _RUN_ENV=(GOVERNANCE_UPDATE_CHECK=1 GOV_AUTO_UPDATE=1 GOV_REPO_PATH= GOV_RELEASE_KEY=)
+  run_hook "$proj" "sid-gu-1" '{"session_id":"sid-gu-1","hook_event_name":"SessionEnd","reason":"other"}' --apply-at-session-end
+  expect_rc 0 "nothing staged: the SessionEnd hook never blocks"
+  expect_quiet "nothing staged: silent"
+  printf 'version=9.9.9 staged\n' > "$U/READY"
+  run_hook "$proj" "sid-gu-2" '{"session_id":"sid-gu-2","hook_event_name":"SessionEnd","reason":"clear"}' --apply-at-session-end
+  expect_quiet "reason=clear (mid-task): silent, nothing started"
+  if [ -f "$U/READY" ]; then _ok "reason=clear: READY kept"; else _bad "reason=clear: READY kept" "READY was consumed on a /clear"; fi
+  run_hook "$proj" "sid-gu-3" '{"session_id":"sid-gu-3","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}' --apply-at-session-end
+  expect_rc 0 "READY staged: the hook still exits 0"
+  expect_has "applying v9.9.9 in the background" "READY staged: the apply is started in the background"
+  while [ -f "$U/READY" ] && [ "$n" -lt 30 ]; do sleep 0.5; n=$((n+1)); done
+  if [ ! -f "$U/READY" ]; then _ok "the detached child ran (it consumed a READY with no staged tree)"
+  else _bad "the detached child ran" "READY still present 15 s later - nothing was started"; fi
+  n=0; while [ -d "$U/lock.d" ] && [ "$n" -lt 20 ]; do sleep 0.5; n=$((n+1)); done
+  run_hook "$proj" "sid-gu-4" '' --no-such-flag
+  expect_rc 2 "an unknown flag is refused (rc=2), not taken as a mode"
+  _RUN_ENV=()
+  rm -f "$U/READY" "$U/REPORT" "$SBX_HOME/.claude/.governance-version"
 }
 
 # --- enumerate-before-claiming.sh ---------------------------------------------------------------

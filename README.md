@@ -76,17 +76,18 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (22 scripts, all registered in `~/.claude/settings.json`)
+### Hooks (26 scripts, all registered in `~/.claude/settings.json`)
 
 Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
-is registered on two events and `pr-watch-guard.sh` on three, so the table has 25 rows over 22
-distinct scripts.
+and `sync-governance-copies.sh` are registered on two events and `pr-watch-guard.sh` on three, so
+the table has 30 rows over 26 distinct scripts (counted 2026-09-27).
 
 | Event | Script | Purpose |
 |---|---|---|
 | SessionStart | `canonical-cwd-check.sh` | Refuses a session opened on a stale or duplicate checkout |
-| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update. Since v2.0.0 it also starts the automatic update's detached background download + verify when a newer version is published, and reports a verified release that is waiting (or an interrupted apply) in one line. It never runs the apply itself: SessionStart hooks block Claude Code's start-up, and the VS Code extension fails a start-up that takes 60 s. Budget **10 s, never more** — `settings-merge.js` enforces it, and `tests/test-sessionstart-budget.sh` times every SessionStart hook with 80-200 other session dirs |
+| SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update. Since v2.0.0 it also starts the automatic update's detached background download + verify when a newer version is published, prints the result of the last background install (from `REPORT`: updater lines only, at most 20), says when a verified release is waiting, and — if an install was cut off part-way — starts its rollback detached. It never runs an install itself: SessionStart hooks block Claude Code's start-up, and the VS Code extension fails a start-up that takes 60 s. Budget **10 s, never more** — `settings-merge.js` enforces it, and `tests/test-sessionstart-budget.sh` times every SessionStart hook with 80-200 other session dirs |
 | SessionStart | `pr-watch-guard.sh` | If the repo has open PRs of yours and no live watcher: one context line with the exact `pr-watch.sh` command to arm (v1.4.0) |
+| SessionEnd | `gov-update.sh --apply-at-session-end` | The automatic-update trigger (2026-09-27): marks the ending session closed and, only when a verified release is staged (or an install was cut off), starts the install **detached** and returns at once — the install runs after the session has closed and waits while any other session is live. Its result is printed at the next session start. Never on `/clear`, never on the release source machine |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
 | UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
 | UserPromptSubmit | `parallel-import.sh` | Detects pasted output from another session |
@@ -96,6 +97,7 @@ distinct scripts.
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
 | PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
 | PreToolUse (Bash, PowerShell) | `render-gate.sh` | Blocks a render/billing command (`remotion-cli render`, `heygen video create`, …) until the project's `Read_Before_Every_Render.md` has been read this session; the read mints a one-shot token this gate spends, so each render needs its own read. No-op in any project without that file. Registered v1.6.1, task B11 |
+| PreToolUse (SendMessage) | `cross-session-guard.sh` | A report to another live Claude session must say what it MEASURED and what it did NOT CHECK (v1.6.0) |
 | PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
 | PostToolUse (Bash, PowerShell) | `pr-watch-guard.sh` | After `gh pr …` / `git push`: asks the session (JSON `decision: block`) to arm the PR watcher when open PRs of yours have none; cool-down while it arms. Kill switch `GOV_PR_WATCH=0` (v1.4.0) |
 | PostToolUse (Read) | `render-rules-read.sh` | Mints the one-shot token `render-gate.sh` spends, only when the file read is `Read_Before_Every_Render.md` (by basename, case/slash-insensitive). Registered v1.6.1, task B11 |
@@ -107,6 +109,7 @@ distinct scripts.
 | TaskCompleted | `check-docs-updated.sh` | Warns when code changed and the docs did not |
 | Stop | `sync-governance-copies.sh --sync-if-drifted` | Runs **first**, before the gated push can consume the queue: one `cmp` per governance file against the installer bundle, silent when they agree. On drift — the shape a `sed`/`cp`/script edit leaves, which the PostToolUse mirror cannot see — it reconciles every copy and says so (v1.5.0) |
 | Stop | `end-session.sh` | Session-end handoff, and the gated push of the framework bundle |
+| Stop | `check-full-finish.sh` | Warns about uncommitted changes at the end of a turn, too |
 | Stop | `close-completeness.sh` | Integrity warnings a closing summary cannot produce for itself |
 | Stop | `close-report.sh` | Generates the closing summary **from the canonical files**, so an unrecorded claim cannot appear in it |
 | Stop | `selftest-advisory-stop.sh` | Reports that the framework is unverified since the last selftest |
@@ -119,10 +122,11 @@ server, so a local Windows popup had no reachable audience. Helpers called by ot
 (`_common.sh`, `check-no-pii.sh`, `pii-gate-parse.py`, `commit-task-success.sh`,
 `file-collision-ack.sh`, `governance-helpers-check.sh`, `governance-selftest.sh`,
 `sync-governance.sh`) are installed but are not themselves hook entry points.
-Four more arrived with v2.0.0, none of them a registered hook:
+Four more arrived with v2.0.0; one of them is also registered (on SessionEnd, in the table above):
 
-- `gov-update.sh` — the automatic updater, invoked by `pre-session.sh` (`--fetch <version>`
-  detached) and by hand (`--status`, `--rollback`,
+- `gov-update.sh` — the automatic updater: registered on SessionEnd (`--apply-at-session-end`),
+  invoked by `pre-session.sh` (`--fetch <version>` detached, and `--recover-detached` when an
+  install was cut off) and by hand (`--status`, `--rollback`,
   `--apply [--force-live]`, `--accept-terms`, `--clear-halt`, `--verify-archive <tgz>`,
   `--selftest`). The apply aborts and rolls back past its own limits (files: 50 s for
   `--apply-if-ready`, 600 s for `--apply` by hand; verify.sh: 20 s); it never runs inside
@@ -341,12 +345,24 @@ background download of that version's **tagged** archive
 (`https://github.com/Gold-b/claude-code-governance/archive/refs/tags/v<version>.tar.gz`, never
 `master`) and verifies it: the signature of `RELEASE-MANIFEST` under the release key pinned on your
 machine, the SHA-256 of every file, the exact file set, the safety of every install destination, and
-`bash -n` / `node --check` on every script. At a later session start (`startup` or `resume`, never
-`compact` or `clear`), when no other session of yours is live, it backs up every file it will
+`bash -n` / `node --check` on every script. The install happens when a session **ends**: the
+`SessionEnd` hook (`gov-update.sh --apply-at-session-end`) starts it detached and returns at once,
+and the install runs after that session has closed — low priority, without the session's API or
+GitHub tokens, stopped after at most 10 minutes where `timeout` exists (not stock macOS). An install
+cut off or out of time is retried at a later session end — three attempts in all — before that
+version is blocked. It waits while any other session of yours is live
+(the last session to close installs it) and never runs on `/clear`. It backs up every file it will
 replace, swaps the files, merges only the framework's own entries into `settings.json`, runs
-`verify.sh`, and prints one line. If anything fails it restores the backup, blocks that version, and
-says so. It refuses unsigned or tampered archives, downgrades, and installs whose framework files you
-modified locally (it names them).
+`verify.sh`, and writes one line to `~/.claude/.governance-update/REPORT`, which the next session
+start prints. If anything fails it restores the backup, blocks that version, and says so. It refuses
+unsigned or tampered archives, downgrades, and installs whose framework files you modified locally
+(it names them). **Nothing is installed at session start:** SessionStart hooks block Claude Code's
+start-up and the VS Code extension fails a start that takes 60 s, while an install takes 20-40 s.
+An install cut off part-way (the machine shut down right after a session ended) is rolled back in
+the background from the next session start. Verified on Windows with the terminal CLI; the VS Code
+extension, Linux and macOS are not verified yet — where the background install does not survive
+Claude Code closing, the release simply stays waiting and the start message gives the command to
+install it by hand (`gov-update.sh --apply --force-live`).
 
 **Opt out.**
 
@@ -378,7 +394,7 @@ bash verify.sh
 ```
 
 Compare the fingerprint `install.sh` prints with the one under "Release signing key" below. From then
-on, releases apply themselves at session start.
+on, releases install themselves when a session ends.
 
 **Updating by hand** still works (`git pull && bash install.sh --force`) and is your deliberate act; it
 is not protected by the release signature beyond a consistency check.
@@ -700,19 +716,21 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
-- **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.**
-  `git pull && bash install.sh --force --accept-terms`; from here on, new releases are downloaded
-  and verified by themselves (signed, verified, rolled back on failure). Opt out:
-  `GOV_AUTO_UPDATE=0`.
+- **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.** 2.0.0 is the last update you
+  install by hand. `git pull && bash install.sh --force --accept-terms`; from here on, releases
+  install themselves in the background when a Claude Code session ends (signed, verified, rolled
+  back on failure). Opt out: `GOV_AUTO_UPDATE=0`.
   **The updater** (`gov-update.sh`): `pre-session.sh` starts a detached download of the new
   version's **tag** archive when one is published, verifies the SSH signature of its
   `RELEASE-MANIFEST` under the key pinned on your machine, every file's SHA-256, the exact file set
-  and every install destination, and stages it; the apply installs it when no other session is
-  live — backup first, one atomic rename per file, `verify.sh`, and a full
-  rollback plus a per-version halt on any failure. It never runs over files you modified locally
-  and never on the machine releases are cut from. `pre-session.sh` keeps its 10 s budget and never runs
-  the apply (2026-09-26: a 120 s budget broke VS Code start-up, which gives up at 60 s); it prints
-  one line when a verified release is waiting. See "Automatic updates" and "Release signing key".
+  and every install destination, and stages it. A new **SessionEnd** hook
+  (`gov-update.sh --apply-at-session-end`) installs it detached after the session has closed, when
+  no other session is live — backup first, one atomic rename per file, `verify.sh`, and a full
+  rollback plus a per-version halt on any failure; the next session start prints the result. It
+  never runs over files you modified locally and never on the machine releases are cut from.
+  Nothing is installed at session start: `pre-session.sh` keeps its 10 s budget (2026-09-26: a
+  120 s budget for a foreground install broke VS Code start-up, which gives up at 60 s).
+  See "Automatic updates" and "Release signing key".
   **Terms:** the repository is now under the **MIT `LICENSE`**, and `NOTICE-AUTO-UPDATE.md`
   discloses in full what the updater runs, downloads and writes, what the signature does not
   protect against, and the terms. `install.sh` asks you to type `I ACCEPT` before writing anything

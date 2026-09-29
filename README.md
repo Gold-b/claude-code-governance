@@ -76,11 +76,11 @@ bash ~/.claude/governance-installer/install.sh
 
 ## What Gets Installed
 
-### Hooks (26 scripts, all registered in `~/.claude/settings.json`)
+### Hooks (27 scripts, all registered in `~/.claude/settings.json`)
 
-Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`
-and `sync-governance-copies.sh` are registered on two events and `pr-watch-guard.sh` on three, so
-the table has 30 rows over 26 distinct scripts (counted 2026-09-27).
+Generated from `bundle/settings-hooks.json`, which is the source of truth. `check-full-finish.sh`,
+`sync-governance-copies.sh` and `bootstrap-gate.sh` are registered on two events and
+`pr-watch-guard.sh` on three, so the table has 32 rows over 27 distinct scripts (counted 2026-09-29).
 
 | Event | Script | Purpose |
 |---|---|---|
@@ -97,9 +97,11 @@ the table has 30 rows over 26 distinct scripts (counted 2026-09-27).
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
 | PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
 | PreToolUse (Bash, PowerShell) | `render-gate.sh` | Blocks a render/billing command (`remotion-cli render`, `heygen video create`, …) until the project's `Read_Before_Every_Render.md` has been read this session; the read mints a one-shot token this gate spends, so each render needs its own read. No-op in any project without that file. Registered v1.6.1, task B11 |
+| PreToolUse (Edit/Write, Bash, PowerShell) | `bootstrap-gate.sh` | In a governed SOURCE project, blocks Edit/Write and outward shell actions (WhatsApp send, `git commit` / `push`, `scp` / `rsync`, `systemctl` / `docker` start-stop, also inside an `ssh` command) until the `bootstrapper` skill has run in this session. Reads, `Skill` and `Agent` are never blocked, so the one action that clears it is always available. Internal errors fail open with a logged warning. Kill switch `GOV_BOOTSTRAP_GATE=0` (v2.0.0) |
 | PreToolUse (SendMessage) | `cross-session-guard.sh` | A report to another live Claude session must say what it MEASURED and what it did NOT CHECK (v1.6.0) |
 | PreToolUse (Bash) | `no-local-compute.sh` | In projects with a `.remote-compute` marker: project scripts run on the remote server, not the PC (v1.1.7) |
 | PostToolUse (Bash, PowerShell) | `pr-watch-guard.sh` | After `gh pr …` / `git push`: asks the session (JSON `decision: block`) to arm the PR watcher when open PRs of yours have none; cool-down while it arms. Kill switch `GOV_PR_WATCH=0` (v1.4.0) |
+| PostToolUse (Skill) | `bootstrap-gate.sh --mark` | Writes the per-session proof that `bootstrap-gate.sh` checks, when the Skill tool ran `bootstrapper`. The harness writes the proof, never the model, so the gate cannot deadlock (v2.0.0) |
 | PostToolUse (Read) | `render-rules-read.sh` | Mints the one-shot token `render-gate.sh` spends, only when the file read is `Read_Before_Every_Render.md` (by basename, case/slash-insensitive). Registered v1.6.1, task B11 |
 | PostToolUse (Edit/Write) | `post-milestone.sh` | State update after milestones |
 | PostToolUse (Edit/Write) | `sync-governance-copies.sh` | Mirrors a governance edit to the other copies; **the private-to-public crossing**, and gated as one |
@@ -716,6 +718,24 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-29 (v2.0.0) — the session-start briefing is enforced, not just requested.**
+  Behaviour change: **in a governed project, writes, sends and deploys are blocked until
+  `/bootstrapper` runs.** Before this, `pre-task.sh` only printed "you MUST run /bootstrapper", and a
+  session that skipped it went on to report the wrong figures that its own HANDOFF would have
+  corrected. The new `bootstrap-gate.sh` (PreToolUse on Edit/Write/Bash/PowerShell) blocks Edit/Write
+  and outward shell actions (WhatsApp send, `git commit` / `push`, `scp` / `rsync`, `systemctl` /
+  `docker` start-stop, also inside `ssh`) until a PostToolUse hook on the Skill tool
+  (`bootstrap-gate.sh --mark`) records that `bootstrapper` ran in this session. The harness writes
+  that proof, never the model, and Skill, Agent and reads are never blocked, so the gate cannot
+  deadlock. Ungoverned directories and DEPLOYMENT/FROZEN nodes are never gated; subagents share
+  their parent's session. Internal errors (malformed payload, no session id, skill not installed)
+  fail open with a logged warning. Not gated, by design: shell redirection writes (`>`, `sed -i`).
+  A headless `claude -p` in a governed directory must run the bootstrapper first or set
+  `GOV_BOOTSTRAP_GATE=0`. Measured on the allow path: 82-99 ms median idle, 653 ms under load
+  (bare bash 683 ms). Kill switches: `GOV_BOOTSTRAP_GATE=0` (this gate), `GOVERNANCE_HOOKS=0` (all).
+  `pre-task.sh` stays advisory and says "ENFORCED" only while the gate is registered.
+  `_common.sh` `gov_detect_role` now tests `.git` with `-e`: a git worktree or submodule holds a
+  `.git` file and was misread as a DEPLOYMENT node, which silently skipped every role-guarded hook.
 - **2026-09-25 (v2.0.0) — signed automatic updates, ON by default.** 2.0.0 is the last update you
   install by hand. `git pull && bash install.sh --force --accept-terms`; from here on, releases
   install themselves in the background when a Claude Code session ends (signed, verified, rolled

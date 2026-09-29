@@ -140,6 +140,34 @@ SESSION START
               → Final PLAN.md milestone entry
 ```
 
+**Bootstrap gate (2026-09-28; registered in user-level settings.json 2026-09-29).** The pre-task "you MUST run /bootstrapper"
+line is advice; `hooks/governance/bootstrap-gate.sh` is the enforcement. In a governed SOURCE
+project, until `/bootstrapper` has run in the session, PreToolUse exits 2 on Edit/Write/MultiEdit/
+NotebookEdit and on shell commands that act outward: WhatsApp sends (`send.js`, `wa-send`),
+`git commit`/`push`, `scp`/`rsync`, `systemctl start|stop|restart|enable|disable|…`,
+`docker [compose] up|down|restart|…` — the same verbs inside an `ssh` remote command included.
+Reads, Skill and Agent are never gated, so the fix is always available: **invoke the Skill tool
+with `bootstrapper`**. The proof (`sessions/<sid>/.gov-bootstrapper-ran`) is written by the
+harness — the same script as a PostToolUse hook on `Skill`, or its transcript fallback for a
+user-typed `/bootstrapper` — never by the model, which is what the 2026-04 deadlock lacked.
+Subagents share the parent's session_id and pass once the parent bootstrapped. Internal errors fail
+open (logged); a missing proof fails closed. Kill switches: `GOVERNANCE_HOOKS=0`, `GOV_BOOTSTRAP_GATE=0`.
+Tests: `tests/test-bootstrap-gate.sh`; cost: `tests/bench-bootstrap-gate.sh [--load]`.
+Role inference uses `[ -e .git ]` (2026-09-29), in the gate and in `_common.sh` `gov_detect_role`
+alike: a git worktree or submodule holds a `.git` FILE and is a SOURCE checkout, not a DEPLOYMENT.
+Headless `claude -p` callers that cannot run a Skill (the WA-CC bridge's `wa-monitor.js`) set
+`GOV_BOOTSTRAP_GATE=0` in the child's env — hooks read Claude Code's env, not the Bash tool's shell.
+
+**Rollback (owner).** *Permanent:* remove the two `bootstrap-gate.sh` entries from
+`~/.claude/settings.json` — the PreToolUse one (matcher `Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell`)
+and the PostToolUse `--mark` one (matcher `Skill`) — or restore the `settings.json.bak-bootstrap-gate-*`
+backup taken at registration, then **restart** every Claude Code session (hooks load at launch).
+*Global off without editing hooks:* `"GOV_BOOTSTRAP_GATE": "0"` in `settings.json` `"env"` + restart.
+*One stuck live session, no restart:* the owner creates the proof by hand —
+`touch ~/.claude/logs/sessions/<session_id>/.gov-bootstrapper-ran` (`<session_id>` is in the BLOCK
+line of `~/.claude/logs/governance.log` as `sid=…`). The model must never do this itself: running
+`/bootstrapper` is the fix available to it.
+
 ---
 
 ## 5. Selective Context Loading

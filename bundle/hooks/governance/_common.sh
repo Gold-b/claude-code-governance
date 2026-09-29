@@ -343,8 +343,11 @@ gov_detect_role() {
     esac
   fi
 
-  # Priority 2: infer from .git (FROZEN cannot be inferred)
-  if [ -d "$root/.git" ]; then
+  # Priority 2: infer from .git (FROZEN cannot be inferred). `-e`, not `-d` (2026-09-29): a git
+  # worktree or submodule holds a `.git` FILE and is still a source checkout; with `-d` it was
+  # misread as DEPLOYMENT, silently skipping every role-guarded hook and making governance-guard
+  # refuse governance edits there. A DEPLOYMENT node (UPDATE.bat zipball) has no `.git` at all.
+  if [ -e "$root/.git" ]; then
     echo "SOURCE"
   else
     echo "DEPLOYMENT"

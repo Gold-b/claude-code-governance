@@ -231,6 +231,9 @@ unset GOVERNANCE_HOOKS
 **"למה יש briefing בתחילת כל שיחה?"**
 זה ה-bootstrapper שטוען הקשר. בלעדיו Claude לא יודע מה המצב הנוכחי ומתחיל מאפס.
 
+**"למה Claude נחסם ואומר BOOTSTRAP GATE?"**
+מגרסה 2.0.0, בפרויקט עם governance, Claude לא יכול לערוך קבצים, לשלוח הודעות, לעשות commit/push או להפעיל שירותים לפני שה-bootstrapper רץ בסשן. קריאה תמיד מותרת. Claude מריץ את ה-bootstrapper בעצמו וממשיך, בלי שתצטרך לעשות כלום. לכיבוי במקרה חירום: `"GOV_BOOTSTRAP_GATE": "0"` ב-`env` של `~/.claude/settings.json`, ואז להפעיל מחדש את Claude Code.
+
 **"למה Claude עוצר ואומר Stop-Report?"**
 הוא מצא סתירה שלא יכול לפתור לבד. צריך את ההכרעה שלך. זה מונע הזיות.
 

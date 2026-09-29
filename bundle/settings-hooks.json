@@ -130,6 +130,17 @@
             "statusMessage": "Context Governance: checking the cross-session message contract..."
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/bootstrap-gate.sh",
+            "timeout": 15,
+            "_timeout_note": "Blocks Edit/Write and outward shell actions (WhatsApp send, git commit/push, scp/rsync, systemctl/docker) in a governed SOURCE project until the harness records a Skill(bootstrapper) run. Pure bash, no forks on the allow path: measured 82-99 ms median idle, 653 ms under load (bare bash 683 ms). Kill switch GOV_BOOTSTRAP_GATE=0."
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -175,6 +186,17 @@
             "command": "~/.claude/hooks/governance/render-rules-read.sh",
             "timeout": 10,
             "statusMessage": "Context Governance: render-rules token..."
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/bootstrap-gate.sh --mark",
+            "timeout": 10,
+            "_timeout_note": "Writes the per-session proof ~/.claude/logs/sessions/<session_id>/.gov-bootstrapper-ran when the Skill tool ran `bootstrapper`. The harness writes the proof, never the model, so the gate cannot deadlock."
           }
         ]
       }

@@ -323,6 +323,7 @@ case_fn_for() {
     render-gate.sh)             echo case_render_gate ;;
     render-rules-read.sh)       echo case_render_rules_read ;;
     gov-update.sh)              echo case_gov_update_hook ;;   # SessionEnd --apply-at-session-end (2026-09-27)
+    bootstrap-gate.sh)          echo case_bootstrap_gate ;;    # PreToolUse gate + PostToolUse --mark (2026-09-29)
     *) echo "" ;;
   esac
 }
@@ -589,6 +590,56 @@ case_render_rules_read() {
   pay="{\"session_id\":\"sid-rrr-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$proj/CLAUDE.md\"}}"
   run_hook "$proj" "sid-rrr-2" "$pay"
   expect_nofile "$marker" "reading an unrelated file does NOT mint a token"
+}
+
+# --- bootstrap-gate.sh (registered 2026-09-29) ------------------------------------------------
+case_bootstrap_gate() {
+  # PreToolUse: blocks Edit/Write and outward shell actions in a governed SOURCE project until the
+  # harness records a Skill(bootstrapper) run; PostToolUse `--mark` on Skill writes that proof.
+  # Registered twice (PreToolUse + PostToolUse --mark); both registrations run this one case.
+  # Full matrix: tests/test-bootstrap-gate.sh. CLAUDE_PROJECT_DIR is pinned so a selftest launched
+  # from inside a governed session cannot leak its own project root into the verdict.
+  local proj="$SBX/bg-proj" plain="$SBX/bg-plain" skills="$SBX/bg-skills" pay
+  mkdir -p "$proj" "$plain" "$skills/bootstrapper" 2>/dev/null
+  fx_project "$proj" "SOURCE" "$proj"
+  printf '# plain\n' > "$plain/CLAUDE.md"
+  printf '# stub\n' > "$skills/bootstrapper/SKILL.md"
+  local marker; marker="$(sess_dir sid-bg-1)/.gov-bootstrapper-ran"
+  _RUN_ENV=(CLAUDE_PROJECT_DIR="$proj" GOVERNANCE_SKILLS_DIR="$skills" GOV_BOOTSTRAP_GATE=1)
+  # 1. MUST BLOCK - Edit before /bootstrapper
+  fx_state_reset
+  pay="{\"session_id\":\"sid-bg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$proj/a.md\",\"old_string\":\"a\",\"new_string\":\"b\"}}"
+  run_hook "$proj" "sid-bg-1" "$pay"
+  expect_rc 2 "Edit before /bootstrapper is BLOCKED"
+  expect_has "[GOVERNANCE BOOTSTRAP GATE] BLOCKED" "the block names the gate"
+  expect_has 'skill "bootstrapper"' "the block names the Skill call that clears it"
+  # 2. MUST BLOCK - outward shell action (git push)
+  pay="{\"session_id\":\"sid-bg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push origin main\"}}"
+  run_hook "$proj" "sid-bg-1" "$pay"
+  expect_rc 2 "git push before /bootstrapper is BLOCKED"
+  expect_has "BLOCKED: git push" "the block names the outward action"
+  # 3. MUST ALLOW - a read-only shell command
+  pay="{\"session_id\":\"sid-bg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git status\"}}"
+  run_hook "$proj" "sid-bg-1" "$pay"
+  expect_rc 0 "git status is never gated"
+  expect_not "BLOCKED" "a read-only command prints no block"
+  expect_nofile "$marker" "blocked calls do not create the proof"
+  # 4. PostToolUse --mark on Skill(bootstrapper) writes the proof; the same Edit then passes
+  pay="{\"session_id\":\"sid-bg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"bootstrapper\"}}"
+  run_hook "$proj" "sid-bg-1" "$pay" --mark
+  expect_rc 0 "--mark on Skill(bootstrapper) succeeds"
+  expect_file "$marker" "--mark writes sessions/<sid>/.gov-bootstrapper-ran"
+  pay="{\"session_id\":\"sid-bg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$proj/a.md\",\"old_string\":\"a\",\"new_string\":\"b\"}}"
+  run_hook "$proj" "sid-bg-1" "$pay"
+  expect_rc 0 "Edit after the harness-recorded bootstrap is ALLOWED"
+  expect_not "BLOCKED" "no block text once bootstrapped"
+  # 5. MUST ALLOW - an ungoverned project is never gated
+  _RUN_ENV=(CLAUDE_PROJECT_DIR="$plain" GOVERNANCE_SKILLS_DIR="$skills" GOV_BOOTSTRAP_GATE=1)
+  pay="{\"session_id\":\"sid-bg-2\",\"cwd\":\"$plain\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$plain/x\",\"content\":\"x\"}}"
+  run_hook "$plain" "sid-bg-2" "$pay"
+  expect_rc 0 "an ungoverned project is never gated"
+  expect_not "BLOCKED" "ungoverned: no block text"
+  _RUN_ENV=()
 }
 
 # --- pr-watch-guard.sh --------------------------------------------------------------------------

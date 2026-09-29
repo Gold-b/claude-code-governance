@@ -220,6 +220,7 @@ Look for `docs/context/CONTEXT-MANIFEST.md` in the project root. If it exists �
 - `PreToolUse` (Edit/Write) → governance-guard.sh + pre-write.sh (impact map)
 - `PostToolUse` (Edit/Write) → post-milestone.sh (state update)
 - `Stop` → end-session.sh (handoff writer) + check-full-finish.sh
+- `PreToolUse` (Edit/Write/Bash/PowerShell) + `PostToolUse` (Skill) → bootstrap-gate.sh — blocks edits and outward actions (WhatsApp, git commit/push, scp/rsync, systemctl/docker, also via ssh) until the harness records a Skill(bootstrapper) run; narrow kill switch `GOV_BOOTSTRAP_GATE=0` **(registered 2026-09-29, user-level settings.json; rollback in GOVERNANCE-AGENT-GUIDE §4)**
 - Kill switch: `export GOVERNANCE_HOOKS=0`
 
 ### Cross-session telegrams — standing capability (no per-case permission needed)

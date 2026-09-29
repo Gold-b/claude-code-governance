@@ -65,7 +65,16 @@ if [ "$COUNT" -le 1 ]; then
   # at following through — caused deadlock where exit 2 blocked all future prompts.
   touch "$SESSION_MARKER" 2>/dev/null
   gov_log "pre-task" "first prompt — allowing through with MANDATORY instruction (marker auto-created)"
-  echo "[GOVERNANCE ENFORCEMENT] The /bootstrapper skill has NOT been executed yet in this session. You MUST run /context-governance lite followed by /bootstrapper BEFORE answering the user's question. This is mandatory per the Session Start Protocol."
+  # The text below stays advisory (this hook must never exit 2). The ENFORCEMENT is bootstrap-gate.sh:
+  # a PreToolUse gate that blocks Edit/Write and outward actions (WhatsApp send, git commit/push,
+  # scp/rsync, systemctl/docker restarts, incl. over ssh) until the harness itself records a
+  # Skill(bootstrapper) run. The "ENFORCED" sentence is printed only when the gate is actually
+  # registered in settings.json: before that it would be a false claim (one grep, first prompt only).
+  _gate_note=""
+  if grep -q 'bootstrap-gate\.sh' "$HOME/.claude/settings.json" 2>/dev/null && [ "${GOV_BOOTSTRAP_GATE:-1}" != "0" ]; then
+    _gate_note=" It is ENFORCED: bootstrap-gate.sh blocks Edit/Write, WhatsApp sends, git commit/push, scp/rsync and systemctl/docker restarts (also over ssh) until the harness records that Skill run. Reads are never blocked."
+  fi
+  echo "[GOVERNANCE ENFORCEMENT] The /bootstrapper skill has NOT been executed yet in this session. You MUST run /context-governance lite followed by /bootstrapper (invoke the Skill tool with skill \"bootstrapper\") BEFORE answering the user's question. This is mandatory per the Session Start Protocol.${_gate_note}"
   exit 0
 fi
 

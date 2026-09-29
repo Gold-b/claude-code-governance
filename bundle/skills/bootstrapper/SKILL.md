@@ -141,14 +141,24 @@ Total briefing output: ~400-800 tokens visible to user.
 
 ---
 
-## Stop conditions
+## Stop conditions and automatic handling (2026-09-29)
 
-The skill stops and asks the user when:
-1. `Plans/PLAN.md` has multiple sub-plans `IN_PROGRESS` (ambiguous current focus)
-2. The active handoff is `consumed` but `Plans/PLAN.md` has not absorbed it
+Only one condition stops and asks the user — it is about the user's intent, not about canonical files:
 3. The user goal cannot be matched to any file in CONTEXT-MANIFEST.md AND no reasonable fallback exists
-4. A canonical file referenced by the manifest is missing from disk
-5. The project is not governed (no CONTEXT-MANIFEST.md) and `CLAUDE.md` is also absent
+   (together with the one clarifying question for an ambiguous goal, Behavior contract above).
+
+The others are handled without a question and named in the briefing:
+1. `Plans/PLAN.md` has multiple sub-plans `IN_PROGRESS` → focus = the IN_PROGRESS sub-plan that matches
+   the goal, else the most recently updated one; name the choice under `## Stale Signals`.
+2. The active handoff is `consumed` but `Plans/PLAN.md` has not absorbed it → report
+   `unabsorbed consumed handoff` as a stale signal; `/live-state-orchestrator` absorbs it at the next
+   milestone.
+4. A canonical file referenced by the manifest is missing from disk → report it; the next
+   `/live-state-orchestrator` run recreates it from the `/init-governance` template and logs it in the
+   manifest Change Log.
+5. The project is not governed (no CONTEXT-MANIFEST.md) and `CLAUDE.md` is also absent → report
+   `not governed`; when the root holds code files the session runs `/init-governance` automatically
+   (global CLAUDE.md, Session Start Step 1), else it works ungoverned.
 
 ---
 

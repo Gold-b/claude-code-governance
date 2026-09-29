@@ -205,7 +205,7 @@ Implement ALL steps in the plan, continuously, until completion:
 2. **Before each code-changing step**, apply `/impact-safe-executor` principles:
    - Identify files that will be modified and their dependents (impact map)
    - Verify the step stays within the approved plan scope
-   - If the step would touch files outside the plan's scope -> STOP and ask the user
+   - If the step would touch CODE files outside the plan's scope -> STOP and ask the user (canonical context files are always in scope — see §3.3)
    - Prefer minimal edits — don't refactor surrounding code
    - Grep `docs/context/GOTCHAS.md` for the specific files being modified (by filename)
 3. After each step, run the QA checks defined for that step
@@ -226,9 +226,9 @@ After ALL steps are complete:
 
 ### 3.3 Governance State Update
 
-**MANDATORY FIRST STEP:** Invoke `/pre-close-check` before any governance write. If verdict is not `clean`, STOP and resolve parallel-session drift before proceeding. See `~/.claude/skills/pre-close-check/SKILL.md` for details.
+**MANDATORY FIRST STEP:** Invoke `/pre-close-check` before any governance write. If verdict is not `clean`, pre-close-check resolves the parallel-session drift automatically and returns `resolved` — continue, and carry its `Auto-resolved:` lines into the close report. Do not stop to ask. See `~/.claude/skills/pre-close-check/SKILL.md` for details.
 
-After the pre-close check passes, invoke `/live-state-orchestrator` to update the governance layer. The orchestrator will handle:
+After the pre-close check returns `clean` or `resolved`, invoke `/live-state-orchestrator` to update the governance layer. The orchestrator will handle:
 
 1. **`Plans/PLAN.md`** — add milestone log entry with completion date and summary
 2. **`docs/context/OPEN-PROBLEMS.md`** — mark any resolved items, add any new issues discovered
@@ -245,7 +245,11 @@ If `/live-state-orchestrator` is not available (ungoverned project), perform the
 
 ### 3.4 Finish
 
-Ask the user if they want to run `/full-finish` for the full release pipeline. **Do NOT invoke it automatically.**
+a. **Commit and push the work** through `/live-state-orchestrator` Step 8b (the session's own paths,
+   add + commit in one call, then `~/.claude/hooks/governance/close-push.sh`). Unattended; record the
+   script's one line in the report.
+b. Ask the user if they want to run `/full-finish` for the full release pipeline. **Do NOT invoke it
+   automatically** — a release (version bump, tag, GitHub release, deploy) keeps its human approval.
 
 ---
 
@@ -268,13 +272,23 @@ Ask the user if they want to run `/full-finish` for the full release pipeline. *
 
 ## Stop conditions
 
+Handled automatically — no question, one line in the report (2026-09-29):
+
+1. `Plans/PLAN.md` has multiple sub-plans `IN_PROGRESS` simultaneously → focus = the IN_PROGRESS
+   sub-plan that matches the goal, else the most recently updated one; name the choice.
+2. A fact in the plan CONTRADICTS a higher-priority source → decide by evidence > recency > rank
+   (GOVERNANCE-AGENT-GUIDE §3; evidence = primary artifacts only) and write one Change Log line with the
+   losing text quoted. A contradiction about a destructive action, a deployment, live config or a
+   secret still stops and asks.
+3. Two sources at the same hierarchy level disagree → the later git commit time wins; Change Log line
+   as in 2.
+5. Evidence collection fails — cannot verify a completed step → mark that step `needs-verification`
+   in PLAN (never DONE) and continue with the independent steps.
+
 The skill stops and asks the user when:
 
-1. `Plans/PLAN.md` has multiple sub-plans `IN_PROGRESS` simultaneously (ambiguous focus)
-2. A fact in the plan CONTRADICTS a higher-priority source and auto-resolution is unsafe
-3. Two sources at the same hierarchy level disagree (Stop-Report Protocol)
-4. A planned write would touch files outside the declared plan scope
-5. Evidence collection fails — cannot verify a completed step
+4. A planned write would touch CODE files outside the declared plan scope (the canonical files listed
+   in 3.3 are always in scope)
 6. A gotcha attached to a target file warns against the exact planned change
 7. The project is not governed (no CONTEXT-MANIFEST.md) and `CLAUDE.md` is also absent
 8. `/full-finish` would be triggered — always ask user first, never auto-invoke
@@ -285,7 +299,7 @@ The skill stops and asks the user when:
 
 - `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §3 (Source-of-Truth Hierarchy)
 - `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §5 (Selective Context Loading)
-- `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §7 (Stop-Report Protocol)
+- `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §7 (Auto-Resolve Protocol, formerly Stop-Report Protocol)
 - `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §8 (Verification Gate)
 - `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §9 (Skills Reference)
 - `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §10 (File Mutation Rules)

@@ -338,6 +338,66 @@ case_fn_for() {
 }
 
 # --- gov-update.sh / gov-release.sh / release-manifest.sh / settings-merge.js (2.0.0) -----------
+case_skill_prose() {
+  # Prose has no hook to enforce it, so the HITL removal (2026-09-29, owner decision; board QA
+  # condition 6) is pinned here: the stop-and-ask phrases must stay OUT of the canonical-file / close
+  # skills and docs, and the replacements must stay IN - in the live copy AND the shipped bundle copy.
+  # full-finish is deliberately not in the absent-list: its release-state wait is OUT of scope.
+  # Negative control, proven once on 2026-09-29: restoring "Wait for user decision before continuing."
+  # in pre-close-check turned this case red.
+  local base f hits phr
+  local -a roots=("$CHOME")
+  [ -d "$CHOME/governance-installer/bundle" ] && roots+=("$CHOME/governance-installer/bundle")
+  local -a files=(skills/pre-close-check/SKILL.md skills/live-state-orchestrator/SKILL.md
+                  skills/parallel-session-merge/SKILL.md skills/context-governance/SKILL.md
+                  skills/bootstrapper/SKILL.md skills/init-governance/SKILL.md
+                  skills/plan-and-execute/SKILL.md docs/GOVERNANCE-AGENT-GUIDE.md)
+  for base in "${roots[@]}"; do
+    CUR_SCRIPT="$base (HITL prose)"
+    hits=""
+    for f in "${files[@]}"; do
+      [ -f "$base/$f" ] || continue
+      for phr in 'Wait for user decision' 'ask user how to resolve' 'After user approval' 'כן, אני יודע'; do
+        grep -qiF "$phr" "$base/$f" 2>/dev/null && hits="$hits $f:'$phr'"
+      done
+    done
+    if [ -z "$hits" ]; then _ok "no stop-and-ask phrase in the canonical/close skills and guide ($base)"
+    else _bad "no stop-and-ask phrase in the canonical/close skills and guide ($base)" "found:$hits"; fi
+    if grep -qF 'close-push.sh' "$base/skills/live-state-orchestrator/SKILL.md" 2>/dev/null; then
+      _ok "live-state-orchestrator pushes through close-push.sh ($base)"
+    else _bad "live-state-orchestrator pushes through close-push.sh ($base)" "Step 8b does not name close-push.sh"; fi
+    if grep -qF 'formerly Stop-Report' "$base/docs/GOVERNANCE-AGENT-GUIDE.md" 2>/dev/null; then
+      _ok "agent guide keeps the 'formerly Stop-Report' alias ($base)"
+    else _bad "agent guide keeps the 'formerly Stop-Report' alias ($base)" "old references would no longer resolve"; fi
+  done
+}
+
+case_close_push() {
+  # close-push.sh is not a hook (the close skills call it), so the registration loop never runs it.
+  # Its --selftest builds local bare origins and asserts every branch in both directions: a private
+  # clean repo is pushed AND the origin really holds HEAD; no upstream / close_push: off (BOM, CRLF,
+  # no frontmatter, off only on the upstream) / GOV_CLOSE_PUSH=0 / PUBLIC or unknown visibility under
+  # auto / a deploy signal / the session's own `on` / secrets in files, merges, binaries and commit
+  # messages / PII for a non-private remote / push URLs, insteadOf rewrites, forks, mirrors / a
+  # deleted upstream / a held lock / the framework's own clone are all held; a branch behind its
+  # upstream is reported, never rebased; an unreachable remote exits 0. A suite that ran zero checks
+  # is a failure: pass>0 is asserted.
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/close-push.sh --selftest"
+  if [ ! -f "$GOV_DIR/close-push.sh" ]; then
+    _bad "close-push.sh exists" "missing at $GOV_DIR/close-push.sh - the close skills call it"
+    return 0
+  fi
+  _o=$(bash "$GOV_DIR/close-push.sh" --selftest </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/.*close-push selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/.*close-push selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "close-push.sh --selftest: pass=$_p fail=0 (pushes and holds, both directions)"
+  else
+    _bad "close-push.sh --selftest" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E 'FAIL|pass=' | head -5)")"
+  fi
+}
+
 case_gov_update() {
   #
   # The auto-updater is not a registered hook (pre-session.sh calls it), so the registration loop
@@ -552,6 +612,19 @@ case_deny_git_bypass() {
   run_hook "$proj" "sid-dgb-9" "$pay"
   expect_rc 0 "rm -f before an ordinary push is ALLOWED (anchored to the git segment)"
   expect_not "destructive git" "anchoring: no destructive-git text for an ordinary push"
+  # 10b. MUST BLOCK - the forms later review rounds measured getting through: `-d` in a cluster,
+  #      the one-letter `--m` (mirror), a quoted -C path, an inline mirror config without `=`,
+  #      a `+@:ref` refspec, a line continuation. MUST ALLOW - `reset --help`.
+  local _c
+  for _c in 'git push -d origin old' 'git push --m origin' 'git -C \"C:/My Projects/x\" push --force' \
+            'git -c remote.origin.mirror push origin' 'git push origin +@:main' 'git push origin \\\n  --force'; do
+    pay="{\"session_id\":\"sid-dgb-x\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$_c\"}}"
+    run_hook "$proj" "sid-dgb-x" "$pay"
+    expect_rc 2 "destructive form blocked: $_c"
+  done
+  pay="{\"session_id\":\"sid-dgb-y\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git reset --help\"}}"
+  run_hook "$proj" "sid-dgb-y" "$pay"
+  expect_rc 0 "git reset --help is a read, not reset --hard: ALLOWED"
   # 11. MUST ALLOW - the owner's override, from the hook environment
   _RUN_ENV=(GOV_GIT_DESTRUCTIVE_OK=1)
   pay="{\"session_id\":\"sid-dgb-10\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git reset --hard HEAD~1\"}}"
@@ -1027,6 +1100,17 @@ case_collision_guard() {
   expect_rc 2 "concurrent claim on a CANONICAL file: still BLOCKS"
   expect_has "pending-merge.md" "canonical file: remedy parks the entry in the session's pending merge"
   expect_not "tell the user" "canonical file: remedy never sends the session to a human"
+  # The same canonical file spelled with BACKSLASHES, as Windows hands it to the guard (review round 1:
+  # a forward-slash-only case passed while the backslash path was classified as code).
+  # JSON needs each backslash doubled (the payload carries C:\\x\\docs\\...); a variable does the
+  # replacement because bash 5.2 does not treat \\ in a ${x//pattern/..} as a literal backslash.
+  local _b='\' _bb='\\' canon_bs
+  canon_bs="$(_winform "$repo")\\docs\\context\\GOTCHAS.md"
+  canon_bs="${canon_bs//"$_b"/"$_bb"}"
+  run_fixture "$repo" "sid-other" "$(pl_pre "$repo" sid-other "$canon_bs")"
+  run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$canon_bs")"
+  expect_rc 2 "concurrent claim on a canonical file, backslash path: still BLOCKS"
+  expect_has "pending-merge.md" "backslash canonical path: classified as canonical"
 
   run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$free")"
   expect_rc 0 "unclaimed new file: allowed"
@@ -1821,7 +1905,7 @@ part_a() {
     local path base fn
     path="$(expand_cmd "$cmd")"
     if [ -n "$ONLY" ]; then
-      case ",$ONLY," in *",$(basename "${path:-inline}"),"*) ;; *) continue ;; esac
+      case ",$ONLY," in *",$(basename "${path:-inline}"),"*) ONLY_HIT=$((${ONLY_HIT:-0}+1)) ;; *) continue ;; esac
     fi
     if [ -z "$path" ]; then
       # Inline command (e.g. the Stop-event `echo ...` reminder). Still EXECUTED, not assumed.
@@ -1872,6 +1956,12 @@ EOF
   printf '\n  hooks discovered in settings.json: %s\n' "$n"
   if [ -n "$ONLY" ]; then
     printf '  SCOPED run (--only=%s): registration scan, Part B and the live invariant are skipped\n' "$ONLY"
+    # A scope that matched nothing ran zero checks; that is a failure, never a pass (a typo, or a
+    # TOOL such as close-push.sh - tools are not registered hooks; run their own --selftest).
+    CUR_SCRIPT="--only=$ONLY"
+    if [ "${ONLY_HIT:-0}" -eq 0 ]; then
+      _bad "--only matched a registered hook" "no registered hook is named '$ONLY' - zero checks ran"
+    fi
     return
   fi
 
@@ -1909,6 +1999,7 @@ EOF
       pii-gate-parse.py)           echo "invoked-by:pii-gate-pretooluse.sh" ;;
       wa-send.js)                  echo "invoked-by:_common.sh" ;;
       gov-update.sh)               echo "invoked-by:pre-session.sh" ;;
+      close-push.sh)               echo "TOOL: the one place a session close pushes the current repo, called by the close skills (live-state-orchestrator, full-finish, plan-and-execute) - not a hook; case_close_push runs its --selftest against local bare origins (2026-09-29)" ;;
       gov-release.sh)              echo "TOOL: the maintainer's release tool, source machine only (2.0.0) - its preconditions and the manifest it signs are exercised by case_gov_update" ;;
       release-manifest.sh)         echo "library: the release-manifest builder/parser, sourced by gov-update.sh, gov-release.sh and install.sh (2.0.0)" ;;
       settings-merge.js)           echo "invoked-by:gov-update.sh" ;;
@@ -2068,6 +2159,19 @@ EOF
 ' "$GOV_DIR/enumerate-before-claiming.sh"
     CUR_ORIG="$GOV_DIR/enumerate-before-claiming.sh"
     case_enumerate_before_claiming
+  fi
+  if command -v case_skill_prose >/dev/null 2>&1; then
+    printf '
+  [prose] HITL removal predicates
+'
+    case_skill_prose
+  fi
+  if command -v case_close_push >/dev/null 2>&1; then
+    printf '
+  [tool] %s
+' "$GOV_DIR/close-push.sh"
+    CUR_ORIG="$GOV_DIR/close-push.sh"
+    case_close_push
   fi
   if command -v case_gov_update >/dev/null 2>&1; then
     printf '

@@ -38,7 +38,11 @@ fields above, not prose.
    make targeted edits, DIFF-check against what you read. Never overwrite a whole `.md` file you
    did not author in this turn.
 2. **File locking** — create a `.lock` beside the file before editing, delete it after. If another
-   session's change appears mid-edit, stop and ask for merge instructions.
+   session's change appears mid-edit in a canonical context file, merge it yourself (keep both
+   sides' entries, decide a true contradiction by evidence > recency > rank, quote the loser in the
+   change log); if the file is still held, park your entry in
+   `~/.claude/logs/sessions/<session-id>/pending-merge.md`. For code, stop and ask for merge
+   instructions (owner decision 2026-09-29).
 3. **One active HANDOFF.** Run `/pre-close-check` before any HANDOFF write.
 4. **Verification Gate** — no DONE without external evidence (test output, build log, `git show
    --stat <sha>`, docker logs).

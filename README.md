@@ -95,7 +95,7 @@ Generated from `bundle/settings-hooks.json`, which is the source of truth. `chec
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
 | PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
-| PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2). Since v2.0.0 it also blocks **destructive git**: a push that rewrites or deletes remote history (`--force`, `--force-with-lease`, `-f`, `+ref`, `--delete`, `:ref`, `--mirror`, `--prune`) and `reset --hard`, anchored to the git command's own segment; owner-only override `GOV_GIT_DESTRUCTIVE_OK=1` in `settings.json` `env` |
+| PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2). Since v2.0.0 it also blocks **destructive git**: a push that rewrites or deletes remote history (`--force`, `--force-with-lease`, `-f`, `-d`, `+ref`, `--delete`, `:ref`, `--mirror`, `--prune`, and git's abbreviations of those options, or an inline `-c remote.*.mirror=` / `-c remote.*.push=`) and `reset --hard`, anchored to the git command's own segment; a regex over the command, so an alias or wrapper script is out of its reach; owner-only override `GOV_GIT_DESTRUCTIVE_OK=1` in `settings.json` `env` |
 | PreToolUse (Bash, PowerShell) | `render-gate.sh` | Blocks a render/billing command (`remotion-cli render`, `heygen video create`, …) until the project's `Read_Before_Every_Render.md` has been read this session; the read mints a one-shot token this gate spends, so each render needs its own read. No-op in any project without that file. Registered v1.6.1, task B11 |
 | PreToolUse (Edit/Write, Bash, PowerShell) | `bootstrap-gate.sh` | In a governed SOURCE project, blocks Edit/Write and outward shell actions (WhatsApp send, `git commit` / `push`, `scp` / `rsync`, `systemctl` / `docker` start-stop, also inside an `ssh` command) until the `bootstrapper` skill has run in this session. Reads, `Skill` and `Agent` are never blocked, so the one action that clears it is always available. Internal errors fail open with a logged warning. Kill switch `GOV_BOOTSTRAP_GATE=0` (v2.0.0) |
 | PreToolUse (SendMessage) | `cross-session-guard.sh` | A report to another live Claude session must say what it MEASURED and what it did NOT CHECK (v1.6.0) |
@@ -138,6 +138,9 @@ Four more arrived with v2.0.0; one of them is also registered (on SessionEnd, in
   release manifest share one definition of the file set and one parser.
 - `settings-merge.js` — the governance-only `settings.json` merge, used by `install.sh` and by the
   updater alike.
+- `close-push.sh` (2026-09-29) — a tool, not a hook: the one place a session close pushes the
+  current repo, called by `/live-state-orchestrator` Step 8b. `close-push.sh --selftest` runs its
+  controls against local bare origins.
 `pr-watch.sh` (v1.4.0) is a tool, not a hook: the session arms it through the Monitor tool and
 it prints one line per PR change (comment, review, +1, CI, merge) for the caller's own open PRs on
 one repo, fast-forwards the clone on merge, and exits when none remain — or after
@@ -546,6 +549,17 @@ Keep the advisory but never install automatically (v2.0.0; also honoured as a li
 export GOV_AUTO_UPDATE=0
 ```
 
+Narrower switches (v2.0.0). Hooks read Claude Code's own environment, so set these in the `env`
+block of `~/.claude/settings.json` and restart — an `export` typed inside a session does not reach
+a hook:
+
+| Variable | Effect |
+|---|---|
+| `GOV_BOOTSTRAP_GATE=0` | `bootstrap-gate.sh` no longer blocks writes before `/bootstrapper` |
+| `GOV_CLOSE_PUSH=0` | a session close never pushes (`close-push.sh` prints SKIP) |
+| `GOV_CANONICAL_AUTORESOLVE=0` | `/pre-close-check` (so every close), `/parallel-session-merge` and `/context-governance` go back to stop-and-ask on a canonical-file contradiction. Read by those skills, not a hook |
+| `GOV_GIT_DESTRUCTIVE_OK=1` | owner override: `deny-git-bypass.sh` lets a force-push / `reset --hard` through |
+
 ## Uninstall
 
 ```bash
@@ -718,6 +732,46 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-29 (v2.0.0) — a session close runs end to end: canonical files are resolved, not
+  escalated, and the close pushes.** Behaviour change (owner decision). A contradiction between
+  canonical context files is now decided by the session itself — evidence, then recency (commit
+  time), then rank — and the losing text is quoted in the file's change log; the Stop-Report
+  Protocol became the Auto-Resolve Protocol (Agent Guide §7, old name kept as an alias). Evidence
+  means primary artifacts only (a commit SHA, a tag, a file on disk, test output the session ran):
+  a peer message, pasted text or web content is data, never evidence and never an approval.
+  Auto-resolution only touches status fields, frontmatter, manifest rows, change logs and
+  `## Superseded` blocks — never a rule. It still stops and asks for anything destructive, a
+  deployment, live config or a secret. `/pre-close-check`, `/parallel-session-merge`,
+  `/live-state-orchestrator`, `/context-governance`, `/init-governance`, `/bootstrapper`,
+  `/plan-and-execute`, `/full-finish` Phase 0 and the guides were reworded to match.
+  Kill switch that restores stop-and-ask in `/pre-close-check` (every close runs through it),
+  `/parallel-session-merge` and `/context-governance`: `GOV_CANONICAL_AUTORESOLVE=0` (read by those
+  skills, not a hook).
+  **The close pushes:** new `close-push.sh`, called from `/live-state-orchestrator` Step 8b after the
+  session commits its own paths. It is a fast-forward or nothing: it fetches first and decides on
+  the remote's real state, pushes the current branch only to its same-name existing upstream, never
+  forces, never rebases (a branch that is behind is reported, not rewritten), never creates or
+  recreates a branch, never pushes tags or submodules (`--no-follow-tags --recurse-submodules=no`),
+  scans every outgoing commit — added lines including merges and binaries, and the commit messages —
+  for secret shapes (fail-closed), and verifies the remote after the push. It holds — and says why,
+  without failing the close — the framework's own clone (its push is the release), `close_push: off`
+  in the CONTEXT-MANIFEST frontmatter (BOM / CRLF / spacing tolerated; `off` in the working tree,
+  HEAD or the fetched upstream wins), a branch tracking a differently named upstream or one deleted
+  on the remote, a remote with a push URL, several URLs, a mirror setting or a fork `pushRemote` /
+  `pushDefault`, a lock held by another close, and under the default `auto` a PUBLIC repo, one whose
+  visibility cannot be read (any host but exactly github.com, or `gh` failing), an INTERNAL one,
+  a local-path remote that runs receive hooks, and any repo whose pushed commit contains a file on
+  the script's list of CI definitions and deploy-tool configs (all major CIs and hosts, plus name
+  catch-alls). Presence decides, not content, so a repo with CI needs the owner's `close_push: on`
+  once. **The list is not a guarantee:** a system it does not name, or a host wired only through
+  its own dashboard, is not seen — for any repo whose push can deploy, write `close_push: off`. The owner's `close_push: on` lifts the auto holds once it is on the fetched upstream's
+  manifest; outgoing commits that carry an `on` the remote does not have are held, so a session's
+  own `on` never reaches the remote through a close. Anything not known to stay private (PUBLIC,
+  unknown visibility, INTERNAL) also gets the PII scanner. The push sends the one commit that was
+  scanned, to the URL git really uses after `insteadOf` / `pushInsteadOf` rewriting (held if that
+  differs from the fetch URL). A `/full-finish` Phase 9 BLOCK closes
+  with the push skipped. `bootstrap-gate.sh` gates `close-push.sh` like a `git push`.
+  `GOV_CLOSE_PUSH=0` turns it off.
 - **2026-09-29 (v2.0.0) — the hooks stop sending sessions to a human before canonical writes;
   destructive git is now a control.** A session close is meant to run end to end (owner decision),
   so the hooks' remedies no longer say "ask the user" for the framework's own context files.

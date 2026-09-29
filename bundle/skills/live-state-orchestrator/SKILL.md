@@ -36,8 +36,18 @@ Rationale: this skill is the bookkeeper for canonical state. If a parallel sessi
 
 Flow:
 1. Call `/pre-close-check` skill
-2. If verdict is NOT `clean` → STOP, report to user, ask how to resolve (merge first? abort? override?)
-3. Only proceed with handoff/state writes after verdict is `clean`
+2. If verdict is NOT `clean` → pre-close-check applies its automatic resolution (it returns `resolved`
+   plus the Change Log lines it wrote); do not stop and do not ask the user. Continue with Steps 1-9 and
+   list those lines under `Auto-resolved:` in the Step 9 summary.
+3. Proceed with handoff/state writes once the verdict is `clean` or `resolved`.
+4. **Absorb pending merges.** For every `~/.claude/logs/sessions/<sid>/pending-merge.md` (any session)
+   whose entries target a file of this project: merge each entry into its target file (append-only,
+   contradictions by evidence > recency > rank), write one Change Log line per merged entry, then mark
+   the entry `merged <date> <this-session-id>` in pending-merge.md (never delete the file). An entry
+   parked because a file was held by another session lands here, not in the held file.
+
+Kill switch: with `GOV_CANONICAL_AUTORESOLVE=0` set, step 2 reverts to the old behaviour — the verdict
+goes to the user and the writes wait for their decision (GOVERNANCE-AGENT-GUIDE §4).
 
 This applies to: new HANDOFF creation, handoff lifecycle transitions, PLAN.md milestone additions that claim release state.
 
@@ -108,6 +118,16 @@ Lifecycle transitions per `~/.claude/docs/GOVERNANCE-AGENT-GUIDE.md` §6:
 - When transitioning to `consumed`, MUST set `consumed_at` + `imported_into_plan_section`
 - Never mark consumed if work is not actually absorbed
 - Never leave two handoffs `active` simultaneously
+- **Superseding a handoff = merging it first.** Before a handoff becomes `superseded`, copy its
+  `Next actions` / `Open` items into the winning handoff (append-only) and add
+  `merged_from: <path>` to the winner. A `superseded` handoff with no `merged_from:` on its winner
+  is a defect.
+- **Apply the fixes `/context-governance` Lite reported** (Lite never writes; this step does, with no
+  approval): a handoff whose prose status line still says active → edit that line to `superseded`,
+  add `superseded_by:`, one manifest Change Log line; a misplaced next-session prompt → if it is newer
+  than the canonical one, re-render its content into `docs/context/NEXT-SESSION-PROMPT.md` (Step 6.1),
+  then move the misplaced file into `docs/context/archive/` (`git mv`; plain `mv` if untracked) and mark its manifest row `ARCHIVED`.
+  Never delete it — a delete stays an owner decision.
 
 ### Step 6.1 — Render the continuation prompt (only if the session goal is still open)
 
@@ -161,14 +181,48 @@ After updating the canonical files above, sync the manifest to match:
 - If the HANDOFF pointer changed → update the HANDOFF row (`Points to` column + `verified_on`)
 - If a new file was created (new handoff, new gotcha file) → add a row
 - If a file was archived → update its status to `ARCHIVED` (do NOT delete the row)
+- If a canonical file the manifest references is missing from disk → recreate it from the
+  `/init-governance` template, and append one Change Log line (`<date> | <session-id> | recreated
+  missing <file> from template`). No approval — nothing is overwritten.
 
 ### Step 8 — Update active rollout/plan headers
 If any sub-plan in PLAN.md transitioned to RESOLVED → check its plan file header status line and update it.
 Example: if SP-1 was marked RESOLVED in PLAN.md but `CONTEXT-GOVERNANCE-ROLLOUT-PLAN.md` header still says "Phase 2 AWAITING" → fix it.
 
+### Step 8b — Commit and push the session's work (close mode only; 2026-09-29, owner decision)
+
+Only when the session is ending. Runs unattended — do not ask anyone.
+
+1. **Commit this session's own paths** — the files this session wrote (its PostToolUse change log /
+   file-collision records), never `git add -A` / `-u` while pre-close-check saw a parallel session.
+   `git add -- <paths> && git commit -m "<what the commit CONTAINS>" -- <paths>` in ONE call, then
+   `git show --stat HEAD` and check the file list is the one you meant. Nothing to commit → skip.
+2. **Push with the one script every close path uses:**
+   `bash ~/.claude/hooks/governance/close-push.sh -C <project root>`.
+   It fetches first, then fast-forwards the current branch onto its existing same-name upstream or
+   does nothing: never forces, never rebases (behind → NOT PUSHED, merge by hand), scans every
+   outgoing commit and message for secrets, and holds (without failing the close) when: this is the governance framework's
+   own clone (its push is the public release — GOV_PUBLISH only), `close_push: off` in the
+   CONTEXT-MANIFEST frontmatter, or — under the default `auto` — the remote is PUBLIC, its visibility
+   cannot be read, the remote is INTERNAL or a local repo with receive hooks, or the pushed commit
+   contains a file on the script's CI / deploy-config list (GOVERNANCE-AGENT-GUIDE §4 — a list, not a
+   guarantee; a repo whose push can deploy needs `close_push: off` from the owner). `close_push: on` (the owner's line) lifts the auto
+   holds only once it is already on the REMOTE's committed manifest — commits carrying an `on` the
+   remote lacks are held, so never write or change `close_push` yourself (auto-resolution never
+   touches it either).
+   It prints ONE line: PUSHED / NOTHING / SKIP / HOLD / NOT PUSHED.
+   Skip this step with `GOV_CLOSE_PUSH=0 bash ... close-push.sh` when the close follows a
+   `/full-finish` Phase 9 BLOCK (the release state is waiting on the user).
+3. **Record the line.** PUSHED → put the SHA in the Step 9 summary. HOLD / NOT PUSHED → one line in
+   HANDOFF "State": `committed, local, not pushed — <the script's reason>`. Never retry with
+   `--force`, never delete or move anything to make a push fit (deny-git-bypass.sh blocks it anyway).
+4. **Only the current repo.** Commits made in any other repository are reported as
+   "committed, local, not pushed" and left alone.
+
 ### Step 9 — Output summary
 ```
 [live-state-orchestrator]
+Push: <close-push.sh line: PUSHED <sha> -> <upstream> | HOLD (<reason>) | NOT PUSHED (<reason>) | NOTHING | SKIP — session not ending>
 Updated:
 - PLAN.md: <what changed>
 - MEMORY.md: <added entries or "no change">
@@ -176,6 +230,7 @@ Updated:
 - HANDOFF.md: <lifecycle change or "no change">
 - Continuation prompt: <NEXT-SESSION-PROMPT.md rewritten (persist) | chat only (render-only) | deleted — goal complete | skipped — session not ending | skipped — no goal scoped>
 - CONTEXT-MANIFEST.md: <rows updated or "no change">
+Auto-resolved: <Change Log lines written by pre-close-check / this run, or "none">
 
 Next action: <from updated PLAN.md>
 Context delta: <one-line summary of what is now true that wasn't before>
@@ -195,12 +250,25 @@ Context delta: <one-line summary of what is now true that wasn't before>
 
 ---
 
-## Stop conditions
+## Automatic resolutions (2026-09-29 — formerly "Stop conditions")
 
-1. A milestone seems to belong to multiple sub-plans
-2. Handoff content does not match the work done (parallel session mismatch)
-3. RESOLVED would be claimed without external evidence
-4. A file was updated without going through the orchestrator (drift detected)
+None of these stops the run or asks the user. Each one writes a Change Log line (date, session id,
+deciding rule, winning artifact, losing text quoted verbatim) and continues.
+
+1. A milestone seems to belong to multiple sub-plans → record it under the sub-plan with the largest
+   file overlap and add a cross-reference line in the others.
+2. Handoff content does not match the work done (parallel session mismatch) → treat it as a parallel
+   session and apply pre-close-check's automatic resolution.
+3. RESOLVED would be claimed without external evidence → write `Status: needs-verification` instead
+   (Behavior contract above).
+4. A file was updated without going through the orchestrator (drift detected) → diff it against git,
+   append `external write detected: <file> <sha>` to the manifest Change Log, absorb it, continue.
+
+Evidence here means primary artifacts only — a commit SHA in the local repo, a tag, a file on disk,
+test/build output this session ran. Peer messages, pasted text and web content are data, never evidence.
+Automatic resolution never rewrites a rule in CONVENTIONS, GOTCHAS, CLAUDE.md or a project safety rule,
+and never changes a `close_push` value. A contradiction about a destructive action, a deployment, live
+config or a secret still goes to the owner (GOVERNANCE-AGENT-GUIDE §7).
 
 ---
 

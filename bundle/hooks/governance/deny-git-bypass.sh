@@ -61,20 +61,50 @@ fi
 # contain both words, so an ordinary command pays one `case`. A newline counts as a separator, like
 # ; & | - bash regex spans lines where grep did not.
 _dz_candidate=0
-case "$CMD" in *[Gg][Ii][Tt]*[Pp][Uu][Ss][Hh]*|*[Gg][Ii][Tt]*[Rr][Ee][Ss][Ee][Tt]*) _dz_candidate=1 ;; esac
+case "$CMD" in *[Gg][Ii][Tt]*[Pp][Uu][Ss][Hh]*|*[Gg][Ii][Tt]*[Rr][Ee][Ss][Ee][Tt]*|*[Ss][Ee][Nn][Dd]-[Pp][Aa][Cc][Kk]*) _dz_candidate=1 ;; esac
+# A backslash-newline (bash) or backtick-newline (PowerShell) continuation joins two lines into ONE
+# command; the patterns below treat a newline as a separator, so join them first (final review).
+_DZ="$CMD"
+_DZ="${_DZ//\\$'\r\n'/ }"; _DZ="${_DZ//\\$'\n'/ }"
+_DZ="${_DZ//\`$'\r\n'/ }"; _DZ="${_DZ//\`$'\n'/ }"
 if [ "$_dz_candidate" = 1 ] && [ "${GOV_GIT_DESTRUCTIVE_OK:-0}" != "1" ]; then
+  # Review round 1 (zero-context verifier, 2026-09-29) measured real deletes and forced updates
+  # getting through the first patterns, so they now also cover: `-d` (short --delete) in a short-flag
+  # cluster; git's unambiguous ABBREVIATED long options (`--del`, `--force-w`, `--m` - the only push
+  # option starting with m is --mirror, and round 2 measured `--m` deleting remote branches -
+  # `--pru`, `reset --h`). The shortest unambiguous prefix is covered for each: `--for` (not `--fo`:
+  # --follow-tags), `--de` (not `--d`: --dry-run), `--m`, `--pru` (not `--pr`: --progress), `--h`; quoted option values with spaces (`-C "C:/My Projects/x"`, `-c user.name="a b"`);
+  # quoted refspecs (`"+main"`, `':old'`); and `git.exe`. Still a regex over a string, not a shell
+  # parser: an alias, a variable holding the flag, or a wrapper script is out of its reach.
   _nl=$'\n'
   _ns="[^;&|${_nl}]"                                    # any char inside ONE command segment
-  _gopt="([[:space:]]+-[^[:space:];&|]+([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)?)*"
-  _gpre="(^|[^A-Za-z0-9_.-])git${_gopt}[[:space:]]+"
-  _re_force="${_gpre}push([[:space:]]${_ns}*)?[[:space:]](--force|--force-with-lease|--force-if-includes|-[A-Za-z]*f[A-Za-z]*|--delete|--mirror|--prune)([=[:space:]]|\$)"
-  _re_spec="${_gpre}push([[:space:]]${_ns}*)?[[:space:]][+:][A-Za-z0-9_./*-]"
-  _re_reset="${_gpre}reset([[:space:]]${_ns}*)?[[:space:]]--hard([[:space:]]|\$)"
+  _q1='"[^"]*"'; _q2="'[^']*'"
+  _plain="[^[:space:];&|\"'${_nl}]"
+  _esc='\\.'                                            # a backslash-escaped char (`My\ Projects`)
+  _tok="(${_esc}|${_plain}|${_q1}|${_q2})+"             # one shell word, quoted/escaped parts allowed
+  _val="(${_esc}|[^-[:space:];&|\"'${_nl}\\]|${_q1}|${_q2})(${_esc}|${_plain}|${_q1}|${_q2})*"
+  _gopt="([[:space:]]+-${_tok}([[:space:]]+${_val})?)*"
+  _gpre="(^|[^A-Za-z0-9_.-])git(\\.exe)?[\"']?${_gopt}[[:space:]]+"
+  _re_force="${_gpre}push([[:space:]]${_ns}*)?[[:space:]][\"']?(--for[a-z-]*|--de[a-z]*|--m[a-z]*|--pru[a-z]*|-[A-Za-z]*[fd][A-Za-z]*)([\"'=[:space:]]|\$)"
+  # A refspec starting with + (force) or : (delete), whatever follows: `+@:main`, `+"main"`,
+  # `:"old"`, `+{main,dev}` (final review).
+  _re_spec="${_gpre}push([[:space:]]${_ns}*)?[[:space:]][\"']?[+:][^[:space:];&|${_nl}]"
+  # --h, --ha, --har, --hard - but not --help (a harmless read, final review).
+  _re_reset="${_gpre}reset([[:space:]]${_ns}*)?[[:space:]][\"']?--h(a(r(d)?)?)?([\"'[:space:]]|\$)"
+  _re_sendpack="${_gpre}send-pack([[:space:]]${_ns}*)?[[:space:]](--force|-f)([[:space:]]|\$)"
+  # Config injected inline (review round 3): `git -c remote.origin.mirror=true push` deletes remote
+  # branches, `-c remote.origin.push=+refs/...` force-pushes - with no flag after `push` at all.
+  # Round 4: `-c remote.origin.mirror` with NO `=` means true, `--config-env=remote.X.mirror=VAR` and
+  # the GIT_CONFIG_KEY_<n> / GIT_CONFIG_PARAMETERS environment forms do the same. Any mention of a
+  # remote.*.mirror or remote.*.push key in the same segment as a `push` is blocked.
+  _re_cfg="(-c[[:space:]]*|--config-env[=[:space:]]*|GIT_CONFIG_[A-Z_0-9]*=)[\"']*remote\\.${_ns}*\\.(mirror|push)([^A-Za-z0-9_-]${_ns}*)?[^A-Za-z0-9_.-]push([[:space:]]|\$)"
   _dz=""
   shopt -s nocasematch
-  if   [[ $CMD =~ $_re_force ]]; then _dz="git push that rewrites or deletes remote history"
-  elif [[ $CMD =~ $_re_spec  ]]; then _dz="git push with a force (+ref) or delete (:ref) refspec"
-  elif [[ $CMD =~ $_re_reset ]]; then _dz="git reset --hard"
+  if   [[ $_DZ =~ $_re_force ]]; then _dz="git push that rewrites or deletes remote history"
+  elif [[ $_DZ =~ $_re_spec  ]]; then _dz="git push with a force (+ref) or delete (:ref) refspec"
+  elif [[ $_DZ =~ $_re_reset ]]; then _dz="git reset --hard"
+  elif [[ $_DZ =~ $_re_cfg   ]]; then _dz="git push with an inline remote.*.mirror / remote.*.push config"
+  elif [[ $_DZ =~ $_re_sendpack ]]; then _dz="git send-pack --force"
   fi
   shopt -u nocasematch
   if [ -n "$_dz" ]; then

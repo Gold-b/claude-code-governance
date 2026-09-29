@@ -149,7 +149,7 @@ case "$_tool" in
     _what="$_tool" ;;
   Bash|PowerShell)
     # Cheap glob prefilter: no keyword anywhere in the payload -> nothing to classify.
-    case "$_in" in *send.js*|*wa-send*|*wa_send*|*git*|*scp*|*rsync*|*systemctl*|*docker*) ;; *) exit 0 ;; esac
+    case "$_in" in *send.js*|*wa-send*|*wa_send*|*git*|*scp*|*rsync*|*systemctl*|*docker*|*close-push*) ;; *) exit 0 ;; esac
     _jfield command; _cmd="$_JF"
     [ -n "$_cmd" ] || exit 0
     _B='(^|[^A-Za-z0-9_.-])'          # word start
@@ -160,7 +160,10 @@ case "$_tool" in
     _re_copy="${_B}(scp|rsync)[[:space:]]"
     _re_sysd="${_B}systemctl([[:space:]]+-[^[:space:]]+)*[[:space:]]+(start|stop|restart|try-restart|reload|reload-or-restart|enable|disable|kill|mask|unmask|daemon-reload|isolate)${_E}"
     _re_dock="${_B}docker(-compose|[[:space:]]+compose)?${_OPT}[[:space:]]+(up|down|restart|stop|start|kill|rm)${_E}"
+    # close-push.sh (2026-09-29) runs `git push` INSIDE a script, where this gate cannot see it.
+    _re_cpush='close-push\.sh'
     if   [[ $_cmd =~ $_re_wa   ]]; then _what="WhatsApp send"
+    elif [[ $_cmd =~ $_re_cpush ]]; then _what="close push (close-push.sh)"
     elif [[ $_cmd =~ $_re_git  ]]; then _what="git ${BASH_REMATCH[4]}"
     elif [[ $_cmd =~ $_re_copy ]]; then _what="${BASH_REMATCH[2]}"
     elif [[ $_cmd =~ $_re_sysd ]]; then _what="systemctl ${BASH_REMATCH[3]}"

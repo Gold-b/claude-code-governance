@@ -193,17 +193,16 @@ appear to conflict, governance wins, unconditionally:
 
 | Governance rule | Effect inside a `/loop` |
 |---|---|
-| Stop-Report Protocol (§7) | **Still stops.** A contradiction between sources halts the loop; report + propose + wait. |
+| Auto-Resolve Protocol (§7, formerly Stop-Report) | **Auto-resolves; never stops the loop.** A contradiction between canonical files is decided by evidence > recency > rank, the loser is recorded, the loop continues. A contradiction about a destructive action, a deployment, live config or a secret falls under Human-in-the-Loop below. |
 | Verification Gate (§8) | **Still blocks.** No DoD item may be ticked without external evidence. |
-| Human-in-the-Loop | **Still asks.** Destructive, irreversible, or outward-facing actions need confirmation. |
+| Human-in-the-Loop | **Still asks.** Destructive, irreversible, or outward-facing actions need confirmation. One standing exception (owner, 2026-09-29): the close push of the current repo through `close-push.sh` — existing upstream only, never force; it holds a public repo, a repo with a file on its CI / deploy-config list, and a `close_push: off` repo (the list is not a guarantee — a repo whose push can deploy needs `close_push: off`). |
 | Node-role guard (SOURCE / DEPLOYMENT / FROZEN) | **Still blocks.** A `/loop` never converts a DEPLOYMENT or FROZEN node into a writable one. |
 | `/full-finish` permission | **Still required.** The loop may not self-authorize a release. |
 | File-collision guard | **Still blocks.** A parallel session's claim is not a status stop. |
 | One active HANDOFF | **Still enforced.** The loop may not create a second active handoff. |
 
 **A governance stop pauses the loop; it does not by itself end the session.** Most of the rows
-above are *waits*: Stop-Report reports and waits for the user to choose, Human-in-the-Loop asks
-and waits for a yes. If the answer arrives and the work can continue, **resume the loop and render
+above are *waits*: Human-in-the-Loop asks and waits for a yes. If the answer arrives and the work can continue, **resume the loop and render
 nothing** — ending the session there would hand over a mid-decision handoff describing a state
 that stopped being true the moment the user answered. The session ends, and a continuation prompt
 is rendered, only on §1's three conditions: context exhausted, the user stopped, or the blocker

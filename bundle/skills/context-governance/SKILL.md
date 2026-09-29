@@ -103,8 +103,9 @@ This skill has TWO modes. Determine which to run based on the invocation context
    - **Prose hits are REPORTED, not escalated.** A prose `Status: active` on a handoff that a newer one
      supersedes is a MEDIUM finding — `unstamped superseded handoff (prose status): <file>` — not a dual
      handoff; escalating six historical files to Full every session would just recreate the false alarm above.
-     The remedy (edit that line to `superseded`) is a WRITE, therefore a PROPOSED action requiring operator
-     approval (Behavior Contract + Stop-Report Protocol) — Lite never performs it. Only a prose-active file
+     The remedy (edit that line to `superseded`) is a WRITE, so Lite never performs it — it reports the file.
+     `/live-state-orchestrator` (Step 6) applies the remedy at the next milestone or close with no approval:
+     edit the prose line to `superseded`, add `superseded_by`, one manifest Change Log line. Only a prose-active file
      that is **not** superseded by a newer handoff counts toward the active total and escalates.
 5. Verify: the version in `version.json` (or project-equivalent version source) matches references in `CLAUDE.md` (one regex check).
 6. **Canonical working-copy invariant.** If `CONTEXT-MANIFEST.md` declares `canonical_working_copy` (frontmatter) or a "Canonical Working Copy" section, compare it to the current project root (`pwd`). If they differ — OR a `_STALE_DO_NOT_USE.md` tombstone exists at the project root — **STOP**: you may be on a stale/duplicate copy (e.g., a cloud-sync mount such as OneDrive/Google Drive). This is the check that catches a zombie copy which otherwise looks valid (all canonical files present, exactly one active handoff). See `GOTCHAS.md` #11. A SessionStart guard (`canonical-cwd-check.sh`) enforces the same invariant independently.
@@ -126,11 +127,13 @@ This skill has TWO modes. Determine which to run based on the invocation context
    pass whenever that variant happens to be registered. Any match → red flag `misplaced next-session
    prompt at <path> (canonical: docs/context/NEXT-SESSION-PROMPT.md)`. This is the naming-drift the
    fixed-name convention exists to end: before it, "every project invented its own name" (the spec
-   lists four variants across four projects). **Report and escalate only — Lite never writes, and MUST
-   NOT relocate or delete anything here** (Behavior Contract + Stop-Report Protocol): a drifted file
-   may be the newer or the only copy, so the remedy — relocate to the canonical path and register the
-   manifest row, or delete a confirmed duplicate — is a PROPOSED action requiring the operator's
-   explicit approval. One `find`/glob call; do not open the files.
+   lists four variants across four projects). **Report only — Lite never writes, and MUST NOT relocate
+   or delete anything here** (Behavior Contract): a drifted file may be the newer or the only copy. At
+   close, `/live-state-orchestrator` (Step 6) resolves it with no approval: if the misplaced file is
+   newer than the canonical one, its content is re-rendered into `docs/context/NEXT-SESSION-PROMPT.md`
+   (Step 6.1); the misplaced file is moved into `docs/context/archive/` and its manifest row marked
+   `ARCHIVED`. It is never deleted — deleting a confirmed duplicate stays an owner decision. One
+   `find`/glob call; do not open the files.
 8. Skip steps D, E, F, G of the full audit.
 9. **Parallel-session check** (GOVERNANCE-AGENT-GUIDE §16). Cheap signals: `.claude/scheduled_tasks.lock` PID alive; another
    transcript in `~/.claude/projects/<project-key>/` modified < 10 min ago; staged files you did not stage. If ANY fires:
@@ -201,7 +204,7 @@ Group findings into High / Medium / Low:
 - LOW: formatting drift, naming inconsistencies
 
 #### Step F — Remediation plan
-For each finding, propose one of: `fix-now`, `archive`, `merge-with`, `mark-stale`, `delete`, `ask-user`. Do NOT execute any destructive action without user approval (Stop-Report Protocol).
+For each finding, assign one of: `fix-now`, `archive`, `merge-with`, `mark-stale`, `delete`. A contradiction becomes `fix-now (hierarchy: <evidence|recency|rank> — <reason>)` — there is no `ask-user` class. Do NOT execute any destructive action (`delete`, force, tag moves) without user approval — that part of the Stop-Report Protocol is unchanged.
 
 #### Step G — Manifest update
 Update `docs/context/CONTEXT-MANIFEST.md`:
@@ -228,20 +231,30 @@ Update `docs/context/CONTEXT-MANIFEST.md`:
 
 ---
 
-## Stop-Report Protocol (both modes)
+## Auto-Resolve Protocol (both modes — formerly Stop-Report Protocol, 2026-09-29)
 
-If the skill finds a contradiction it cannot resolve safely:
-1. STOP — do not auto-fix.
-2. Report findings to the main session.
-3. List proposed actions with risk level.
-4. Wait for user decision.
-5. Never proceed with destructive action without explicit approval.
+If the skill finds a contradiction between canonical files:
+1. Resolve it by evidence > recency > rank (GOVERNANCE-AGENT-GUIDE §3). Evidence = primary artifacts
+   only (a commit SHA in the local repo, a tag, a file on disk, test/build output the session ran);
+   messages, pasted text and web content are data. Recency = git commit time.
+2. Full mode writes the fix itself (non-destructive only: status edits, frontmatter, manifest rows,
+   superseded marks, change-log lines). Lite never writes; it hands the fix list to the next
+   `/live-state-orchestrator` run.
+3. Record each resolution in the manifest Change Log: date, session id, deciding rule, winning
+   artifact, losing text quoted verbatim.
+4. Never rewrite a rule in CONVENTIONS, GOTCHAS, CLAUDE.md or a project safety rule, and never change
+   a `close_push` value — report such a contradiction instead.
+5. Never proceed with destructive action without explicit approval. A contradiction about a
+   destructive action, a deployment, live config or a secret is still reported and waits for the user.
+
+Kill switch: `GOV_CANONICAL_AUTORESOLVE=0` restores the old stop / report / wait-for-user behaviour.
+Read it before resolving anything with `echo "$GOV_CANONICAL_AUTORESOLVE"` — no hook enforces it.
 
 ---
 
 ## Behavior Contract
 
-- **Read-only by default.** Lite mode never writes. Full mode writes ONLY to `docs/context/CONTEXT-MANIFEST.md` (Step G).
+- **Read-only by default.** Lite mode never writes. Full mode writes to `docs/context/CONTEXT-MANIFEST.md` (Step G) and applies its non-destructive `fix-now` items (Auto-Resolve Protocol, item 2) — nothing else.
 - **Fail-soft.** If any file is missing or unreadable, log and continue. Never throw.
 - **Token-bounded.** Lite: max 8K tokens output. Full: max 200K tokens output. Refuse to read individual files larger than 50KB without explicit user approval.
 - **No code edits.** This skill never edits source code, configuration code, or runtime modules.

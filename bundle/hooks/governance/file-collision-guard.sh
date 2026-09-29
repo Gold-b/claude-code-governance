@@ -172,9 +172,13 @@ ACK_CMD_PATH="bash $(printf '%q' "$SCRIPT_DIR/file-collision-ack.sh") $(printf '
 # session resolves the conflict itself and records it — no human is asked, because a close must run
 # unattended. For code, "ask the user" stays: two versions of code are not append-only and a wrong
 # merge is a silent regression. Pure `case`, no fork: this guard runs on every write.
+# The backslash goes through a variable: in bash 5.2 `${FILE_PATH//\\//}` leaves C:\x\docs\... as it
+# is (measured, review round 1), and on Windows this guard receives backslash paths.
 _CANON=0
-case "${FILE_PATH//\\//}" in
-  */docs/context/*|*/Plans/*|*/memory/*|*/CLAUDE.md|*/MEMORY.md|*/HANDOFF*.md) _CANON=1 ;;
+_bs='\'
+_fp="${FILE_PATH//"$_bs"//}"
+case "$_fp" in
+  */docs/context/*.md|*/Plans/*.md|*/.claude/projects/*/memory/*.md|*/CLAUDE.md|*/MEMORY.md|*/HANDOFF*.md) _CANON=1 ;;
 esac
 if [ "$_CANON" = 1 ]; then
   REMEDY_BUSY="  * canonical context file: wait for the claim to lapse and retry ONCE; if it is still held,

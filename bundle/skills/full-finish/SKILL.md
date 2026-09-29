@@ -21,10 +21,15 @@ This skill includes **session handoff** (formerly `/end-session`) — producing 
 
 Trigger: Call the `pre-close-check` skill. Read its output.
 
-**Stop conditions:**
-- If verdict is `PARALLEL_SESSION_DETECTED` → STOP, report to user, ask whether to run `/parallel-session-merge` first.
-- If verdict is `DRIFT_DETECTED` → STOP, show the drift (version mismatch / multiple active handoffs / stale manifest), ask user how to resolve.
-- If verdict is `clean` → proceed to Phase 1.
+**Verdict handling (no stop, no question — 2026-09-29):**
+- If the verdict is `PARALLEL_SESSION_DETECTED` or `DRIFT_DETECTED`, pre-close-check has already
+  resolved it automatically (it ran `/parallel-session-merge` in `auto` mode and/or fixed the version
+  lines, handoff statuses and manifest rows) and returned `resolved`. Copy its `Auto-resolved:` lines
+  into the Phase 7 report and proceed to Phase 1.
+- If the verdict is `clean` → proceed to Phase 1.
+- Exceptions that still stop and ask the owner: a resolution that would be destructive, a deployment,
+  a live-config change or a secret (GOVERNANCE-AGENT-GUIDE §7). With `GOV_CANONICAL_AUTORESOLVE=0` set,
+  the old stop-and-ask behaviour returns.
 
 **Do NOT skip this phase.** The 2026-04-17 v1.2.3-b/v1.2.4 incident happened because the prior session trusted in-memory state over filesystem reality.
 
@@ -50,16 +55,27 @@ git describe --tags --exact-match HEAD 2>/dev/null
 
 ### Retrospective Mode behavior
 
-If retrospective is detected, STOP and present this choice to the user before any Phase 2 agent is dispatched:
+If retrospective is detected, do not stop and do not ask: select **Mode `A+docs`** automatically
+before any Phase 2 agent is dispatched, and print this notice (2026-09-29):
 
 ```
 [full-finish] HEAD is already tagged: <tag>.
 
 This is a RETROSPECTIVE run. Per the skill contract, any code fix
-produced by Phase 2 audit or Phase 3 docs work will land as a commit
+produced by Phase 2 audit or Phase 3 docs work would land as a commit
 AFTER <tag>, breaking the "tag = shipped state" invariant.
 
-Choose one before continuing:
+Mode A+docs selected automatically: code stays read-only, the canonical
+context files are updated and committed, no bump, no tag, no release.
+A release of any fix (Mode B) is recorded in HANDOFF as the owner's
+next decision.
+
+Modes:
+
+  A+docs) DEFAULT — Phase 2 runs read-only for code; findings go to
+     OPEN-PROBLEMS; Phase 3 canonical updates run; this session's
+     canonical paths (docs/context/**, Plans/**) are committed; no
+     version bump, no tag, no release.
 
   A) AUDIT-ONLY — Phase 2 runs read-only. Any finding becomes a report
      only (no code writes, no commits). Use this if you only want to
@@ -74,15 +90,17 @@ Choose one before continuing:
      something is wrong, start a new session with a normal /full-finish.
 ```
 
-Wait for the user's selection before proceeding. Record the chosen mode and enforce it:
+Do not wait for a selection. A/B/C are used only when the owner's own invocation already named
+one (e.g. "/full-finish bump-on-fix"); otherwise `A+docs` runs. Record the chosen mode and enforce it:
 
+- Mode A+docs (default): set `RETROSPECTIVE_MODE=audit-plus-docs`. Phase 2 agent prompts MUST include "READ-ONLY for code — do NOT modify any code file. Report findings only." Findings are appended to OPEN-PROBLEMS. DevOps agent skipped. Phase 3 docs agent runs for the canonical context files only. Phase 4-5 skipped (no bump, no tag, no release). The session's canonical paths are committed (`git add` + `git commit` in ONE invocation, then `git show --stat`). If a fix needs a release, write "release <fix> as the next version (Mode B) — owner decision" as a HANDOFF next action. Phase 9 treats the resulting canonical-only commits past the tag as reported, not blocked.
 - Mode A: set `RETROSPECTIVE_MODE=audit-only`. Phase 2 agent prompts MUST include "READ-ONLY — do NOT modify any file. Report findings only." DevOps agent skipped. Phase 3 docs agent skipped. Phase 4-5 skipped. Phase 7 produces an audit report only, no handoff file rotation.
 - Mode B: set `RETROSPECTIVE_MODE=bump-on-fix`. Pipeline runs normally. If Phase 2/3 creates ANY file change, Phase 4.1 bumps version (next patch) and Phases 4-5 release it. If Phase 2/3 finds zero issues, Phase 4 is skipped with a "no changes — no release needed" log line.
 - Mode C: exit immediately with "Aborted by user. No changes made."
 
 ### Edge case: dirty working tree on a tagged HEAD
 
-If `git describe --tags --exact-match HEAD` succeeds BUT `git status --short` is non-empty, the user has uncommitted changes on top of a released tag. This is the same class of problem as retrospective mode — the uncommitted changes aren't captured by the tag. Treat this as retrospective with the same A/B/C prompt; Mode B's Phase 4.1 will capture the uncommitted work in the bump commit.
+If `git describe --tags --exact-match HEAD` succeeds BUT `git status --short` is non-empty, the user has uncommitted changes on top of a released tag. This is the same class of problem as retrospective mode — the uncommitted changes aren't captured by the tag. Treat this as retrospective with the same automatic `A+docs` default: uncommitted canonical paths are committed; uncommitted CODE is left as it is and named in HANDOFF as the owner's next decision (Mode B's Phase 4.1 would capture it in a bump commit).
 
 ---
 
@@ -882,10 +900,11 @@ DIRTY=$(git status --short 2>/dev/null)
 
 Evaluate:
 
-1. **If `DIRTY` is non-empty** → BLOCK. "Hermetic close failed: uncommitted changes still present. Commit or stash them, then re-run Phase 9."
+0. **Does this project release by tag?** Checks 2-4 apply only when `version.json` exists AND at least one semver tag exists (`git tag -l 'v[0-9]*'` non-empty). A governed project that never tags skips checks 2-4 and PASSes on check 1 alone — otherwise `/full-finish` could never return success there.
+1. **If `DIRTY` is non-empty** → automatic recovery, no question: commit this session's own paths (`git add -- <paths> && git commit -m … -- <paths>` in ONE invocation, then `git show --stat <sha>`), then re-run Phase 9. Never `-A`, `-u`, `stash` or `reset`. Paths that are NOT this session's (a parallel session's dirty files) stay uncommitted and are named in the report — BLOCK only if such paths remain: "Hermetic close failed: uncommitted changes from another session: <paths>."
 2. **If `CURRENT_TAG` is empty** → BLOCK. "Hermetic close failed: HEAD has no tag. Either run Phase 4-5 to release this HEAD, or revert any commits that happened after the last tag."
 3. **If `CURRENT_TAG` != `CURRENT_VERSION`** → BLOCK. "Hermetic close failed: git tag says `$CURRENT_TAG` but version.json says `$CURRENT_VERSION`. Align them before close." (This catches the case where version.json was bumped but no release happened, or vice versa.)
-4. **If `git rev-list <CURRENT_TAG>..HEAD` is non-empty** → BLOCK. "Hermetic close failed: HEAD is N commits ahead of tag `$CURRENT_TAG`. Run `/full-finish` again in BUMP-ON-FIX mode, or move the tag to HEAD with explicit user approval (`git tag -f <tag> HEAD && git push --force origin <tag>`)."
+4. **If `git rev-list <CURRENT_TAG>..HEAD` is non-empty** → if every one of those commits touches ONLY canonical paths (`docs/context/**`, `Plans/**`; check with `git diff --name-only <CURRENT_TAG>..HEAD`), REPORT them ("N canonical-only commits past `<tag>` — journal, not shipped code") and continue to check 5. Otherwise BLOCK. "Hermetic close failed: HEAD is N commits ahead of tag `$CURRENT_TAG`. Run `/full-finish` again in BUMP-ON-FIX mode, or move the tag to HEAD with explicit user approval (`git tag -f <tag> HEAD && git push --force origin <tag>`)."
 5. **All checks pass** → PASS. Print:
    ```
    [phase-9] hermetic close verified:
@@ -898,14 +917,14 @@ Evaluate:
 
 ### Recovery options if blocked
 
-When Phase 9 blocks, present the user with concrete options based on the failure mode:
+When Phase 9 blocks on a release-state failure, present the user with concrete options based on the failure mode:
 
-- **Uncommitted changes:** "Stage and commit them as part of this release, or stash for later. Which?"
+- **Uncommitted changes (this session's own):** no question — recovered automatically by check 1 (commit, `git show --stat`, re-run Phase 9). Only another session's leftover paths are reported, never swept in.
 - **No tag on HEAD:** "Run Phase 4-5 now to release this state as <next-version>, or revert HEAD to the last tagged commit. Which?"
 - **Tag/version mismatch:** "Bump version.json to match `<tag>`, or bump tag to match `<version>`, or release fresh. Which?"
 - **Commits past tag:** "Release as next version (recommended), or move existing tag forward with force-push (destructive but acceptable for same-release completion work). Which?"
 
-Wait for user decision. Never auto-move tags or auto-bump without explicit confirmation.
+For the release-state failures (no tag, tag/version mismatch, code commits past the tag): wait for user decision. Never auto-move tags or auto-bump without explicit confirmation.
 
 ### What this phase does NOT do
 
@@ -930,8 +949,9 @@ Evaluate the goal's **recorded** Definition of Done (verbatim — never the stoc
 `~/.claude/docs/NEXT-SESSION-HANDOVER.md` §2 when the goal declared its own) against what
 actually happened, then take exactly one branch:
 
-**A BLOCK is not automatically a session end.** Phase 9's Recovery section presents the user with
-options (release as next version, move the tag, commit the stray changes) **and waits**. While
+**A BLOCK is not automatically a session end.** For this session's own uncommitted changes Phase 9
+recovers automatically (commit, re-run) — no wait. For the release-state failures its Recovery
+section presents the user with options (release as next version, move the tag) **and waits**. While
 that decision is pending the session is still running, so declaring "session is ending" to the
 orchestrator would bypass the session-ending prerequisite Step 6.1 enforces, dirty a tree that
 may have been clean, and leave a stale prompt behind the moment the user picks a recovery and the
@@ -940,8 +960,8 @@ pipeline continues. Render only once the answer is in.
 | Phase 9 verdict | Goal / session | Action |
 |---|---|---|
 | PASS | every DoD item verified | **Nothing.** The normal success path. Do not write, do not delete. |
-| BLOCK | user picked a recovery, work continues | **Nothing yet.** Apply the recovery, re-run Phase 9, then re-enter Phase 9.1 on the new verdict. |
-| **BLOCK** | user stopped, or the blocker cannot be resolved in this session | **Persist.** NOW the session is ending. Invoke `/live-state-orchestrator` in `persist` mode with "session is ending"; Step 6.1 rewrites `docs/context/NEXT-SESSION-PROMPT.md`. The tree is already dirty and the run already returns a block report, so there is no invariant left to protect. Say in the block report that this write is part of what the user must commit. |
+| BLOCK | automatic recovery applied (own uncommitted changes committed), or user picked a release recovery; work continues | **Nothing yet.** Apply the recovery, re-run Phase 9, then re-enter Phase 9.1 on the new verdict. |
+| **BLOCK** | user stopped, or the blocker cannot be resolved in this session | **Persist.** NOW the session is ending. Invoke `/live-state-orchestrator` in `persist` mode with "session is ending" **and the push skipped** (its Step 8b: `GOV_CLOSE_PUSH=0` for that run — the release state is waiting on the user, and a close push here would send the unreleased commits past the tag upstream); Step 6.1 rewrites `docs/context/NEXT-SESSION-PROMPT.md`. The tree is already dirty and the run already returns a block report, so there is no invariant left to protect. Say in the block report that this write is part of what the user must commit. |
 | PASS | still open — e.g. Phase 6 client update failed while the tag itself is fine, or a P0 was deferred | **Chat only.** Invoke `/live-state-orchestrator` Step 6.1 in **`render-only`** mode: identical text, no write. `NEXT-SESSION-PROMPT.md` is tracked; writing it after the tag turns the hermetic close that just passed into a dirty tree, and Phase 9 would have blocked had it run again. Emit the prompt in the final report and state plainly that it was not persisted, and why. `NEXT-SESSION-HANDOVER.md` §0 carries the same exception. |
 
 **Never delete `docs/context/NEXT-SESSION-PROMPT.md` after Phase 5 has tagged.** Deleting a

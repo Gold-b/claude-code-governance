@@ -72,6 +72,11 @@ File: <path>
 - **MEDIUM** — file with 2-5 callers OR is referenced from a gotcha
 - **LOW** — leaf file with 0-1 callers OR pure utility
 
+**Canonical governance files are EXCLUDED from risk classification** (2026-09-29) — `docs/context/**`,
+`Plans/**`, the memory files and the project `CLAUDE.md`'s journal sections are written under the
+`/live-state-orchestrator` append-only contract, not through this executor's HIGH-risk stop, even when
+the manifest lists them `authority: high`. Code, config and routing files keep their classification.
+
 ### Step 3 — Scope check
 - For each planned write, verify the target file is in `allowed_scope`
 - If a write would touch a file NOT in scope → STOP, ask user
@@ -126,7 +131,7 @@ Next: <continue | block | done>
 ## Generic forbidden patterns
 
 - ❌ Writing to directories marked read-only in CLAUDE.md
-- ❌ Git push / reset --hard / push --force without explicit user command
+- ❌ reset --hard, push --force (any force form), a push to another repository or a new branch, or a hook-bypass flag — never without the owner's explicit command (`deny-git-bypass.sh` blocks the force / delete / `reset --hard` / bypass-flag forms; the other repository and new branch rules are yours to keep — no hook checks them). An ordinary push of the session's commits to the current branch's EXISTING upstream is allowed only through the close contract: `~/.claude/hooks/governance/close-push.sh` (live-state-orchestrator Step 8b), which scans the outgoing commits (best effort) and holds public repos, repos with a file on its CI / deploy-config list (a list, not a guarantee) and `close_push: off` repos (owner decision 2026-09-29).
 - ❌ Adding "improvements" not in the goal
 - ❌ Hardcoding values that should be derived from config/version files
 - ❌ Skipping evidence collection

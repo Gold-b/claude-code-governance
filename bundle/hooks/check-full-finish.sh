@@ -14,7 +14,7 @@ STAGED_CHANGES=$(git diff --cached --name-only -- '*.js' '*.ts' '*.json' '*.ps1'
 
 if [ -n "$STAGED_CHANGES" ]; then
   echo "Staged code changes detected - commit them before stopping: git add -- <your paths> && git commit -m \"...\" -- <your paths>" >&2
-  echo "in ONE call, then confirm with git show --stat HEAD." >&2
+  echo "in ONE call, then confirm with git show --stat HEAD. The close pushes it: bash ~/.claude/hooks/governance/close-push.sh" >&2
   echo "Run /full-finish only if this close is a release. Do not stop to ask anyone." >&2
   exit 2  # Block stop — sends Claude back to work
 fi

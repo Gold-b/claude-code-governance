@@ -35,22 +35,28 @@ Before scaffolding, verify:
 
 ---
 
-## Phase 0 — Intake Questions (MANDATORY)
+## Phase 0 — Inferred Intake (no questions — 2026-09-29)
 
-Ask the user 4 questions before scaffolding:
+Do not ask the user anything: the global rule runs `/init-governance` automatically, and a scaffold
+that waits for answers never finishes in an unattended session. Infer the four values, mark each
+inferred name / description / stack in the file it lands in as `(inferred <date> — edit if wrong)`
+(never the canonical path: `canonical_working_copy` and the CLAUDE.md banner are compared
+byte-for-byte by `canonical-cwd-check.sh`, and that path is measured, not guessed), and record the sources
+in the CONTEXT-MANIFEST Change Log (`<date> | <session-id> | init-governance inferred intake: name from
+<source>, description from <source>, stack from <manifests>, canonical path from pwd`). If the user's
+own message already supplied a value, use it instead of inferring it.
 
-**Question 1 — Project Name:**
-- "מהו שם הפרויקט?"
+**Value 1 — Project Name (`{{PROJECT_NAME}}`):** `package.json` `name` → `pyproject.toml` / `Cargo.toml`
+/ `go.mod` module name → the project root's directory name.
 
-**Question 2 — Project Description:**
-- "תאר בקצרה מה הפרויקט עושה (משפט אחד עד שלושה)"
+**Value 2 — Project Description (`{{PROJECT_DESCRIPTION}}`):** the first paragraph of `README.md`, else of
+an existing `CLAUDE.md`, else `TBD`.
 
-**Question 3 — Tech Stack (optional):**
-- "מה ה-tech stack? (שפות, frameworks, DB, deployment)" — the user can skip this
+**Value 3 — Tech Stack (`{{TECH_STACK}}`):** the manifests detected at the root (`package.json`,
+`pyproject.toml`, `Cargo.toml`, `go.mod`, `pom.xml`, `Dockerfile`, `docker-compose.yml`, …), else `TBD`.
 
-**Question 4 — Canonical working-copy path:**
-- "מהו הנתיב המלא של עותק-העבודה הקנוני? (ברירת מחדל: התיקייה הנוכחית)"
-- Resolve the project's absolute root yourself (`pwd`, or `pwd -W` on Windows). If the user accepts the default or skips, USE that resolved path. The answer becomes `{{CANONICAL_PATH}}` and **MUST NOT be empty** — this field is the linchpin of the stale-copy defense: the SessionStart guard `canonical-cwd-check.sh` and `/context-governance` Lite both compare the live working directory to it, and an empty/absent field silently disables that protection (the exact gap that let a session open a stale duplicate undetected).
+**Value 4 — Canonical working-copy path (`{{CANONICAL_PATH}}`):**
+- Resolve the project's absolute root yourself (`pwd`, or `pwd -W` on Windows) and USE that resolved path. It becomes `{{CANONICAL_PATH}}` and **MUST NOT be empty** — this field is the linchpin of the stale-copy defense: the SessionStart guard `canonical-cwd-check.sh` and `/context-governance` Lite both compare the live working directory to it, and an empty/absent field silently disables that protection (the exact gap that let a session open a stale duplicate undetected).
 
 ---
 
@@ -65,7 +71,7 @@ mkdir -p Plans
 
 ## Phase 2 — Create canonical files
 
-Create each file with the templates below. Replace `{{PROJECT_NAME}}` and `{{PROJECT_DESCRIPTION}}` with intake answers.
+Create each file with the templates below. Replace `{{PROJECT_NAME}}` and `{{PROJECT_DESCRIPTION}}` with the Phase 0 inferred values.
 
 ### 2.1 — `docs/context/CONTEXT-MANIFEST.md`
 

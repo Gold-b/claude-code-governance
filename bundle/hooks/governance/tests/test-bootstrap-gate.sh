@@ -64,10 +64,12 @@ for c in 'node ~/.claude/skills/whatsapp/send.js "[CC] status"' 'node %USERPROFI
          "git -C /c/repo push" "git -c user.name=x commit -m y" "scp a.py root@<HOST>:<DIR>" "rsync -av src/ root@<HOST>:<DIR>" \
          "ssh root@<HOST> 'systemctl restart example-news'" "ssh root@<HOST> \"sudo systemctl --now enable x.timer\"" \
          "ssh root@<HOST> 'cd <DIR> && docker compose up -d'" "docker compose -f deploy/a.yml down" "docker restart scanner" \
-         "systemctl daemon-reload"; do
+         "systemctl daemon-reload" "bash ~/.claude/hooks/governance/close-push.sh -C /c/repo"; do
   expect 2 "Bash blocked: $c" "$(payload Bash "$(bashin "$c")")"
 done
 expect 2 "PowerShell git push blocked" "$(payload PowerShell "$(bashin "git push origin HEAD")")"
+expect 2 "close-push.sh blocked before bootstrap" "$(payload Bash "$(bashin "bash ~/.claude/hooks/governance/close-push.sh")")"
+grep -qF "BLOCKED: close push (close-push.sh)" "$ERR" && ok "the close-push block names it" || bad "close-push block label" "$(head -c 200 "$ERR")"
 expect 0 "PowerShell Get-ChildItem allowed" "$(payload PowerShell "$(bashin "Get-ChildItem C:\\tmp")")"
 big=$(printf 'echo %.0s' $(seq 1 1500)); expect 2 "long (>4 KB) command with git commit at the end blocked" \
   "$(payload Bash "$(bashin "$big; git commit -m x")")"
@@ -87,6 +89,7 @@ parity=$(printf '{"session_id":"sid-A"}' | HOME="$H" bash -c ". '$HOOKS/_common.
 expect 0 "Edit now allowed"      "$(payload Edit '{"file_path":"/x/a.md","old_string":"a","new_string":"b"}')"
 expect 0 "ssh restart now allowed" "$(payload Bash "$(bashin "ssh root@<HOST> 'systemctl restart x'")")"
 expect 0 "WhatsApp send now allowed" "$(payload Bash "$(bashin 'node send.js "[CC] x"')")"
+expect 0 "close-push.sh now allowed" "$(payload Bash "$(bashin "bash ~/.claude/hooks/governance/close-push.sh -C /c/repo")")"
 
 echo "== 3. other sessions and name variants"
 expect 2 "different session_id still blocked" "$(payload Edit '{"file_path":"/x/a"}' sid-B)"

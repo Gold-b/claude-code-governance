@@ -95,7 +95,7 @@ Generated from `bundle/settings-hooks.json`, which is the source of truth. `chec
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
 | PreToolUse (Edit/Write) | `pii-gate-pretooluse.sh` | Refuses a write that would put a real value into a publishable file |
 | PreToolUse (Edit/Write) | `file-collision-guard.sh` | Blocks a write over a file another session claimed |
-| PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2) |
+| PreToolUse (Bash, PowerShell) | `deny-git-bypass.sh` | Blocks a hook-bypass flag (`--no-verify`, `-c core.hooksPath=`, `HUSKY=0`, `GOVERNANCE_HOOKS=0`, `NO_LOCAL_COMPUTE=0`) on `git push` / `commit` / `merge` / `gh pr create` / `merge`; warns when `.githooks/` ships but `core.hooksPath` is unset. Owner override: `DENY_GIT_BYPASS=0` (v1.3.2). Since v2.0.0 it also blocks **destructive git**: a push that rewrites or deletes remote history (`--force`, `--force-with-lease`, `-f`, `+ref`, `--delete`, `:ref`, `--mirror`, `--prune`) and `reset --hard`, anchored to the git command's own segment; owner-only override `GOV_GIT_DESTRUCTIVE_OK=1` in `settings.json` `env` |
 | PreToolUse (Bash, PowerShell) | `render-gate.sh` | Blocks a render/billing command (`remotion-cli render`, `heygen video create`, …) until the project's `Read_Before_Every_Render.md` has been read this session; the read mints a one-shot token this gate spends, so each render needs its own read. No-op in any project without that file. Registered v1.6.1, task B11 |
 | PreToolUse (Edit/Write, Bash, PowerShell) | `bootstrap-gate.sh` | In a governed SOURCE project, blocks Edit/Write and outward shell actions (WhatsApp send, `git commit` / `push`, `scp` / `rsync`, `systemctl` / `docker` start-stop, also inside an `ssh` command) until the `bootstrapper` skill has run in this session. Reads, `Skill` and `Agent` are never blocked, so the one action that clears it is always available. Internal errors fail open with a logged warning. Kill switch `GOV_BOOTSTRAP_GATE=0` (v2.0.0) |
 | PreToolUse (SendMessage) | `cross-session-guard.sh` | A report to another live Claude session must say what it MEASURED and what it did NOT CHECK (v1.6.0) |
@@ -718,6 +718,23 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-09-29 (v2.0.0) — the hooks stop sending sessions to a human before canonical writes;
+  destructive git is now a control.** A session close is meant to run end to end (owner decision),
+  so the hooks' remedies no longer say "ask the user" for the framework's own context files.
+  `file-collision-guard.sh` still
+  blocks every collision, but on a canonical context file (`docs/context/`, `Plans/`, memory,
+  `CLAUDE.md`, a handoff) its advice is now to merge both sides and record the losing text in the
+  change log, or park the entry in the session's `pending-merge.md`, never "ask the user"; code
+  files keep the human remedy. `check-full-finish.sh` now asks for a commit (`git add` + `git
+  commit` in one call, then `git show --stat`) instead of sending every close into `/full-finish`,
+  which stays for releases. The opt-in success-token text asks for evidence, not a person.
+  Because nobody watches an unattended close, force-push, remote deletes and `reset --hard` are
+  no longer a rule in prose: `deny-git-bypass.sh` blocks them (owner override
+  `GOV_GIT_DESTRUCTIVE_OK=1`). It uses bash's own regex, no extra process: measured interleaved
+  with the previous version under full CPU load, 31 runs each, the median `git push` check moved
+  6097 -> 6137 ms and an ordinary command stayed within noise (a first grep-based draft cost
+  +1.6 s there and was replaced). `governance-selftest.sh --only=a.sh,b.sh` runs a scoped check in about two
+  minutes; it says SCOPED and is never a verdict.
 - **2026-09-29 (v2.0.0) — the session-start briefing is enforced, not just requested.**
   Behaviour change: **in a governed project, writes, sends and deploys are blocked until
   `/bootstrapper` runs.** Before this, `pre-task.sh` only printed "you MUST run /bootstrapper", and a

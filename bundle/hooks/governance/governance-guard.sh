@@ -19,8 +19,10 @@
 #
 # To authorize writes, the LLM must run:
 #   bash .claude/hooks/governance/commit-task-success.sh "<task desc>"
-# ONLY after the user has confirmed success. The script creates a 5-minute
-# token that this guard reads.
+# ONLY after it holds external evidence (test / build output it ran itself) that
+# the task succeeded. The script creates a 5-minute token that this guard reads.
+# No human is asked (2026-09-29, owner decision: canonical-file writes run
+# unattended); the token proves evidence was collected, not that someone agreed.
 #
 # Fail-open policy: if the hook cannot determine the file path (stdin empty,
 # JSON malformed, etc.), it exits 0 (allows) and logs a warning. This prevents
@@ -341,11 +343,12 @@ if [ ! -f "$TOKEN_FILE" ]; then
 Target file: $FILE_PATH
 Matched protected pattern: $MATCHED_PATTERN
 
-To authorize this edit, FIRST confirm with the user that the task completed
-successfully, THEN run:
+To authorize this edit, FIRST collect external evidence that the task
+succeeded (test or build output you ran yourself), THEN run:
   bash .claude/hooks/governance/commit-task-success.sh "<task description>"
+Do not stop to ask anyone: the token records evidence, not a person's approval.
 
-The token is valid for 5 minutes. After it expires, you must re-confirm.
+The token is valid for 5 minutes. After it expires, collect fresh evidence.
 
 This guard exists because past sessions wrote premature "RESOLVED" markers
 to docs for in-flight attempts, creating context drift. See user feedback
@@ -390,7 +393,7 @@ if [ "$NOW_EPOCH" -gt "$EXPIRES_EPOCH" ]; then
 [governance-guard] BLOCKED: success token expired $(($NOW_EPOCH - $EXPIRES_EPOCH)) seconds ago.
 
 Token file: $TOKEN_FILE
-Re-confirm success with the user, then re-issue by running:
+Re-check the evidence (re-run the test / build), then re-issue by running:
   bash .claude/hooks/governance/commit-task-success.sh "<task description>"
 ERRMSG
   trap - EXIT

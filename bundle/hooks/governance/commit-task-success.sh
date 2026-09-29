@@ -2,8 +2,9 @@
 # commit-task-success.sh — Explicit success-confirmation gate for governance doc updates
 # Created: 2026-04-12 (in response to user feedback: "enforcement via hook, not LLM instruction")
 #
-# This script is called EXPLICITLY by the LLM AFTER the user has confirmed
-# that a task completed successfully. It creates a short-lived "success token"
+# This script is called EXPLICITLY by the LLM AFTER it holds external evidence
+# (test / build output) that a task completed successfully; no human is asked
+# (2026-09-29). It creates a short-lived "success token"
 # that the pre-write governance-guard hook reads to authorize edits to
 # protected governance documents (Open-Problems.md, GOTCHAS.md, HANDOFF-*.md).
 #

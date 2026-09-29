@@ -63,7 +63,7 @@
 #   * GOV_NOTIFY=0 / GOV_WHATSAPP=0 keep the selftest off the owner's phone.
 #
 # USAGE
-#   bash ~/.claude/hooks/governance/governance-selftest.sh [--no-mutation] [--keep-sandbox]
+#   bash ~/.claude/hooks/governance/governance-selftest.sh [--no-mutation] [--keep-sandbox] [--only=a.sh,b.sh]
 #
 # ENV OVERRIDES
 #   GOV_SELFTEST_PROJECT   project root audited by part (b)   (no baked default)
@@ -80,8 +80,17 @@ umask 077
 # ── Options ──────────────────────────────────────────────────────────────────────────────────
 DO_MUTATION=1
 KEEP_SANDBOX=0
+# --only=<a.sh>[,<b.sh>...] (2026-09-29, HITL-removal board, QA condition 2): run Part A for the
+# named hooks only (by basename, mutants included) and skip the disk-vs-registration scan, Part B
+# and the live invariant. A scoped run is a fast check while editing, never a verdict: it prints
+# SCOPED in its summary, and like every direct run it only invalidates the .result file.
+ONLY=""
+_only_next=0
 for _a in "$@"; do
+  if [ "$_only_next" = 1 ]; then ONLY="$_a"; _only_next=0; continue; fi
   case "$_a" in
+    --only=*)       ONLY="${_a#--only=}" ;;
+    --only)         _only_next=1 ;;
     --no-mutation)  DO_MUTATION=0 ;;
     --keep-sandbox) KEEP_SANDBOX=1 ;;
     -h|--help)      sed -n '2,50p' "$0"; exit 0 ;;
@@ -525,6 +534,30 @@ case_deny_git_bypass() {
   pay="{\"session_id\":\"sid-dgb-5\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git config core.hooksPath .githooks\"}}"
   run_hook "$proj" "sid-dgb-5" "$pay"
   expect_rc 0 "wiring core.hooksPath is ALLOWED"
+  # 6-8. MUST BLOCK - destructive git (2026-09-29, HITL-removal board condition 5): a force push,
+  #      a +refspec, reset --hard. These keep their human approval once the close runs unattended.
+  pay="{\"session_id\":\"sid-dgb-6\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push -f origin main\"}}"
+  run_hook "$proj" "sid-dgb-6" "$pay"
+  expect_rc 2 "git push -f is BLOCKED"
+  expect_has "destructive git" "force push: the block names the destructive class"
+  pay="{\"session_id\":\"sid-dgb-7\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"PowerShell\",\"tool_input\":{\"command\":\"git -C x push origin +main\"}}"
+  run_hook "$proj" "sid-dgb-7" "$pay"
+  expect_rc 2 "a +refspec force push (PowerShell tool) is BLOCKED"
+  pay="{\"session_id\":\"sid-dgb-8\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git reset --hard HEAD~1\"}}"
+  run_hook "$proj" "sid-dgb-8" "$pay"
+  expect_rc 2 "git reset --hard is BLOCKED"
+  expect_has "reset --hard" "reset --hard: the block names it"
+  # 9-10. MUST ALLOW - anchoring: an -f belonging to ANOTHER command, and an ordinary refspec push.
+  pay="{\"session_id\":\"sid-dgb-9\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -f x.tmp && git push origin HEAD:main\"}}"
+  run_hook "$proj" "sid-dgb-9" "$pay"
+  expect_rc 0 "rm -f before an ordinary push is ALLOWED (anchored to the git segment)"
+  expect_not "destructive git" "anchoring: no destructive-git text for an ordinary push"
+  # 11. MUST ALLOW - the owner's override, from the hook environment
+  _RUN_ENV=(GOV_GIT_DESTRUCTIVE_OK=1)
+  pay="{\"session_id\":\"sid-dgb-10\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git reset --hard HEAD~1\"}}"
+  run_hook "$proj" "sid-dgb-10" "$pay"
+  expect_rc 0 "GOV_GIT_DESTRUCTIVE_OK=1 in the hook environment lets the owner through"
+  _RUN_ENV=()
 }
 
 # --- render-gate.sh -------------------------------------------------------------------------------
@@ -984,6 +1017,16 @@ case_collision_guard() {
   expect_rc 2 "concurrent claim: BLOCKS the second session"
   expect_has "another Claude Code session is editing this file" "concurrent claim: names the real reason"
   expect_has "sid-other" "concurrent claim: names the session holding it"
+  expect_has "tell the user" "concurrent claim on CODE: the human remedy stays"
+
+  # 2026-09-29 (HITL removal): on a CANONICAL context file the block is identical, but the remedy
+  # never sends the session to a human - it parks its entry in the session's pending-merge.md.
+  local canon="$repo/docs/context/OPEN-PROBLEMS.md"
+  run_fixture "$repo" "sid-other" "$(pl_pre "$repo" sid-other "$canon")"
+  run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$canon")"
+  expect_rc 2 "concurrent claim on a CANONICAL file: still BLOCKS"
+  expect_has "pending-merge.md" "canonical file: remedy parks the entry in the session's pending merge"
+  expect_not "tell the user" "canonical file: remedy never sends the session to a human"
 
   run_hook "$repo" "sid-mine" "$(pl_pre "$repo" sid-mine "$free")"
   expect_rc 0 "unclaimed new file: allowed"
@@ -1016,6 +1059,7 @@ case_governance_guard() {
   run_hook "$src" "sid-gg-1" "$(pl_pre "$src" sid-gg-1 "$prot")"
   expect_rc 2 "protected doc, no token: BLOCKED"
   expect_has "requires a success token" "protected doc: explains the token requirement"
+  expect_not "confirm with the user" "opt-in token: asks for evidence, never for a human (2026-09-29)"
 
   fx_token 300
   run_hook "$src" "sid-gg-2" "$(pl_pre "$src" sid-gg-2 "$prot")"
@@ -1328,7 +1372,8 @@ case_check_full_finish() {
   sbx_git "$repo" add feature.js
   run_hook "$repo" "sid-ff-2" "$(pl_plain "$repo" sid-ff-2 Stop)"
   expect_rc 2 "staged code changes: stop BLOCKED"
-  expect_has "full-finish" "staged code changes: names the required pipeline"
+  expect_has "full-finish" "staged code changes: names the release pipeline"
+  expect_has "git show --stat" "staged code changes: the remedy is commit-and-verify, not a release (2026-09-29)"
 }
 
 # --- check-docs-updated.sh --------------------------------------------------------------------
@@ -1775,6 +1820,9 @@ part_a() {
     n=$((n+1))
     local path base fn
     path="$(expand_cmd "$cmd")"
+    if [ -n "$ONLY" ]; then
+      case ",$ONLY," in *",$(basename "${path:-inline}"),"*) ;; *) continue ;; esac
+    fi
     if [ -z "$path" ]; then
       # Inline command (e.g. the Stop-event `echo ...` reminder). Still EXECUTED, not assumed.
       printf '\n  [%s] inline command\n' "$ev"
@@ -1822,6 +1870,10 @@ part_a() {
 $HOOK_LINES
 EOF
   printf '\n  hooks discovered in settings.json: %s\n' "$n"
+  if [ -n "$ONLY" ]; then
+    printf '  SCOPED run (--only=%s): registration scan, Part B and the live invariant are skipped\n' "$ONLY"
+    return
+  fi
 
   # ── Every script on disk is registered, or DECLARED not-a-hook with a reason ────────────────
   #
@@ -2473,7 +2525,7 @@ _gov_write_result() {   # $1 = state word, $2 = summary line
 _gov_write_result "a direct run started; any previous verdict is void" "(run in progress)"
 
 part_a
-part_b
+[ -n "$ONLY" ] || part_b
 
 # ── Live invariant: does the real governance.log account for every protected-file decision? ────
 # Not a sandboxed case - this reads the ACTUAL machine-wide log, which is production history, not
@@ -2482,7 +2534,7 @@ part_b
 # This is the exact check that would have caught the 2026-09-14 fail-open gap on day one instead
 # of 16 invocations (and an unknown number of months) later.
 _real_log="$CHOME/logs/governance.log"
-if [ -f "$_real_log" ]; then
+if [ -z "$ONLY" ] && [ -f "$_real_log" ]; then
   _lp=$(grep -c 'protected target' "$_real_log" 2>/dev/null || echo 0)
   _la=$(grep -cE 'ALLOW: (token valid|success-token gate off)' "$_real_log" 2>/dev/null || echo 0)
   _lb=$(grep -cE 'BLOCK:' "$_real_log" 2>/dev/null || echo 0)
@@ -2506,6 +2558,7 @@ fi
 if [ "${USERHOOK_N:-0}" -gt 0 ]; then
   printf 'USER HOOKS registered on this machine but not part of the framework (%s; not counted, not tested here):%s\n\n' "$USERHOOK_N" "$USERHOOK_LOG"
 fi
+[ -n "$ONLY" ] && printf 'SCOPED (--only=%s) - a partial check, NOT a verdict on the framework\n' "$ONLY"
 printf '[governance-selftest] pass=%s fail=%s uncovered=%s\n' "$PASS" "$FAIL" "$UNCOV"
 
 # A DIRECT RUN OF THIS SUITE INVALIDATES ~/.claude/logs/governance-selftest.result — it does not

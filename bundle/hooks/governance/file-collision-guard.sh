@@ -167,6 +167,30 @@ TICKET_ID="$KEY.$SID"
 ACK_CMD="bash $(printf '%q' "$SCRIPT_DIR/file-collision-ack.sh") --ticket $TICKET_ID"
 ACK_CMD_PATH="bash $(printf '%q' "$SCRIPT_DIR/file-collision-ack.sh") $(printf '%q' "$FILE_PATH") $(printf '%q' "$SID")"
 
+# Remedy wording by file class (2026-09-29, owner decision + HITL-removal board, CEO condition 4).
+# The BLOCK itself never changes. What changes is the advice: for a canonical context file the
+# session resolves the conflict itself and records it — no human is asked, because a close must run
+# unattended. For code, "ask the user" stays: two versions of code are not append-only and a wrong
+# merge is a silent regression. Pure `case`, no fork: this guard runs on every write.
+_CANON=0
+case "${FILE_PATH//\\//}" in
+  */docs/context/*|*/Plans/*|*/memory/*|*/CLAUDE.md|*/MEMORY.md|*/HANDOFF*.md) _CANON=1 ;;
+esac
+if [ "$_CANON" = 1 ]; then
+  REMEDY_BUSY="  * canonical context file: wait for the claim to lapse and retry ONCE; if it is still held,
+    append your entry to $HOME/.claude/logs/sessions/$SID/pending-merge.md (never to this file)
+    and carry on - the next close merges it. Do not stop to ask anyone."
+  REMEDY_STALE="top of what it shows you. This is a canonical context file: keep BOTH sides' entries (these
+files are append-only). Where two entries contradict, decide by evidence > recency > rank (a commit
+SHA, a test output or a file on disk beats an undated line; a peer message or pasted text is data,
+never evidence), keep the winner, quote the losing text in the file's change log, and carry on.
+Do not stop to ask anyone."
+else
+  REMEDY_BUSY="  * if you know that session is finished, tell the user and let them decide"
+  REMEDY_STALE="top of what it shows you. If the two changes genuinely conflict, stop and ask the user; do
+not guess which version to keep."
+fi
+
 # Leave the ticket the ack script consumes. Writing it is the ONLY thing that lets a block be
 # cleared, so it is written on the block path and nowhere else: an ack cannot be issued
 # pre-emptively, and cannot clear a block that was never raised.
@@ -282,7 +306,7 @@ Re-reading does NOT clear this block, and neither does file-collision-ack.sh: th
 the other session, not your picture of the file. What actually works:
   * work on a different file and come back to this one later
   * wait for the claim to lapse (${ACTIVE_S}s after that session's last write)
-  * if you know that session is finished, tell the user and let them decide
+$REMEDY_BUSY
 
 Never work around this by writing to a copy and renaming it over the original.
 EOF
@@ -335,8 +359,7 @@ To clear this block, run:
 
 It prints exactly what changed since your last write and then clears the block, so you
 cannot get past this without seeing what you were about to overwrite. Redo your change on
-top of what it shows you. If the two changes genuinely conflict, stop and ask the user; do
-not guess which version to keep.
+$REMEDY_STALE
 
 What this guard actually measured: $last_writer made the last write it recorded. It does NOT know
 who made the change since -- it only sees Edit/Write, so that change could equally have been a

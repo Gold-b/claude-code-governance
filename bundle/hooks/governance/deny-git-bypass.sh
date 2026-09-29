@@ -46,6 +46,47 @@ if [ -z "$CMD" ] && ! command -v python >/dev/null 2>&1; then
 fi
 [ -z "$CMD" ] && exit 0
 
+# (0) DESTRUCTIVE git (2026-09-29, HITL-removal board, CEO condition 5). Once canonical writes and
+# the close push run unattended, "never force-push" and "never reset --hard" can no longer rest on
+# prose: the session that would do it is the one nobody is watching. Blocked: a push that rewrites
+# or deletes remote history (--force, --force-with-lease, --force-if-includes, -f in a short-flag
+# cluster, a +refspec, --delete, a :ref deletion refspec, --mirror, --prune) and `reset --hard`.
+# Anchored to the git SEGMENT: `[^;&|]*` stops at the next command separator, so `rm -f x && git
+# push` is allowed and so is a later `; rm -f x`. The override is the owner's, not the model's: hooks
+# read Claude Code's environment, so GOV_GIT_DESTRUCTIVE_OK=1 typed into a command does nothing -
+# the owner sets it in settings.json "env", or runs the command himself in his own terminal.
+# COST: bash's own [[ =~ ]], no grep. This guard runs on EVERY Bash/PowerShell call; the first
+# version used three `printf | grep` forks and, measured interleaved under full CPU load, put +1.6 s
+# on the median `git push` (6724 -> 8344 ms). A glob prefilter skips everything that does not
+# contain both words, so an ordinary command pays one `case`. A newline counts as a separator, like
+# ; & | - bash regex spans lines where grep did not.
+_dz_candidate=0
+case "$CMD" in *[Gg][Ii][Tt]*[Pp][Uu][Ss][Hh]*|*[Gg][Ii][Tt]*[Rr][Ee][Ss][Ee][Tt]*) _dz_candidate=1 ;; esac
+if [ "$_dz_candidate" = 1 ] && [ "${GOV_GIT_DESTRUCTIVE_OK:-0}" != "1" ]; then
+  _nl=$'\n'
+  _ns="[^;&|${_nl}]"                                    # any char inside ONE command segment
+  _gopt="([[:space:]]+-[^[:space:];&|]+([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)?)*"
+  _gpre="(^|[^A-Za-z0-9_.-])git${_gopt}[[:space:]]+"
+  _re_force="${_gpre}push([[:space:]]${_ns}*)?[[:space:]](--force|--force-with-lease|--force-if-includes|-[A-Za-z]*f[A-Za-z]*|--delete|--mirror|--prune)([=[:space:]]|\$)"
+  _re_spec="${_gpre}push([[:space:]]${_ns}*)?[[:space:]][+:][A-Za-z0-9_./*-]"
+  _re_reset="${_gpre}reset([[:space:]]${_ns}*)?[[:space:]]--hard([[:space:]]|\$)"
+  _dz=""
+  shopt -s nocasematch
+  if   [[ $CMD =~ $_re_force ]]; then _dz="git push that rewrites or deletes remote history"
+  elif [[ $CMD =~ $_re_spec  ]]; then _dz="git push with a force (+ref) or delete (:ref) refspec"
+  elif [[ $CMD =~ $_re_reset ]]; then _dz="git reset --hard"
+  fi
+  shopt -u nocasematch
+  if [ -n "$_dz" ]; then
+    echo "[deny-git-bypass] BLOCKED: destructive git - $_dz." >&2
+    echo "  Force-push, remote deletes and reset --hard keep their HUMAN approval: they destroy history" >&2
+    echo "  nobody can get back. Do the non-destructive thing instead (a normal push after fetch + rebase," >&2
+    echo "  git stash / git restore -- <path>), or report to the owner and stop." >&2
+    echo "  Owner-only override: GOV_GIT_DESTRUCTIVE_OK=1 in ~/.claude/settings.json \"env\"." >&2
+    exit 2
+  fi
+fi
+
 # (a) Does the command run a hook-bearing git/gh action? If not, do not interfere.
 printf '%s' "$CMD" | grep -qiE '\bgit\b[^;&|]*\b(push|commit|merge)\b|\bgh\b[[:space:]]+pr[[:space:]]+(create|merge)\b' || exit 0
 

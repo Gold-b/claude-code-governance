@@ -24,7 +24,9 @@
 #      find: it proves the loop means the same, not how BSD find behaves)
 #   5. the updater never runs in the foreground at session start: an apply in progress is reported, an
 #      interrupted one is rolled back DETACHED, REPORT is printed (updater lines only, max 20, printable)
-#      and consumed once but never under a live apply, a staged release gets one line (silent when opted out)
+#      and consumed once but never under a live apply, a staged release (the user's own --fetch) gets
+#      one line, which no setting silences (2.0.0 has no automatic update); a release HELD for
+#      its terms (HELD-TERMS-<ver>) gets the DRAFTS D.2 line, inside the budget
 #   6. gov_dirty_snapshot prints exactly what the per-path loop it replaced printed
 #
 # Budget: GOV_SS_BUDGET_MS (default 9000, median of 3); growth 0 -> 200 dirs: GOV_SS_GROWTH_MS (default 2000). Template: GOV_SS_TEMPLATE (default: the bundle's).
@@ -33,10 +35,14 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_SRC="$(cd "$HERE/.." && pwd)"
 # The template sits two levels above the hooks in a bundle (bundle/hooks/governance), and in the
-# installer staging copy when run from the live tree (~/.claude/hooks/governance).
+# installer staging copy when run from a live tree (<claude home>/hooks/governance ->
+# <claude home>/governance-installer/bundle). The live tree's own claude home comes BEFORE
+# $HOME/.claude (round 3b, 2026-10-02): run from a GOV_SELFTEST_HOME copy, the old order read the
+# REAL home's template, not the one beside the hooks under test.
 TEMPLATE="${GOV_SS_TEMPLATE:-}"
 if [ -z "$TEMPLATE" ]; then
-  for _t in "$HOOKS_SRC/../../settings-hooks.json" "$HOME/.claude/governance-installer/bundle/settings-hooks.json"; do
+  for _t in "$HOOKS_SRC/../../settings-hooks.json" "$HOOKS_SRC/../../governance-installer/bundle/settings-hooks.json" \
+            "$HOME/.claude/governance-installer/bundle/settings-hooks.json"; do
     [ -f "$_t" ] && { TEMPLATE="$(cd "$(dirname "$_t")" && pwd)/settings-hooks.json"; break; }
   done
 fi
@@ -198,7 +204,11 @@ rm -rf "$S"; mkdir -p "$S"
 # An apply in progress (its pid alive) vs one that died mid-swap.
 printf 'version=9.9.9\nfrom=1.0.0\npid=%s\n' "$$" > "$U/APPLYING"
 OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1)
-printf '%s' "$OUT" | grep -q "being applied in the background right now (pid $$)" && ok "live apply pid: reported as in progress" || fail "live apply pid not reported: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+printf '%s' "$OUT" | grep -q "being applied right now (pid $$" && ok "live apply pid: reported as in progress" || fail "live apply pid not reported: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+# F3 (finding 5): a hand-run --apply prints its result in its own terminal, not at the next start.
+printf '%s' "$OUT" | grep -qF "A hand-run --apply prints its result in its own terminal; a background restore prints it here at the next session start." \
+  && ok "  it says where each kind of apply prints its result" || fail "  the where-it-prints sentence is missing: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+printf '%s' "$OUT" | grep -q "in the background right now" && fail "  still claims every apply runs in the background" || ok "  and no longer claims every apply runs in the background"
 printf '%s' "$OUT" | grep -q "INTERRUPTED" && fail "  live apply pid wrongly called INTERRUPTED" || ok "  and not called interrupted"
 # A REPORT is never consumed while an apply is live: its last line may not be written yet.
 printf '[GOVERNANCE UPDATE] Applied v9.9.9 (test)\n' > "$U/REPORT"
@@ -210,6 +220,9 @@ _dead=$(bash -c 'echo $$'); sleep 0.2
 printf 'version=9.9.9\nfrom=1.0.0\npid=%s\n' "$_dead" > "$U/APPLYING"
 t0=$(ms); OUT=$(payload "me-5" | GOVERNANCE_UPDATE_CHECK=0 bash "$H/pre-session.sh" 2>&1 | cat); dt=$(( $(ms) - t0 ))
 printf '%s' "$OUT" | grep -q "being rolled back to its backup in the background now" && ok "dead apply pid: rollback started in the background, even with the update check off (${dt} ms)" || fail "interrupted apply not handled: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+# F3 (finding 5): the only apply in 2.0.0 is a hand-run --apply - the line must not call it automatic.
+printf '%s' "$OUT" | grep -qF "[GOVERNANCE UPDATE] A gov-update.sh --apply was INTERRUPTED part-way;" && ok "  it names the manual --apply" || fail "  the manual --apply wording is missing"
+printf '%s' "$OUT" | grep -q "An automatic update" && fail "  still calls it an automatic update" || ok "  and does not call it automatic"
 # This sandbox journal has no complete backup, so the detached recovery just clears it and logs it.
 # Wait for the LOG line, not for the journal to vanish: the recovery removes the journal a moment
 # before it logs, so testing "gone" first raced (FAIL once under load in review, 2026-09-27).
@@ -239,14 +252,41 @@ OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1)
 printf '%s' "$OUT" | grep -q 'esc ' && fail "  REPORT printed twice" || ok "  a second start prints nothing"
 printf 'version=9.9.9 staged\n' > "$U/READY"
 t0=$(ms); OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1); dt=$(( $(ms) - t0 ))
-printf '%s' "$OUT" | grep -q "v9.9.9 is downloaded and its signature verified. It installs itself in the background when the last Claude Code session on this machine ends" && ok "READY: one line naming the version and when it installs (${dt} ms)" || fail "READY not reported: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
-printf '%s' "$OUT" | grep -q "gov-update.sh --apply --force-live" && ok "  with the command to install now instead" || fail "  apply command missing"
+# 2.0.0 has no automatic update: READY exists only after the user's own --fetch, and the line says so.
+_READY_LINE="[GOVERNANCE UPDATE] v9.9.9 is downloaded and verified (your --fetch); nothing installs on its own. To install: close every Claude Code session, then in your own terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
+printf '%s\n' "$OUT" | grep -qxF "$_READY_LINE" && ok "READY: one line, word for word: the version, your --fetch, nothing installs on its own (${dt} ms)" || fail "READY not reported word for word: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+printf '%s' "$OUT" | grep -q "gov-update.sh --apply --force-live" && ok "  with the command that installs it" || fail "  apply command missing"
+printf '%s' "$OUT" | grep -q "installs itself\|in the background when\|Opt out" && fail "  READY still promises an automatic install" || ok "  and no automatic-install promise"
+# Record absent (no auto-update record, no env file): the READY line is still printed - it reports
+# the user's own fetch, and no setting silences or enables anything here.
+[ ! -e "$U/auto-update" ] && [ ! -e "$HOME/.claude/.governance-local.env" ] && ok "  precondition: no auto-update record, no local env file" || fail "  precondition failed: a record or env file exists"
 OUT=$(payload "me-5" | GOV_AUTO_UPDATE=0 bash "$H/pre-session.sh" 2>&1)
-printf '%s' "$OUT" | grep -q "is downloaded and its signature verified" && fail "GOV_AUTO_UPDATE=0 (env) still shows the READY line" || ok "GOV_AUTO_UPDATE=0 (env): READY line silent"
-printf 'GOV_AUTO_UPDATE="0"\n' > "$HOME/.claude/.governance-local.env"
+printf '%s\n' "$OUT" | grep -qxF "$_READY_LINE" && ok "record absent (GOV_AUTO_UPDATE=0 is not read): READY line still printed" || fail "record absent: READY line missing: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+# Negative control: no READY -> no READY line.
+rm -f "$U/READY"
 OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1)
-printf '%s' "$OUT" | grep -q "is downloaded and its signature verified" && fail "GOV_AUTO_UPDATE=0 (local env file) still shows the READY line" || ok "GOV_AUTO_UPDATE=0 (local env file): READY line silent"
+printf '%s' "$OUT" | grep -q "is downloaded and verified" && fail "no READY staged, yet the READY line printed" || ok "no READY staged: no READY line"
+printf '%s' "$OUT" | grep -q "is waiting: its terms changed" && fail "  nothing held, yet the terms-held line printed" || ok "  and nothing held: no terms-held line"
 rm -f "$HOME/.claude/.governance-local.env" "$U/READY"
+# HELD-TERMS (2026-09-30): the user's --fetch found changed terms and ran none of the release's code;
+# the next start prints the DRAFTS D.2 line, inside the budget.
+mkdir -p "$U/staged/v9.9.9"; printf 'version=9.9.9\n' > "$U/staged/v9.9.9/RELEASE-MANIFEST"
+printf 'terms_version=2 staged_at=2026-09-30T00:00:00Z\n' > "$U/HELD-TERMS-9.9.9"
+_HELD_LINE="[GOVERNANCE UPDATE] v9.9.9 is waiting: its terms changed (v2) and none of its code has run. For the human: read ~/.claude/.governance-update/staged/v9.9.9/NOTICE-AUTO-UPDATE.md, then run in your own terminal: bash ~/.claude/hooks/governance/gov-update.sh --accept-terms   (it refuses when it detects an AI-agent session - a safeguard, not a guarantee)"
+t0=$(ms); OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1 | cat); dt=$(( $(ms) - t0 ))
+printf '%s\n' "$OUT" | grep -qxF "$_HELD_LINE" && ok "HELD-TERMS-9.9.9: the D.2 terms-held line, word for word (${dt} ms)" || fail "HELD-TERMS line not printed word for word: $(printf '%s' "$OUT" | grep -m1 'GOVERNANCE UPDATE')"
+[ "$dt" -lt "$BUDGET_MS" ] && ok "  inside the budget (${dt} ms < ${BUDGET_MS} ms)" || fail "  over the budget: ${dt} ms >= ${BUDGET_MS} ms"
+[ "$(printf '%s\n' "$OUT" | grep -c 'is waiting: its terms changed')" = "1" ] && ok "  printed once" || fail "  printed $(printf '%s\n' "$OUT" | grep -c 'is waiting: its terms changed') times"
+printf '%s' "$OUT" | grep -q "is downloaded and verified" && fail "  a held release reported as READY" || ok "  and not reported as READY"
+# Negative controls: the staged tree gone (install.sh cleared staged/) -> no line; an apply in progress -> no line.
+rm -rf "$U/staged/v9.9.9"
+OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1)
+printf '%s' "$OUT" | grep -q "is waiting: its terms changed" && fail "  HELD without a staged tree still printed" || ok "  HELD without a staged tree: no line (never a stale pointer)"
+mkdir -p "$U/staged/v9.9.9"; printf 'version=9.9.9\n' > "$U/staged/v9.9.9/RELEASE-MANIFEST"
+printf 'version=9.9.9\nfrom=1.0.0\npid=%s\n' "$$" > "$U/APPLYING"
+OUT=$(payload "me-5" | bash "$H/pre-session.sh" 2>&1)
+printf '%s' "$OUT" | grep -q "is waiting: its terms changed" && fail "  HELD printed under a live apply" || ok "  not printed while an apply is in progress"
+rm -rf "$U/APPLYING" "$U/HELD-TERMS-9.9.9" "$U/staged"
 # A resumed session drops the `.gov-session-closed` its own SessionEnd left - also in a project that
 # is not a SOURCE project, where the later per-session reset never runs (review 2026-09-27).
 PLAIN="$SANDBOX/plain"; mkdir -p "$PLAIN" "$S/me-6"; : > "$S/me-6/.gov-session-closed"

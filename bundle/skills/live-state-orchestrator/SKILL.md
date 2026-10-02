@@ -189,7 +189,7 @@ After updating the canonical files above, sync the manifest to match:
 If any sub-plan in PLAN.md transitioned to RESOLVED → check its plan file header status line and update it.
 Example: if SP-1 was marked RESOLVED in PLAN.md but `CONTEXT-GOVERNANCE-ROLLOUT-PLAN.md` header still says "Phase 2 AWAITING" → fix it.
 
-### Step 8b — Commit and push the session's work (close mode only; 2026-09-29, owner decision)
+### Step 8b — Commit the session's work, and push it only if push at session close is on (close mode only; 2026-09-29, owner decision; 2026-09-30, the user's choice)
 
 Only when the session is ending. Runs unattended — do not ask anyone.
 
@@ -197,10 +197,19 @@ Only when the session is ending. Runs unattended — do not ask anyone.
    file-collision records), never `git add -A` / `-u` while pre-close-check saw a parallel session.
    `git add -- <paths> && git commit -m "<what the commit CONTAINS>" -- <paths>` in ONE call, then
    `git show --stat HEAD` and check the file list is the one you meant. Nothing to commit → skip.
-2. **Push with the one script every close path uses:**
+2. It pushes only when push at session close is on on this machine — on a client, the human's
+   recorded choice (`y` at install or `close-push.sh --enable` in their own terminal); on a machine
+   where the regular file `~/.claude/.governance-source` exists (the maintainer's; `gov-release.sh`
+   creates it on every release run that gets as far as pushing the signed tag, even one whose
+   rehearsal then fails), always, with no question and no record - unless `GOV_CLOSE_PUSH=0` pauses it (GOVERNANCE-AGENT-GUIDE §4).
+   Otherwise it prints `SKIP (push at session close is off ...)` and the close continues.
+   Never turn it on, and never accept terms, yourself; never create or delete that file
+   either: those are the human's acts.
+   **Push with the one script every close path uses:**
    `bash ~/.claude/hooks/governance/close-push.sh -C <project root>`.
    It fetches first, then fast-forwards the current branch onto its existing same-name upstream or
-   does nothing: never forces, never rebases (behind → NOT PUSHED, merge by hand), scans every
+   does nothing (the push carries every commit of that branch the upstream lacks, the human's own
+   unpushed local commits included, not only this session's); it never forces, never rebases (behind → NOT PUSHED, merge by hand), scans every
    outgoing commit and message for secrets, and holds (without failing the close) when: this is the governance framework's
    own clone (its push is the public release — GOV_PUBLISH only), `close_push: off` in the
    CONTEXT-MANIFEST frontmatter, or — under the default `auto` — the remote is PUBLIC, its visibility
@@ -213,7 +222,7 @@ Only when the session is ending. Runs unattended — do not ask anyone.
    It prints ONE line: PUSHED / NOTHING / SKIP / HOLD / NOT PUSHED.
    Skip this step with `GOV_CLOSE_PUSH=0 bash ... close-push.sh` when the close follows a
    `/full-finish` Phase 9 BLOCK (the release state is waiting on the user).
-3. **Record the line.** PUSHED → put the SHA in the Step 9 summary. HOLD / NOT PUSHED → one line in
+3. **Record the line.** PUSHED → put the SHA in the Step 9 summary. HOLD / NOT PUSHED / SKIP → one line in
    HANDOFF "State": `committed, local, not pushed — <the script's reason>`. Never retry with
    `--force`, never delete or move anything to make a push fit (deny-git-bypass.sh blocks it anyway).
 4. **Only the current repo.** Commits made in any other repository are reported as
@@ -222,7 +231,7 @@ Only when the session is ending. Runs unattended — do not ask anyone.
 ### Step 9 — Output summary
 ```
 [live-state-orchestrator]
-Push: <close-push.sh line: PUSHED <sha> -> <upstream> | HOLD (<reason>) | NOT PUSHED (<reason>) | NOTHING | SKIP — session not ending>
+Push: <close-push.sh line: PUSHED <sha> -> <upstream> | HOLD (<reason>) | NOT PUSHED (<reason>) | NOTHING | SKIP (<reason>) | SKIP — session not ending>
 Updated:
 - PLAN.md: <what changed>
 - MEMORY.md: <added entries or "no change">

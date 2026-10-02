@@ -245,9 +245,14 @@ If `/live-state-orchestrator` is not available (ungoverned project), perform the
 
 ### 3.4 Finish
 
-a. **Commit and push the work** through `/live-state-orchestrator` Step 8b (the session's own paths,
-   add + commit in one call, then `~/.claude/hooks/governance/close-push.sh`). Unattended; record the
-   script's one line in the report.
+a. **Commit the work, and push it if push at session close is on,** through `/live-state-orchestrator`
+   Step 8b (the session's own paths, add + commit in one call, then
+   `~/.claude/hooks/governance/close-push.sh`). Unattended; record the script's one line in the report.
+   It pushes only when push at session close is on on this machine — the human's recorded choice, or
+   always on the maintainer's machine (the file `~/.claude/.governance-source` exists; `GOV_CLOSE_PUSH=0` pauses it); otherwise it prints `SKIP (push at session close is off ...)` and the close continues. Never turn it
+   on, and never accept terms, yourself; never create or delete that file either: those are the
+   human's acts. The push carries every commit of the branch its upstream lacks, the human's own
+   unpushed local commits included, not only this session's.
 b. Ask the user if they want to run `/full-finish` for the full release pipeline. **Do NOT invoke it
    automatically** — a release (version bump, tag, GitHub release, deploy) keeps its human approval.
 

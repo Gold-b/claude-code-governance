@@ -199,9 +199,37 @@ value = auto-resolve. It changes nothing about destructive actions, deployments,
 or release gates — those always wait for the owner.
 
 **Close push (2026-09-29): `close-push.sh`, `close_push:`, `GOV_CLOSE_PUSH=0`.** A session close
-commits the session's own paths and pushes the current branch to its EXISTING upstream through
+commits the session's own paths and, only when push at session close is on on this machine, pushes the
+current branch to its EXISTING upstream — every commit of that branch the upstream lacks, the
+human's own unpushed local commits included, not only this session's — through
 `~/.claude/hooks/governance/close-push.sh` (`/live-state-orchestrator` Step 8b; `/plan-and-execute`
-3.4a calls the same step). It is a fast-forward or nothing: it fetches first and decides on the
+3.4a calls the same step). **Push at session close (2026-10-01, owner decision):** on the
+maintainer's machine — any machine on which `~/.claude/.governance-source` is a regular FILE (a
+directory of that name does not count) — it is always on, with no question and no record. The file
+is created by the owner in his own terminal, or by `gov-release.sh` on EVERY release run from that
+machine's own repository (`GOV_REPO_PATH`) that gets as far as pushing the signed tag — before the
+client-side rehearsal, so a run whose rehearsal then fails leaves it too; it comes back at the next
+such run if deleted. Any process under the account can also create it — a plain `touch` is enough;
+`consent-guard.sh` denies the command forms it recognises, a regex whose list of write forms is not
+closed: a safeguard, not a guarantee (L1/L2). Never create, copy or delete that file yourself. On
+that machine `close-push.sh --enable` asks nothing and records nothing, and `close-push.sh --disable`
+(or `install.sh --no-close-push`) records OFF while push stays ON; only deleting the file (the
+owner's act) or `GOV_CLOSE_PUSH=0` changes that — and deleting it turns push off only when no
+`enabled=1` record under the current terms remains (then the recorded choice applies). NOTICE §10.3 discloses all of this to clients. On
+every other machine it is the human's recorded choice: off unless the human answered `y` to the plain y/N question — at
+`install.sh`, or with `close-push.sh --enable` in their own terminal; there is no flag for it — and it goes back
+to off when the terms version changes, until they accept the new terms and run
+`close-push.sh --enable` again, or answer `install.sh`'s y/N question again, in their own terminal (accepting alone does not turn it back on). With
+no such choice the script prints `SKIP (push at session close is off on this machine ...)` and the
+close continues; record that line like a HOLD. A session never turns it on, and never accepts terms
+(`install.sh --accept-terms`, `gov-update.sh --accept-terms`, `GOV_ACCEPT_TERMS=1`) — those are the
+human's acts. The scripts refuse to record an acceptance or an ON when they detect an AI-agent
+session (a re-install whose current terms are already accepted is not refused and records no
+acceptance), and `consent-guard.sh` denies
+those commands and the record writes it can recognise under `~/.claude/.governance-update/` (a
+regex over the command; the second line of defence). Neither is a guarantee — a session runs under
+the human's account — which is exactly why a session never tries. When the
+choice is on, it is a fast-forward or nothing: it fetches first and decides on the
 remote's real state, never forces, never rebases (a branch behind its upstream is reported, not
 rewritten), never creates or recreates a branch, never pushes tags or submodules, and scans every
 outgoing commit — added lines including merges and binaries, and the commit messages — for secret
@@ -233,7 +261,10 @@ detection sees only files in the repo: a host wired through its own dashboard (a
 Cloudflare Pages Git integration with no config file) is invisible to it — set `close_push: off`
 in such a repo. The governance
 framework's own clone is always held — its push is the public release (GOV_PUBLISH + gov-release.sh).
-`GOV_CLOSE_PUSH=0` in `settings.json` `"env"` turns the push off everywhere. A hold or a failure
+`GOV_CLOSE_PUSH=0` (in `settings.json` `"env"`, or as a line in `~/.claude/.governance-local.env`)
+pauses push at session close, everywhere (the maintainer's machine included), without changing the
+recorded choice; `close-push.sh --disable` turns the choice off (not on the maintainer's machine,
+above). A hold or a failure
 never fails the close: the script prints one line and the session records it in HANDOFF.
 **Destructive git** is a hook, not prose: `deny-git-bypass.sh` blocks the forms it models — `--force`
 and its variants, `-f` / `-d` in a short-flag cluster, git's abbreviations of those long options,

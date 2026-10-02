@@ -47,6 +47,19 @@ defined_in_common=$(
     | sed -E 's/^[[:space:]]*(function[[:space:]]+)?//; s/[[:space:]]*\(\)//' | sort -u
 )
 [ -n "$defined_in_common" ] || { echo "helpers-check: $COMMON defines no gov_* helpers at all -- wrong file?" >&2; exit 2; }
+# consent-lib.sh (2026-09-30): _common.sh sources this sibling library, so its gov_* functions
+# (gov_auto_update_on, gov_local_env_get, gov_close_push_on, ...) are part of what every hook gets
+# by loading _common.sh. Counted only when _common.sh really sources it AND the file is there:
+# a library that is missing, or no longer sourced, must still show up as MISSING here.
+LIB="$DIR/consent-lib.sh"
+if [ -f "$LIB" ] && grep -qE '^[^#]*consent-lib\.sh' "$COMMON"; then
+  defined_in_common=$(
+    { printf '%s\n' "$defined_in_common"
+      grep -oE '^[[:space:]]*(function[[:space:]]+)?gov_[A-Za-z0-9_]+[[:space:]]*\(\)' "$LIB" \
+        | sed -E 's/^[[:space:]]*(function[[:space:]]+)?//; s/[[:space:]]*\(\)//'
+    } | sort -u
+  )
+fi
 
 is_defined() {  # is_defined <name> <hook's own definitions>
   printf '%s\n' "$defined_in_common" | grep -qx "$1" && return 0

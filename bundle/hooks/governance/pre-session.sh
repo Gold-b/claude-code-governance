@@ -85,13 +85,19 @@ fi
 # timeout raised 10 -> 120 s to fit it. SessionStart hooks block Claude Code's start-up, and the
 # VS Code extension gives the whole start-up 60 s before failing with "Subprocess initialization did
 # not complete within 60000ms" — an apply measures 18-28 s and a restore ~17 s, on top of this hook.
-# The apply now runs when a session ENDS (gov-update.sh --apply-at-session-end, registered on
-# SessionEnd, detached). This hook only reports, with builtins, and its timeout is 10 s, never more.
+# 2.0.0 has no automatic update. The only updater work this hook does: spawn the detached ROLLBACK
+# of an apply that was cut off (gov-update.sh --recover-detached) and print REPORT. The SessionEnd
+# trigger of 2026-09-27 was removed on 2026-09-30. Everything else here only reports, with
+# builtins, and the timeout is 10 s, never more.
 _GOV_UPD_DIR="$HOME/.claude/.governance-update"
-# This session is live again (a resume, or compact/clear mid-task): drop the `.gov-session-closed`
-# marker its own SessionEnd may have left, so the updater never treats it as closed. HERE, before any
-# role gate - the later reset (Step 2) runs only on a SOURCE project, and on any other a resumed
-# session would stay "closed" and have hooks swapped under it.
+# This session is live again (a resume, or compact/clear mid-task): drop a `.gov-session-closed`
+# marker on its own state dir. Nothing writes that marker when a session ends (there is no SessionEnd
+# hook since 2026-09-30); the one writer is Step 1 below, in ANOTHER session's start-up, which marks
+# a dir closed when it looks crashed (silent > 6 h with tracked changes) - and a long-idle session
+# that is resumed looks exactly like that. gov-update.sh --apply skips a closed dir when it counts
+# live sessions (upd_other_live), so a marker left in place would let a hand-run apply - one that
+# should have deferred - swap hooks under this one.
+# HERE, before any role gate: the later reset (Step 2) runs only on a SOURCE project.
 # A builtin regex on the payload _common.sh already read - not $(gov_session_id), a subshell plus a
 # four-process pipeline on every start in every project (~0.4 s under load, review 2026-09-27).
 _GOV_SID0="${GOV_SESSION_ID:-}"
@@ -110,7 +116,7 @@ if [ -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
     done < "$_GOV_UPD_DIR/APPLYING"; } 2>/dev/null
   case "$_GOV_JPID" in ''|*[!0-9]*) _GOV_JPID="" ;; esac
   if [ -n "$_GOV_JPID" ] && kill -0 "$_GOV_JPID" 2>/dev/null; then
-    echo "[GOVERNANCE UPDATE] An update is being applied in the background right now (pid $_GOV_JPID); its result prints at the next session start. Hook files may change under this session for the next ~30 s - if a hook misbehaves, restart the session once it is done."
+    echo "[GOVERNANCE UPDATE] An update is being applied right now (pid $_GOV_JPID: a gov-update.sh --apply you ran in a terminal, or the restore of one that was cut off). A hand-run --apply prints its result in its own terminal; a background restore prints it here at the next session start. Hook files may change under this session for the next ~30 s - if a hook misbehaves, restart the session once it is done."
   elif [ ! -f "$_GOV_UPD_DIR/APPLYING" ]; then
     :   # it finished (or was restored) while we looked: nothing to report
   elif gov_dry; then
@@ -121,10 +127,11 @@ if [ -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
     # only spawns the detached rollback and returns (board, 2026-09-27). It rolls back; it never
     # starts an apply (source `recovery`, refused by upd_apply).
     bash "$SCRIPT_DIR/gov-update.sh" --recover-detached </dev/null >/dev/null 2>&1
-    echo "[GOVERNANCE UPDATE] An automatic update was INTERRUPTED while being applied; it is being rolled back to its backup in the background now (about 20 s). The result prints at the next session start (or: bash ~/.claude/hooks/governance/gov-update.sh --status). Restart this session once it is done."
+    echo "[GOVERNANCE UPDATE] A gov-update.sh --apply was INTERRUPTED part-way; it is being rolled back to its backup in the background now (about 20 s). The result prints at the next session start (or: bash ~/.claude/hooks/governance/gov-update.sh --status). Restart this session once it is done."
   fi
 elif [ -s "$_GOV_UPD_DIR/REPORT" ] && [ ! -L "$_GOV_UPD_DIR/REPORT" ] && [ ! -d "$_GOV_UPD_DIR/lock.d" ]; then
-  # The result of an update that ran in the background after an earlier session ended. Not while an
+  # The result of the background restore of an interrupted apply (gov-update.sh --recover-detached
+  # appends it to REPORT; nothing else runs in the background in 2.0.0). Not while an
   # apply or a fetch holds the lock: its last line may not be written yet. Only the updater's own
   # line shape is echoed, at most 20 lines, printable characters only - this text enters the model's
   # context, so nothing else in the file may ride along.
@@ -146,17 +153,27 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ -f "$_GOV_UPD_DIR/READY" ] && [ ! -f
       case "$_GOV_JL" in version=*) _GOV_RV="${_GOV_JL#version=}"; _GOV_RV="${_GOV_RV%% *}"; break ;; esac
     done < "$_GOV_UPD_DIR/READY"; } 2>/dev/null
   gov_is_semver "$_GOV_RV" || _GOV_RV=""
-  # An opt-out made after the download silences the line (the updater would refuse anyway). The
-  # env file is grepped, never sourced, and only on this rare READY path.
-  _GOV_AUTO="${GOV_AUTO_UPDATE:-}"
-  if [ -z "$_GOV_AUTO" ] && [ -n "$_GOV_RV" ] && [ -f "$HOME/.claude/.governance-local.env" ]; then
-    _GOV_AUTO=$(grep -E '^[[:space:]]*(export[[:space:]]+)?GOV_AUTO_UPDATE=' "$HOME/.claude/.governance-local.env" 2>/dev/null | tail -1 | sed -e 's/^[^=]*=//' | tr -d '"' | tr -d "'" | sed -e 's/^[[:space:]]*//' -e 's/[^0-9].*$//')
-  fi
-  if [ -n "$_GOV_RV" ] && [ "$_GOV_AUTO" != "0" ]; then
+  # 2.0.0 has no automatic update: a staged release exists only because the user ran --fetch, so
+  # the line is printed whenever one is staged - no setting silences it and none is read here.
+  if [ -n "$_GOV_RV" ]; then
     # --force-live for the hand-run, because a session dir counts as live for 10 minutes after its
     # last hook write - including the one that printed this line.
-    echo "[GOVERNANCE UPDATE] Context Governance v$_GOV_RV is downloaded and its signature verified. It installs itself in the background when the last Claude Code session on this machine ends (nothing runs at session start; backup first, automatic rollback on failure). To install now instead: close every Claude Code session, then in a terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live   Opt out: GOV_AUTO_UPDATE=0."
+    echo "[GOVERNANCE UPDATE] v$_GOV_RV is downloaded and verified (your --fetch); nothing installs on its own. To install: close every Claude Code session, then in your own terminal run  bash ~/.claude/hooks/governance/gov-update.sh --apply --force-live"
   fi
+fi
+# HELD-TERMS (2026-09-30): a fetched release whose terms changed waits, none of its code run, until
+# the human accepts. One glob test; the one fork (the record parser) runs only when a release is held.
+# Named only while its staged tree exists: an install.sh run that cleared staged/ leaves no stale line.
+if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ] && [ ! -f "$_GOV_UPD_DIR/APPLYING" ] && [ -f "$SCRIPT_DIR/gov-update.sh" ]; then
+  for _GOV_HF in "$_GOV_UPD_DIR"/HELD-TERMS-*; do
+    [ -f "$_GOV_HF" ] || break
+    _GOV_HV="${_GOV_HF##*/HELD-TERMS-}"
+    gov_is_semver "$_GOV_HV" && [ -f "$_GOV_UPD_DIR/staged/v$_GOV_HV/RELEASE-MANIFEST" ] || break
+    _GOV_HT=$(gov_record_field "$_GOV_HF" terms_version 2>/dev/null)
+    case "$_GOV_HT" in ''|*[!0-9]*) _GOV_HT="?" ;; esac
+    echo "[GOVERNANCE UPDATE] v$_GOV_HV is waiting: its terms changed (v$_GOV_HT) and none of its code has run. For the human: read ~/.claude/.governance-update/staged/v$_GOV_HV/NOTICE-AUTO-UPDATE.md, then run in your own terminal: bash ~/.claude/hooks/governance/gov-update.sh --accept-terms   (it refuses when it detects an AI-agent session - a safeguard, not a guarantee)"
+    break
+  done
 fi
 
 if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
@@ -225,80 +242,27 @@ if [ "$_GOV_ADVISORY_ELIGIBLE" = "1" ]; then
         done
         if [ "$_gv_newer" = "remote" ]; then
           gov_log "pre-session" "update available: local=$_LOCAL_V published=$_REMOTE_V"
-          # --- Automatic update, fetch half (2.0.0) ---
-          # Only when the 2.0.0 updater is installed beside this file and the machine has not opted
-          # out (GOV_AUTO_UPDATE=0 in the environment, or in the machine-local env file — read with
-          # grep, never sourced: that file can carry a real token). Anything else keeps the legacy
-          # manual text below, word for word. The grep only runs on this behind-the-release path.
-          # The release source machine keeps the manual line: it never updates itself (the marker or
-          # GOV_REPO_PATH in the environment; gov-update.sh also checks the local env file).
-          _GOV_UPD_LINE=""
-          # The local env file is checked too (grep, never sourced) — gov-update.sh treats a
-          # GOV_REPO_PATH / GOV_RELEASE_KEY set only there as the source machine, and so must this.
-          _GOV_IS_SRC=0
-          if [ -e "$HOME/.claude/.governance-source" ] || [ -n "${GOV_REPO_PATH:-}" ] || [ -n "${GOV_RELEASE_KEY:-}" ]; then
-            _GOV_IS_SRC=1
-          elif [ -f "$HOME/.claude/.governance-local.env" ]; then
-            # Parsed exactly like gov-update.sh upd_env_get: last assignment wins, comment, blanks
-            # and quotes stripped, then "non-empty?" — so GOV_REPO_PATH= /x counts and "" does not,
-            # in BOTH places (a mismatch either promises a download the updater refuses, or
-            # silently never starts one).
-            for _GOV_K in GOV_REPO_PATH GOV_RELEASE_KEY; do
-              _GOV_V=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$_GOV_K=" "$HOME/.claude/.governance-local.env" 2>/dev/null | tail -1 \
-                       | sed -e 's/^[^=]*=//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                             -e 's/^["'"'"']//' -e 's/["'"'"']$//')
-              if [ -n "$_GOV_V" ]; then _GOV_IS_SRC=1; fi
-            done
-          fi
-          if [ -f "$SCRIPT_DIR/gov-update.sh" ] && command -v gov_semver_cmp_var >/dev/null 2>&1 && [ "$_GOV_IS_SRC" = "0" ]; then
-            _GOV_AUTO="${GOV_AUTO_UPDATE:-}"
-            if [ -z "$_GOV_AUTO" ] && [ -f "$HOME/.claude/.governance-local.env" ]; then
-              # Quotes are stripped the same way gov-update.sh strips them: GOV_AUTO_UPDATE="0" is an
-              # opt-out in both places, or the line promises a download the updater refuses to do.
-              _GOV_AUTO=$(grep -E '^[[:space:]]*(export[[:space:]]+)?GOV_AUTO_UPDATE=' "$HOME/.claude/.governance-local.env" 2>/dev/null | tail -1 | sed -e 's/^[^=]*=//' | tr -d '"' | tr -d "'" | sed -e 's/^[[:space:]]*//' -e 's/[^0-9].*$//')
-            fi
-            if [ "$_GOV_AUTO" != "0" ]; then
-              if [ -f "$_GOV_UPD_DIR/HALT-$_REMOTE_V" ]; then
-                _GOV_HALT=""
-                read -r _GOV_HALT < "$_GOV_UPD_DIR/HALT-$_REMOTE_V" 2>/dev/null || true
-                _GOV_HALT="${_GOV_HALT#reason=}"; _GOV_HALT="${_GOV_HALT%% *}"
-                gov_is_semver "$_REMOTE_V" || _GOV_HALT="unknown"
-                case "$_GOV_HALT" in
-                  no-tag) _GOV_UPD_LINE="[GOVERNANCE UPDATE] v$_REMOTE_V is published as a VERSION but has no release tag - nothing to install; this is a maintainer problem, not yours. This machine stays on v$_LOCAL_V." ;;
-                  *) _GOV_UPD_LINE="[GOVERNANCE UPDATE] v$_REMOTE_V was NOT installed (halted: ${_GOV_HALT:-unknown}) - nothing changed on this machine, it stays on v$_LOCAL_V. Read ~/.claude/logs/governance-update.log. To retry after the cause is fixed: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt" ;;
-                esac
-              elif [ -f "$_GOV_UPD_DIR/READY" ]; then
-                _GOV_UPD_LINE="-"   # a verified release is staged; the READY notice above already spoke
-              else
-                _GOV_ATT=0
-                read -r _GOV_ATT < "$_GOV_UPD_DIR/fetch-attempts-$_REMOTE_V" 2>/dev/null || true
-                case "$_GOV_ATT" in ''|*[!0-9]*) _GOV_ATT=0 ;; esac
-                _GOV_MAXATT="${GOV_UPDATE_MAX_ATTEMPTS:-10}"
-                case "$_GOV_MAXATT" in ''|*[!0-9]*|0) _GOV_MAXATT=10 ;; esac
-                if [ "$_GOV_ATT" -ge "$_GOV_MAXATT" ]; then
-                  _GOV_UPD_LINE="-"
-                  _GOV_GAVEUP="$_GOV_UPD_DIR/.advised-gaveup-$_REMOTE_V"
-                  if [ -z "$(find "$_GOV_GAVEUP" -maxdepth 0 -mmin -720 2>/dev/null)" ]; then
-                    touch "$_GOV_GAVEUP" 2>/dev/null
-                    _GOV_UPD_LINE="[GOVERNANCE UPDATE] v$_REMOTE_V is published but could not be downloaded after $_GOV_ATT tries - update by hand: git pull in your clone of Gold-b/claude-code-governance, then 'bash install.sh --force --accept-terms'. Reset the counter: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt"
-                  fi
-                else
-                  if ! gov_dry; then
-                    if command -v nice >/dev/null 2>&1; then
-                      ( nice -n 19 bash "$SCRIPT_DIR/gov-update.sh" --fetch "$_REMOTE_V" ) </dev/null >/dev/null 2>&1 &
-                    else
-                      ( bash "$SCRIPT_DIR/gov-update.sh" --fetch "$_REMOTE_V" ) </dev/null >/dev/null 2>&1 &
-                    fi
-                  fi
-                  _GOV_UPD_LINE="[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. It is being downloaded and verified in the background (signed release), and installs itself when the last Claude Code session on this machine ends (backup first, automatic rollback). Opt out: GOV_AUTO_UPDATE=0."
-                fi
-              fi
-            fi
-          fi
-          if [ -z "$_GOV_UPD_LINE" ]; then
-          echo "[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. Update deliberately: git pull in your clone of Gold-b/claude-code-governance, then 'bash install.sh --force' (it backs up first). Nothing installs on its own — install.sh replaces hooks and skills that are running right now. Silence with GOVERNANCE_UPDATE_CHECK=0."
-          elif [ "$_GOV_UPD_LINE" != "-" ]; then
-            echo "$_GOV_UPD_LINE"
+          # 2.0.0 has NO automatic update: this hook tells, it never downloads. It spawns no
+          # gov-update.sh --fetch and reads no setting that could make it (owner decision
+          # 2026-09-29/30; a test goes red if a spawn comes back). A version the user's own --fetch
+          # halted keeps its line; otherwise the legacy manual line, word for word, plus the signed
+          # manual path when the updater sits beside this file.
+          if [ -f "$SCRIPT_DIR/gov-update.sh" ] && [ -f "$_GOV_UPD_DIR/HALT-$_REMOTE_V" ]; then
+            _GOV_HALT=""
+            read -r _GOV_HALT < "$_GOV_UPD_DIR/HALT-$_REMOTE_V" 2>/dev/null || true
+            _GOV_HALT="${_GOV_HALT#reason=}"; _GOV_HALT="${_GOV_HALT%% *}"
+            gov_is_semver "$_REMOTE_V" || _GOV_HALT="unknown"
+            case "$_GOV_HALT" in
+              no-tag) echo "[GOVERNANCE UPDATE] v$_REMOTE_V is published as a VERSION but has no release tag - nothing to install; this is a maintainer problem, not yours. This machine stays on v$_LOCAL_V." ;;
+              # The same advice as gov-update.sh upd_halt_advice: --clear-halt re-checks against the
+              # same pinned key, so after a key rotation it would fail the same way (finding 7).
+              signature) echo "[GOVERNANCE UPDATE] v$_REMOTE_V was NOT installed (halted: signature) - nothing changed on this machine, it stays on v$_LOCAL_V. Read ~/.claude/logs/governance-update.log. The release is not signed by the key pinned on this machine: if the maintainer rotated the key, re-pin from a FRESH clone (README, \"Release signing key\"); --clear-halt alone will fail the same way." ;;
+              *) echo "[GOVERNANCE UPDATE] v$_REMOTE_V was NOT installed (halted: ${_GOV_HALT:-unknown}) - nothing changed on this machine, it stays on v$_LOCAL_V. Read ~/.claude/logs/governance-update.log. To retry after the cause is fixed: bash ~/.claude/hooks/governance/gov-update.sh --clear-halt" ;;
+            esac
+          else
+            _GOV_SIGNED=""
+            [ -f "$SCRIPT_DIR/gov-update.sh" ] && _GOV_SIGNED=" Signed manual update: bash ~/.claude/hooks/governance/gov-update.sh --fetch $_REMOTE_V  then, with every session closed,  --apply --force-live  (run these yourself; nothing installs on its own)."
+            echo "[GOVERNANCE UPDATE] Context Governance v$_REMOTE_V is published; this machine has v$_LOCAL_V. Update deliberately: git pull in your clone of Gold-b/claude-code-governance, then 'bash install.sh --force' (it backs up first). Nothing installs on its own — install.sh replaces hooks and skills that are running right now. Silence with GOVERNANCE_UPDATE_CHECK=0.$_GOV_SIGNED"
           fi
         elif [ "$_gv_newer" = "undecidable" ]; then
           gov_log "pre-session" "version compare undecidable (local=$_LOCAL_V published=$_REMOTE_V); staying silent"

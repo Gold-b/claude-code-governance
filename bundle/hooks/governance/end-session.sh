@@ -32,6 +32,9 @@ gov_disabled && exit 0
 # have silently clobbered all five. So any file NEWER IN THE TARGET is printed as TARGET-AHEAD,
 # and the publish REFUSES while even one exists (see the gate near the cp below). That turns a
 # silent-clobber class of bug into an impossible one.
+# The top-level files a publish copies and stages beside bundle/ (one list for the preview, the copy
+# and the staging; NOTICE-AUTO-UPDATE.md and LICENSE since 2026-10-01, legal review r2 finding 10).
+GOV_PUB_TOP_FILES="install.sh verify.sh README.md NOTICE-AUTO-UPDATE.md LICENSE"
 if [ "${1:-}" = "--publish-preview" ]; then
   if [ -f "$HOME/.claude/.governance-local.env" ]; then
     # shellcheck disable=SC1091
@@ -100,6 +103,16 @@ if [ "${1:-}" = "--publish-preview" ]; then
   done <<PPEOF
 $(diff -rq "$_PP_STAGE/bundle" "$_PP_REPO/bundle" 2>/dev/null | grep -v 'desktop\.ini')
 PPEOF
+  # The top-level files are copied and staged too, so they are listed too (no direction check:
+  # the TARGET-AHEAD gate covers bundle/ only).
+  for _pp_t in $GOV_PUB_TOP_FILES; do
+    [ -f "$_PP_STAGE/$_pp_t" ] || continue
+    if [ ! -f "$_PP_REPO/$_pp_t" ]; then
+      echo "    NEW-IN-STAGING   $_pp_t"; _PP_NEW=$((_PP_NEW+1))
+    elif ! cmp -s "$_PP_STAGE/$_pp_t" "$_PP_REPO/$_pp_t"; then
+      echo "    would update     $_pp_t"; _PP_DIFF=$((_PP_DIFF+1))
+    fi
+  done
   echo
   echo "--- verdict -----------------------------------------------------------------"
   echo "  $_PP_DIFF file(s) differ, $_PP_NEW new in staging, $_PP_AHEAD TARGET-AHEAD"
@@ -710,14 +723,21 @@ AHEOF
   elif [ -d "$GH_REPO/.git" ] && [ -d "$INSTALLER_REPO/bundle" ]; then
     # Sync installer bundle -> git repo (working tree); staging below is per-file
     gov_dry || cp -r "$INSTALLER_REPO/bundle/"* "$GH_REPO/bundle/" 2>/dev/null
-    gov_dry || cp "$INSTALLER_REPO/install.sh" "$GH_REPO/install.sh" 2>/dev/null
-    gov_dry || cp "$INSTALLER_REPO/verify.sh" "$GH_REPO/verify.sh" 2>/dev/null
+    # The top-level files, ONE list for the copy here and the staging below (a file in only one of
+    # the two is either never copied or copied and never committed).
     # README.md added 1.7.0. It was NOT in this list, so the only way to change the published
     # README was to edit it inside the clone — and a clone edit is invisible to every drift
     # check this framework runs. MEASURED 2026-09-18: the two copies had diverged by 130 lines
     # (the clone was 123 lines AHEAD, carrying hook/skill counts the staging copy still had
     # wrong). Nothing reported it, because nothing compared a file nothing synced.
-    gov_dry || cp "$INSTALLER_REPO/README.md" "$GH_REPO/README.md" 2>/dev/null
+    # NOTICE-AUTO-UPDATE.md and LICENSE added 2026-10-01 (legal review r2, finding 10). Without
+    # them a publish shipped the new install.sh beside the clone's OLD NOTICE, whose summary
+    # install.sh prints as the text the user accepts. Both go through the same PII gate below.
+    _PUB_TOP="$GOV_PUB_TOP_FILES"
+    for _pub_f in $_PUB_TOP; do
+      [ -f "$INSTALLER_REPO/$_pub_f" ] || continue
+      gov_dry || cp "$INSTALLER_REPO/$_pub_f" "$GH_REPO/$_pub_f" 2>/dev/null
+    done
 
     # Run git operations in a subshell to avoid changing the main script's CWD
     (
@@ -732,7 +752,8 @@ AHEOF
         # very line claims to be keeping.
         exit 3
       fi
-      # 2) stage ONLY the files named in the push flag (mapped into bundle/), plus install/verify if changed
+      # 2) stage ONLY the files named in the push flag (mapped into bundle/), plus the top-level
+      #    files ($_PUB_TOP) if changed
       STAGED=0
       while IFS= read -r line; do
         f=$(printf '%s' "$line" | sed 's|^[^ ]* ||')
@@ -748,8 +769,11 @@ AHEOF
         esac
         [ -n "$rel" ] && [ -f "$rel" ] && git add "$rel" 2>/dev/null && STAGED=$((STAGED + 1))
       done < "$PUSH_FLAG"
-      for extra in install.sh verify.sh README.md; do
-        git diff --quiet -- "$extra" 2>/dev/null || { git add "$extra" 2>/dev/null && STAGED=$((STAGED + 1)); }
+      # `git status --porcelain`, not `git diff --quiet`: the latter is silent about an UNTRACKED
+      # file, so a clone that never had LICENSE would never get it.
+      for extra in $_PUB_TOP; do
+        [ -n "$(git status --porcelain -- "$extra" 2>/dev/null)" ] \
+          && git add "$extra" 2>/dev/null && STAGED=$((STAGED + 1))
       done
       if [ "$STAGED" -gt 0 ] && ! git diff --cached --quiet 2>/dev/null; then
         # ---- LAST GATE BEFORE THE WORLD -----------------------------------------------

@@ -96,21 +96,52 @@ if command -v node &>/dev/null; then
   check "  Stop hook registered" \
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(s.hooks?.Stop ? 0 : 1)\""
   # 2026-09-27: SessionStart hooks block Claude Code's start-up (the VS Code extension fails at 60 s),
-  # so pre-session.sh is registered at 10 s or less, and the automatic update is triggered at SessionEnd.
+  # so pre-session.sh is registered at 10 s or less. 2026-09-30: 2.0.0 has NO automatic update, so a
+  # SessionEnd entry that runs gov-update.sh is a FAIL (a machine that still has the old 2.0.0-dev
+  # registration clears it by re-running install.sh: settings-merge.js --installed drops it).
   check "  pre-session.sh timeout <= 10 s" \
     "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); const h=(s.hooks?.SessionStart||[]).flatMap(g=>g.hooks||[]).filter(h=>/pre-session\\\\.sh/.test(h.command||'')); process.exit(h.length && h.every(x=>typeof x.timeout==='number' && x.timeout>0 && x.timeout<=10) ? 0 : 1)\""
-  check "  SessionEnd auto-update hook registered" \
-    "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit((s.hooks?.SessionEnd||[]).flatMap(g=>g.hooks||[]).some(h=>/gov-update\\\\.sh --apply-at-session-end/.test(h.command||'')) ? 0 : 1)\""
+  check "  no SessionEnd auto-update hook registered" \
+    "node -e \"const s=JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')); process.exit(!(s.hooks?.SessionEnd||[]).flatMap(g=>g.hooks||[]).some(h=>/gov-update\\\\.sh/.test(h.command||'')) ? 0 : 1)\""
 fi
 echo ""
 
-# Automatic updates (2.0.0). Existence checks, like the rest of this file: they catch an install
-# that never recorded its trust root or its baseline. The updater itself proves far more than this
-# (signature, checksums, file set) before it ever runs verify.sh.
-echo "Automatic updates:"
+# The manual updater and the consent records (2.0.0). Existence checks, like the rest of this file:
+# they catch an install that never recorded its trust root or its baseline. The updater itself proves
+# far more than this (signature, checksums, file set) before it ever runs verify.sh.
+# Heading changed 2026-10-01 (legal review r2, finding 8): 2.0.0 has no automatic update, and the old
+# heading named this section after one - a claim printed after every install.
+echo "Manual updates and consent records:"
 check "  gov-update.sh present"               "[ -f ~/.claude/hooks/governance/gov-update.sh ]"
 check "  release key pinned"                  "[ -s ~/.claude/.governance-update/allowed_signers ]"
 check "  terms accepted"                      "[ -s ~/.claude/.governance-update/terms-accepted ]"
+# 2026-09-30 (C4): install.sh records the push-at-session-close choice (OFF unless the user turned it
+# on). Missing = an install that predates the record or never completed: re-run install.sh.
+# 2026-10-02 (round 3, B7): on the MAINTAINER's machine install.sh records nothing (push is always on
+# there), so the record is not expected and its absence is not a failure - a re-run of install.sh
+# could never clear it. The machine is told apart by consent-lib.sh gov_maintainer_machine, the one
+# test install.sh uses, sourced from the INSTALLED hooks in a subshell (no second copy of the test).
+# 2026-10-02 (verify round 4 #4): the maintainer line says what consent-lib.sh gov_close_push_on says -
+# ON, or paused by GOV_CLOSE_PUSH=0 (process env or ~/.claude/.governance-local.env) - never "ON" while
+# the predicate that close-push.sh obeys says paused. A pause is not a failure: both count as passed.
+VERIFY_MAINTAINER=0; VERIFY_PUSH=""
+_vlib="$HOME/.claude/hooks/governance/consent-lib.sh"
+if [ -f "$_vlib" ]; then
+  VERIFY_PUSH=$( set +eu; . "$_vlib" >/dev/null 2>&1 || exit 0
+                 type gov_maintainer_machine >/dev/null 2>&1 && gov_maintainer_machine || exit 0
+                 if gov_close_push_on; then printf 'on'; else printf 'paused|%s' "${GOV_CONSENT_REASON:-}"; fi ) || VERIFY_PUSH=""
+  [ -n "$VERIFY_PUSH" ] && VERIFY_MAINTAINER=1
+fi
+if [ "$VERIFY_MAINTAINER" = 1 ] && [ "$VERIFY_PUSH" = "on" ]; then
+  printf "${GREEN}✓${NC} %s\n" "  push at close: ON - always, on the maintainer's machine (no record expected)"
+  PASS=$((PASS + 1))
+elif [ "$VERIFY_MAINTAINER" = 1 ]; then
+  _vr="${VERIFY_PUSH#paused|}"
+  printf "${GREEN}✓${NC} %s\n" "  push at close: OFF - ${_vr:-paused} (on the maintainer's machine it is otherwise always ON; no record expected)"
+  PASS=$((PASS + 1))
+else
+  check "  push-at-close choice recorded"     "[ -s ~/.claude/.governance-update/close-push ]"
+fi
 check "  local-modification baseline"         "[ -s ~/.claude/.governance-update/installed.hashes ]"
 echo ""
 

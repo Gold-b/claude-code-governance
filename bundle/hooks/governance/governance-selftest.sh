@@ -160,23 +160,106 @@ cat > "$SBX_BIN/git" <<'GITSHIM'
 #!/usr/bin/env bash
 # selftest git shim. Reads pass through. Network subcommands are denied outright. Mutating
 # subcommands are allowed only when the repo they target lives inside the selftest sandbox.
-_sub=""
-for _a in "$@"; do case "$_a" in -*|-C) ;; *) _sub="$_a"; break ;; esac; done
-_dir="$PWD"
-_prev=""
-for _a in "$@"; do [ "$_prev" = "-C" ] && { _dir="$_a"; break; }; _prev="$_a"; done
+# Global options are skipped the way git reads them (round 3b, 2026-10-02): `-C <dir>` (cumulative;
+# a relative one is taken from the previous), `-c <k=v>`, and `--git-dir` / `--work-tree` /
+# `--namespace` with a separate or an `=` value. MEASURED before: the loop took the word after `-C`
+# (or `-c`) as the subcommand, so `git -C <outside> push <decoy> master` pushed and
+# `git -C <outside> commit` committed, neither logged. Every place git can be pointed at (the -C
+# directory, --git-dir, --work-tree, GIT_DIR, GIT_WORK_TREE) must be inside the sandbox for a
+# mutating subcommand. Read-only forms of `remote` and `config` pass anywhere (pr-watch-guard.sh runs
+# `git -C "$CWD" remote get-url origin`; end-session.sh reads `config --get core.hooksPath`).
+_args=("$@"); _n=${#_args[@]}; _i=0; _si=-1
+_sub=""; _dir="$PWD"; _gd=""; _wt=""
+_abs() { case "$1" in /*|[A-Za-z]:[\\/]*) printf '%s' "$1" ;; *) printf '%s/%s' "$2" "$1" ;; esac; }
+while [ "$_i" -lt "$_n" ]; do
+  _a="${_args[$_i]}"
+  case "$_a" in
+    -C)          _i=$((_i+1)); _dir=$(_abs "${_args[$_i]:-}" "$_dir") ;;
+    -c|--namespace) _i=$((_i+1)) ;;
+    --git-dir)   _i=$((_i+1)); _gd=$(_abs "${_args[$_i]:-}" "$_dir") ;;
+    --git-dir=*) _gd=$(_abs "${_a#--git-dir=}" "$_dir") ;;
+    --work-tree) _i=$((_i+1)); _wt=$(_abs "${_args[$_i]:-}" "$_dir") ;;
+    --work-tree=*) _wt=$(_abs "${_a#--work-tree=}" "$_dir") ;;
+    -*) ;;
+    *) _sub="$_a"; _si=$_i; break ;;
+  esac
+  _i=$((_i+1))
+done
+_sbxm=$(cygpath -m "$GOV_SELFTEST_SBX" 2>/dev/null) || _sbxm="$GOV_SELFTEST_SBX"
+# _in_sbx <path> -> 0 when the path is inside the sandbox; an existing directory is resolved first
+# (so `..` and the C:/ spelling cannot walk out of the prefix test).
+_in_sbx() {
+  local r
+  r=$(cd "$1" 2>/dev/null && pwd) || r="$1"
+  case "$r" in "$GOV_SELFTEST_SBX"|"$GOV_SELFTEST_SBX"/*|"$_sbxm"|"$_sbxm"/*) return 0 ;; esac
+  return 1
+}
+_targets_in_sbx() {
+  local t
+  for t in "$_dir" "$_gd" "$_wt" "${GIT_DIR:+$(_abs "$GIT_DIR" "$PWD")}" "${GIT_WORK_TREE:+$(_abs "$GIT_WORK_TREE" "$PWD")}"; do
+    [ -n "$t" ] || continue
+    _in_sbx "$t" || { _outside="$t"; return 1; }
+  done
+  return 0
+}
+# Read-only forms that would otherwise fall in a denied list: `remote` alone, `remote -v`,
+# `remote get-url ...`; `config` with a read action (--get*, -l/--list, or `get`/`list` as its
+# first word) and no write action.
+_ro=0
+case "$_sub" in
+  remote)
+    _r1="${_args[$((_si+1))]:-}"
+    case "$_r1" in
+      ""|-v|--verbose) [ "$_n" -le $((_si+2)) ] && _ro=1 ;;
+      get-url) _ro=1 ;;
+    esac ;;
+  config)
+    _w=0; _j=$((_si+1))
+    case "${_args[$_j]:-}" in get|list) _ro=1 ;; set|unset|rename-section|remove-section|edit) _w=1 ;; esac
+    while [ "$_j" -lt "$_n" ]; do
+      case "${_args[$_j]}" in
+        --get|--get-all|--get-regexp|--get-urlmatch|-l|--list|--get-color|--get-colorbool) _ro=1 ;;
+        --add|--unset|--unset-all|--replace-all|--rename-section|--remove-section|-e|--edit) _w=1 ;;
+      esac
+      _j=$((_j+1))
+    done
+    [ "$_w" = 1 ] && _ro=0 ;;
+esac
+[ "$_ro" = 1 ] && exec "$GOV_SELFTEST_REAL_GIT" "$@"
 case "$_sub" in
   clone|push|pull|fetch|remote|submodule|am|request-pull|send-email)
+    # ONE exception, for the end-session publish rehearsal (r2 finding 10, 2026-10-01): a `pull` or
+    # `push` passes only when the case named a bare repo INSIDE the sandbox in
+    # GOV_SELFTEST_LOCAL_REMOTE, the repo the command runs in is inside the sandbox, and that repo's
+    # origin fetch AND push URL are exactly that bare repo. Unset (every other case) = denied as before.
+    if [ -n "${GOV_SELFTEST_LOCAL_REMOTE:-}" ] && { [ "$_sub" = pull ] || [ "$_sub" = push ]; }; then
+      _inside=0
+      case "$GOV_SELFTEST_LOCAL_REMOTE" in "$GOV_SELFTEST_SBX"/*|"$_sbxm"/*) _inside=1 ;; esac
+      _targets_in_sbx || _inside=0
+      # Only the EXACT commands end-session.sh runs (round 3, 2026-10-02): `git pull --rebase
+      # --autostash origin master` and `git push origin master`, nothing before the subcommand. The
+      # old rule let any `--*` through (`--repo=<url>`, `--receive-pack=<cmd>`, `--exec=`), and a
+      # URL or any other remote spelled on the command line is refused, whatever origin says.
+      case "$_sub" in
+        pull) { [ "$#" = 5 ] && [ "$1" = pull ] && [ "$2" = --rebase ] && [ "$3" = --autostash ] \
+                && [ "$4" = origin ] && [ "$5" = master ]; } || _inside=0 ;;
+        push) { [ "$#" = 3 ] && [ "$1" = push ] && [ "$2" = origin ] && [ "$3" = master ]; } || _inside=0 ;;
+      esac
+      if [ "$_inside" = 1 ] \
+         && [ "$("$GOV_SELFTEST_REAL_GIT" -C "$_dir" remote get-url origin 2>/dev/null)" = "$GOV_SELFTEST_LOCAL_REMOTE" ] \
+         && [ "$("$GOV_SELFTEST_REAL_GIT" -C "$_dir" remote get-url --push origin 2>/dev/null)" = "$GOV_SELFTEST_LOCAL_REMOTE" ]; then
+        exec "$GOV_SELFTEST_REAL_GIT" "$@"
+      fi
+    fi
     printf '%s DENIED-NETWORK git %s (cwd=%s)\n' "$(date +%s)" "$_sub" "$PWD" >> "$GOV_SELFTEST_SBX/git-violations.log"
     echo "selftest: network git subcommand '$_sub' denied" >&2
     exit 1 ;;
   init|add|commit|checkout|reset|stash|tag|merge|rebase|cherry-pick|revert|restore|switch|rm|mv|update-index|update-ref|gc|worktree|config|apply)
-    case "$_dir" in
-      "$GOV_SELFTEST_SBX"*) ;;
-      *) printf '%s DENIED-OUTSIDE git %s (dir=%s)\n' "$(date +%s)" "$_sub" "$_dir" >> "$GOV_SELFTEST_SBX/git-violations.log"
-         echo "selftest: mutating git '$_sub' outside the sandbox denied" >&2
-         exit 1 ;;
-    esac ;;
+    if ! _targets_in_sbx; then
+      printf '%s DENIED-OUTSIDE git %s (dir=%s)\n' "$(date +%s)" "$_sub" "$_outside" >> "$GOV_SELFTEST_SBX/git-violations.log"
+      echo "selftest: mutating git '$_sub' outside the sandbox denied" >&2
+      exit 1
+    fi ;;
 esac
 exec "$GOV_SELFTEST_REAL_GIT" "$@"
 GITSHIM
@@ -226,7 +309,9 @@ _run() {
   local extra=(); [ "$#" -gt 4 ] && { shift 4; extra=("$@"); }
   : > "$IO_OUT"; : > "$IO_ERR"
   local runner=(bash "$script" ${extra[@]+"${extra[@]}"})
-  [ "$HAVE_TIMEOUT" = 1 ] && runner=(timeout 60 bash "$script" ${extra[@]+"${extra[@]}"})
+  # _RUN_TIMEOUT (default 60 s) is raised by a case whose run does real git work - the end-session
+  # publish rehearsal measured 60+ s per run on a loaded machine (2026-10-01) and was killed (rc 124).
+  [ "$HAVE_TIMEOUT" = 1 ] && runner=(timeout "${_RUN_TIMEOUT:-60}" bash "$script" ${extra[@]+"${extra[@]}"})
   ( cd "$cwd" 2>/dev/null || exit 97
     printf '%s' "$payload" | env \
       HOME="$SBX_HOME" USERPROFILE="$SBX_HOME" \
@@ -331,8 +416,8 @@ case_fn_for() {
     cross-session-guard.sh)     echo case_cross_session_guard ;;
     render-gate.sh)             echo case_render_gate ;;
     render-rules-read.sh)       echo case_render_rules_read ;;
-    gov-update.sh)              echo case_gov_update_hook ;;   # SessionEnd --apply-at-session-end (2026-09-27)
     bootstrap-gate.sh)          echo case_bootstrap_gate ;;    # PreToolUse gate + PostToolUse --mark (2026-09-29)
+    consent-guard.sh)           echo case_consent_guard ;;     # PreToolUse deny of consent acts (2026-09-30, S1/C3/T4)
     *) echo "" ;;
   esac
 }
@@ -369,7 +454,125 @@ case_skill_prose() {
     if grep -qF 'formerly Stop-Report' "$base/docs/GOVERNANCE-AGENT-GUIDE.md" 2>/dev/null; then
       _ok "agent guide keeps the 'formerly Stop-Report' alias ($base)"
     else _bad "agent guide keeps the 'formerly Stop-Report' alias ($base)" "old references would no longer resolve"; fi
+    # Push at session close is the user's choice (2026-09-30, legal C3/C4/C8; DRAFTS D.4-D.6). Every
+    # skill that names close-push.sh as the push path says it pushes only when that choice is on,
+    # and that a session never turns it on or accepts terms. The CLAUDE.md Step 5 line (live file;
+    # the bundle template is rendered from it) says "only if push at session close is on".
+    # Controls, proven once on 2026-09-30 by running this function alone on a sandbox copy: every
+    # text right -> 0 red; each of six mutants (D.5 sentence dropped from live-state-orchestrator,
+    # "never accept terms" dropped from the bundle impact-safe-executor, the old "turns the push off
+    # everywhere" in the guide, an automatic-update switch line or an invitation to put
+    # GOV_ACCEPT_TERMS in the env example, the old Step 5 in CLAUDE.md) -> exactly one red. The
+    # switch name is written GOV_AUTO[_]UPDATE below so P8's no-auto-update grep of bundle/ stays clean.
+    hits=""
+    for f in skills/live-state-orchestrator/SKILL.md skills/plan-and-execute/SKILL.md \
+             skills/impact-safe-executor/SKILL.md; do
+      [ -f "$base/$f" ] || { hits="$hits $f:missing"; continue; }
+      grep -qF 'It pushes only when push at session close is on on this machine' "$base/$f" 2>/dev/null \
+        || hits="$hits $f:'pushes only when ... on'"
+      grep -qF 'Never turn it' "$base/$f" 2>/dev/null && grep -qF 'never accept terms, yourself' "$base/$f" 2>/dev/null \
+        || hits="$hits $f:'never turn it on, never accept terms'"
+    done
+    if grep -qF 'A session never turns it on, and never accepts terms' "$base/docs/GOVERNANCE-AGENT-GUIDE.md" 2>/dev/null; then :
+    else hits="$hits docs/GOVERNANCE-AGENT-GUIDE.md:'A session never turns it on, and never accepts terms'"; fi
+    if grep -qF 'turns the push off everywhere' "$base/docs/GOVERNANCE-AGENT-GUIDE.md" 2>/dev/null; then
+      hits="$hits docs/GOVERNANCE-AGENT-GUIDE.md:stale 'GOV_CLOSE_PUSH=0 turns the push off everywhere' (it is a pause)"
+    fi
+    if [ -z "$hits" ]; then _ok "close skills and guide: push only if push at session close is on; a session never enables or accepts ($base)"
+    else _bad "close skills and guide: push only if push at session close is on; a session never enables or accepts ($base)" "found:$hits"; fi
+    if [ "$base" = "$CHOME" ]; then f="CLAUDE.md"; else f="CLAUDE.md.template"; fi
+    if [ -f "$base/$f" ]; then
+      if grep -qF "then commit and push the session's work" "$base/$f" 2>/dev/null \
+         || ! grep -qF 'only if push at session close is on' "$base/$f" 2>/dev/null; then
+        _bad "$f Step 5: commit, and push only if push at session close is on ($base)" "Step 5 still says 'then commit and push the session's work' or lacks 'only if push at session close is on' (DRAFTS D.4, legal C4)"
+      else _ok "$f Step 5: commit, and push only if push at session close is on ($base)"; fi
+    fi
+    if [ "$base" != "$CHOME" ] && [ -f "$base/.governance-local.env.example" ]; then
+      hits=""
+      grep -qE '^[[:space:]]*#?[[:space:]]*GOV_AUTO[_]UPDATE=' "$base/.governance-local.env.example" 2>/dev/null \
+        && hits="$hits an automatic-update switch line (this version has no automatic update)"
+      grep -qF 'Do not put GOV_ACCEPT_TERMS=1 here' "$base/.governance-local.env.example" 2>/dev/null \
+        || hits="$hits no 'Do not put GOV_ACCEPT_TERMS=1 here'"
+      grep -qF 'GOV_CLOSE_PUSH=0 - pauses push at session close' "$base/.governance-local.env.example" 2>/dev/null \
+        || hits="$hits no 'GOV_CLOSE_PUSH=0 - pauses push at session close'"
+      if [ -z "$hits" ]; then _ok ".governance-local.env.example: the A17 block, no automatic-update switch ($base)"
+      else _bad ".governance-local.env.example: the A17 block, no automatic-update switch ($base)" "found:$hits"; fi
+    fi
   done
+}
+
+case_consent_lib() {
+  # consent-lib.sh is a library (sourced, never registered), so the registration loop never runs
+  # it. tests/test-consent-lib.sh asserts, in a sandbox HOME, both directions of: the close-push
+  # predicate (no record / off / on / stale record / stale terms / GOV_CLOSE_PUSH=0 env, file,
+  # quoted), gov_auto_update_on false under GOV_AUTO_UPDATE=1 and a planted record, CRLF == LF
+  # hashes, the terms-summary extraction, the atomic writer, and the agent refusal + its override.
+  # A run that checked nothing is a failure: pass>0 is asserted.
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/tests/test-consent-lib.sh"
+  if [ ! -f "$GOV_DIR/consent-lib.sh" ] || [ ! -f "$GOV_DIR/tests/test-consent-lib.sh" ]; then
+    _bad "consent-lib.sh and its test exist" "missing under $GOV_DIR - _common.sh, install.sh and close-push.sh source it"
+    return 0
+  fi
+  _o=$(bash "$GOV_DIR/tests/test-consent-lib.sh" </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/.*consent-lib selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/.*consent-lib selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "tests/test-consent-lib.sh: pass=$_p fail=0 (predicate, parser, writer, agent refusal - both directions)"
+  else
+    _bad "tests/test-consent-lib.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E 'FAIL|pass=' | head -5)")"
+  fi
+}
+
+case_terms_text() {
+  # The accepted texts are not code, so no hook case reaches them (2026-09-30, plan task P9; legal
+  # C1 C7 C8 C9 C11). tests/test-terms-text.sh checks NOTICE-AUTO-UPDATE.md and README.md of the
+  # staging tree: no bare "no liability" (C9), the summary markers / footer / carve-outs, none of the
+  # retired automatic-update claims, the printed summary's width and item count, no SessionEnd row
+  # in the hook table, and TERMS-VERSION == the NOTICE footer - then kills one mutant per check and
+  # proves a benign edit does not fire. A run that checked nothing is a failure: pass>0 is asserted.
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/tests/test-terms-text.sh"
+  if [ ! -f "$GOV_DIR/tests/test-terms-text.sh" ]; then
+    _bad "tests/test-terms-text.sh exists" "missing under $GOV_DIR/tests - nothing checks that the terms text matches the code"
+    return 0
+  fi
+  # The texts live in the installer tree, which an install from a clone elsewhere does not have
+  # beside ~/.claude: that is an absent SUBJECT (N/A), not a pass and not a failure.
+  if [ ! -f "$GOV_DIR/../../governance-installer/NOTICE-AUTO-UPDATE.md" ] && [ ! -f "$GOV_DIR/../../../NOTICE-AUTO-UPDATE.md" ]; then
+    _na "NOTICE/README terms text" "no installer tree with NOTICE-AUTO-UPDATE.md beside $GOV_DIR (run tests/test-terms-text.sh <clone> by hand)"
+    return 0
+  fi
+  _o=$(bash "$GOV_DIR/tests/test-terms-text.sh" </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/.*terms-text selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/.*terms-text selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "tests/test-terms-text.sh: pass=$_p fail=0 (NOTICE/README checks (a)-(f), a mutant per check, a benign control)"
+  else
+    _bad "tests/test-terms-text.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E 'FAIL|pass=' | head -5)")"
+  fi
+}
+
+case_release_invariants() {
+  # Two push-gate conditions that are properties of the source, not of a run (2026-09-30, legal
+  # plan P11; board T2 and T6). tests/test-release-invariants.sh checks the bundle tree: no script
+  # but consent-lib.sh extracts a field from a consent record (T2 "one parser"), and the default
+  # subset above names only real cases of tests/test-gov-update.sh and includes every T6 name - then
+  # kills a mutant of each and proves a benign edit does not fire. pass>0 is asserted.
+  local _o _rc _p _f
+  CUR_SCRIPT="$GOV_DIR/tests/test-release-invariants.sh"
+  if [ ! -f "$GOV_DIR/tests/test-release-invariants.sh" ]; then
+    _bad "tests/test-release-invariants.sh exists" "missing under $GOV_DIR/tests - nothing checks T2 (one parser) or T6 (the subset)"
+    return 0
+  fi
+  _o=$(bash "$GOV_DIR/tests/test-release-invariants.sh" </dev/null 2>&1); _rc=$?
+  _p=$(printf '%s' "$_o" | sed -n 's/.*release-invariants selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\1/p' | tail -1)
+  _f=$(printf '%s' "$_o" | sed -n 's/.*release-invariants selftest: pass=\([0-9]*\) fail=\([0-9]*\).*/\2/p' | tail -1)
+  if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
+    _ok "tests/test-release-invariants.sh: pass=$_p fail=0 (T2 one parser, T6 subset; a mutant per check, a benign control)"
+  else
+    _bad "tests/test-release-invariants.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E 'FAIL|pass=' | head -5)")"
+  fi
 }
 
 case_close_push() {
@@ -398,22 +601,33 @@ case_close_push() {
   fi
 }
 
+# The default subset case_gov_update runs (one line, read by tests/test-release-invariants.sh).
+GOV_SELFTEST_UPDATE_DEFAULT="T1 T2 T3 T7 T11 T13 T18 NOAUTO FETCHMSG MANIFEST CONSENT CLOSEPUSH M1 M2 M4 M8 M10"
+
 case_gov_update() {
   #
-  # The auto-updater is not a registered hook (pre-session.sh calls it), so the registration loop
+  # gov-update.sh is not a registered hook (pre-session.sh calls it only as --recover-detached, and
+  # 2.0.0 has no automatic update), so the registration loop
   # never executes it. Two layers, both run here:
   #   1. `gov-update.sh --selftest` — offline controls of the verification chain with throwaway
   #      keys: a valid archive verifies (positive control) and a tampered file, an extra file, a
   #      wrong key and an unsafe install map are each refused with the right reason.
   #   2. tests/test-gov-update.sh — the end-to-end suite in a sandbox HOME (fetch, apply, rollback,
-  #      halts, locks, deferral, terms, key rotation, settings merge, pre-push rule) including four
-  #      MUTANTS that must turn it red. The full suite takes ~20-30 min on Windows (every case builds
+  #      halts, locks, deferral, terms, key rotation, settings merge, pre-push rule) including the
+  #      MUTANTS that must turn it red. The full suite takes ~40 min on Windows (every case builds
   #      and applies real releases), too long for a run that recurs every 6 h on a working machine, so
   #      this runs a representative subset by default — one valid apply (T1), the signature and
-  #      checksum refusals (T2, T3), the source-machine guard (T7), kill-mid-apply recovery both ways
-  #      (T13), the settings merge (T18), manifest determinism, and three mutants proving those can
-  #      fail. GOV_SELFTEST_UPDATE_CASES overrides it; set it EMPTY to run every case. The full
-  #      suite is run by hand before a release (README "Cutting a release").
+  #      checksum refusals (T2, T3), the source-machine guard (T7), the terms bump (T11),
+  #      kill-mid-apply recovery both ways (T13), the settings merge incl. the removal of the old
+  #      SessionEnd trigger (T18), "no automatic update" (NOAUTO, 2026-09-30), every --fetch exit
+  #      path printing its one line (FETCHMSG, 2026-10-01, r2 findings 1/12/15), manifest determinism,
+  #      the consent records and the install's push question (CONSENT, CLOSEPUSH - board T6, added
+  #      2026-09-30), and the mutants proving those can fail (M1 M2 M4; M8 = the predicate forced
+  #      true, M10 = a --fetch spawn put back into pre-session.sh). The list is
+  #      GOV_SELFTEST_UPDATE_DEFAULT below; tests/test-release-invariants.sh checks that every name
+  #      in it is a real case and that the T6 names are all there. GOV_SELFTEST_UPDATE_CASES
+  #      overrides it; set it EMPTY to run every case. The full suite is run by hand before a
+  #      release (README "Cutting a release").
   # A suite that ran zero checks is a failure, not a pass: pass>0 is asserted, not assumed.
   local _o _rc _p _f
   CUR_SCRIPT="$GOV_DIR/gov-update.sh --selftest"
@@ -430,46 +644,93 @@ case_gov_update() {
     _bad "tests/test-gov-update.sh exists" "missing at $GOV_DIR/tests/test-gov-update.sh - the updater would ship untested"
     return 0
   fi
-  _o=$(GOV_TEST_ONLY="${GOV_SELFTEST_UPDATE_CASES-T1 T2 T3 T7 T13 T18 MANIFEST M1 M2 M4}" bash "$GOV_DIR/tests/test-gov-update.sh" </dev/null 2>&1); _rc=$?
+  _o=$(GOV_TEST_ONLY="${GOV_SELFTEST_UPDATE_CASES-$GOV_SELFTEST_UPDATE_DEFAULT}" bash "$GOV_DIR/tests/test-gov-update.sh" </dev/null 2>&1); _rc=$?
   _p=$(printf '%s' "$_o" | sed -n 's/^test-gov-update: pass=\([0-9]*\) fail=\([0-9]*\)$/\1/p' | tail -1)
   _f=$(printf '%s' "$_o" | sed -n 's/^test-gov-update: pass=\([0-9]*\) fail=\([0-9]*\)$/\2/p' | tail -1)
   if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
-    _ok "tests/test-gov-update.sh: pass=$_p fail=0 (incl. mutants M1-M4 detected)"
+    _ok "tests/test-gov-update.sh: pass=$_p fail=0 (incl. mutants M1 M2 M4 M8 M10 detected)"
   else
     _bad "tests/test-gov-update.sh" "rc=$_rc pass=${_p:-?} fail=${_f:-?}: $(_snip "$(printf '%s' "$_o" | grep -E '^  FAIL|pass=' | head -6)")"
   fi
 }
 
-# --- gov-update.sh --apply-at-session-end: the registered SessionEnd trigger (2026-09-27) ---------
-case_gov_update_hook() {
-  # The runner exports GOVERNANCE_UPDATE_CHECK=0 for every hook; this one is inert under it, so it is
-  # switched back on here, with the source-machine signals emptied (the owner's machine IS one) and a
-  # version marker planted. A READY with no staged tree is the fast must-fire: the detached child
-  # removes it in well under a second ("READY without a staged tree"), proving the child really ran.
-  local proj="$SBX/proj" U="$SBX_HOME/.claude/.governance-update" n=0
-  fx_project "$proj" SOURCE "$(_winform "$proj")"
-  fx_state_reset
-  mkdir -p "$U"; rm -f "$U/READY" "$U/APPLYING" "$U/REPORT"; rm -rf "$U/lock.d"
-  printf '1.0.0\n' > "$SBX_HOME/.claude/.governance-version"
-  _RUN_ENV=(GOVERNANCE_UPDATE_CHECK=1 GOV_AUTO_UPDATE=1 GOV_REPO_PATH= GOV_RELEASE_KEY=)
-  run_hook "$proj" "sid-gu-1" '{"session_id":"sid-gu-1","hook_event_name":"SessionEnd","reason":"other"}' --apply-at-session-end
-  expect_rc 0 "nothing staged: the SessionEnd hook never blocks"
-  expect_quiet "nothing staged: silent"
-  printf 'version=9.9.9 staged\n' > "$U/READY"
-  run_hook "$proj" "sid-gu-2" '{"session_id":"sid-gu-2","hook_event_name":"SessionEnd","reason":"clear"}' --apply-at-session-end
-  expect_quiet "reason=clear (mid-task): silent, nothing started"
-  if [ -f "$U/READY" ]; then _ok "reason=clear: READY kept"; else _bad "reason=clear: READY kept" "READY was consumed on a /clear"; fi
-  run_hook "$proj" "sid-gu-3" '{"session_id":"sid-gu-3","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}' --apply-at-session-end
-  expect_rc 0 "READY staged: the hook still exits 0"
-  expect_has "applying v9.9.9 in the background" "READY staged: the apply is started in the background"
-  while [ -f "$U/READY" ] && [ "$n" -lt 30 ]; do sleep 0.5; n=$((n+1)); done
-  if [ ! -f "$U/READY" ]; then _ok "the detached child ran (it consumed a READY with no staged tree)"
-  else _bad "the detached child ran" "READY still present 15 s later - nothing was started"; fi
-  n=0; while [ -d "$U/lock.d" ] && [ "$n" -lt 20 ]; do sleep 0.5; n=$((n+1)); done
-  run_hook "$proj" "sid-gu-4" '' --no-such-flag
-  expect_rc 2 "an unknown flag is refused (rc=2), not taken as a mode"
-  _RUN_ENV=()
-  rm -f "$U/READY" "$U/REPORT" "$SBX_HOME/.claude/.governance-version"
+# --- no automatic update in 2.0.0 (2026-09-30, owner decision 2026-09-29/30) ---------------------
+case_no_auto_update() {
+  # gov-update.sh is registered on NO hook event since 2026-09-30 (its SessionEnd trigger was
+  # removed), so the registration loop never reaches it; the tail calls this. Three statically
+  # checkable facts, each in both directions where a direction exists:
+  #   1. no hooks template registers gov-update.sh on any event (a registered one would be an
+  #      unattended apply the owner said must not exist) - the installer's bundle copy;
+  #   2. pre-session.sh (live AND bundle copy) contains no `--apply-if-ready` and invokes gov-update.sh
+  #      only as `--recover-detached` (user-facing text naming `--fetch` is not an invocation);
+  #   3. `gov-update.sh --apply-at-session-end` is an unknown flag: rc 2 with the usage text, while a
+  #      real mode (--status) answers rc 0 and says automatic updates are not available.
+  # The behavioural proof (every old switch planted, nothing applies; a spawn put back goes red) is
+  # tests/test-gov-update.sh [NOAUTO], [PRESESSION], M8, M10, run by case_gov_update.
+  # _NA_TPLS / _NA_PS (newline lists) override the files checked - the case's own negative control.
+  local tpl ps hits n=0 m=0 bad_inv
+  local tpls="${_NA_TPLS-$CHOME/governance-installer/bundle/settings-hooks.json}"
+  local pss="${_NA_PS-$GOV_DIR/pre-session.sh
+$CHOME/governance-installer/bundle/hooks/governance/pre-session.sh}"
+  while IFS= read -r tpl; do
+    [ -n "$tpl" ] && [ -f "$tpl" ] || continue
+    n=$((n+1)); CUR_SCRIPT="$tpl"
+    hits=$(node -e 'let s;try{s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch(e){console.log("UNPARSEABLE");process.exit(0)}for(const[e,g]of Object.entries(s.hooks||{}))for(const x of g)for(const h of (x.hooks||[]))if(/gov-update\.sh/.test(h.command||""))console.log(e+": "+h.command)' "$tpl" 2>&1)
+    if [ -z "$hits" ]; then _ok "no hook event runs gov-update.sh ($tpl)"
+    else _bad "no hook event runs gov-update.sh ($tpl)" "registered: $(_snip "$hits") - 2.0.0 has no automatic update"; fi
+  done <<EOF
+$tpls
+EOF
+  [ "$n" -gt 0 ] || { CUR_SCRIPT="(templates)"; _bad "a hooks template was checked" "none found in: $(_snip "$tpls") - zero checks ran"; }
+  while IFS= read -r ps; do
+    [ -n "$ps" ] && [ -f "$ps" ] || continue
+    m=$((m+1)); CUR_SCRIPT="$ps"
+    if grep -q -- '--apply-if-ready' "$ps" 2>/dev/null; then
+      _bad "pre-session.sh never names --apply-if-ready ($ps)" "$(_snip "$(grep -n -- '--apply-if-ready' "$ps")")"
+    else _ok "pre-session.sh never names --apply-if-ready ($ps)"; fi
+    # Invocations: gov-update.sh followed by a --flag, on a line that is not a comment, not an echo
+    # and not the assignment of the signed-manual sentence. Every one must be --recover-detached.
+    bad_inv=$(grep -nE 'gov-update\.sh"?[[:space:]]+--[a-z]' "$ps" 2>/dev/null \
+              | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE 'echo "|_GOV_SIGNED="' | grep -v -- '--recover-detached')
+    if [ -z "$bad_inv" ]; then _ok "pre-session.sh invokes gov-update.sh only as --recover-detached ($ps)"
+    else _bad "pre-session.sh invokes gov-update.sh only as --recover-detached ($ps)" "other invocation: $(_snip "$bad_inv")"; fi
+    if grep -qE 'gov-update\.sh"[[:space:]]+--recover-detached' "$ps" 2>/dev/null; then
+      _ok "  control: the recovery invocation is still there, so the scan above can see one ($ps)"
+    else _bad "  control: the recovery invocation is still there ($ps)" "no --recover-detached call found - the invocation scan may be looking at the wrong shape"; fi
+  done <<EOF
+$pss
+EOF
+  [ "$m" -gt 0 ] || { CUR_SCRIPT="(pre-session)"; _bad "a pre-session.sh was checked" "none found in: $(_snip "$pss") - zero checks ran"; }
+  #   4. verify.sh (r2 finding 8, 2026-10-01) - EXECUTED in the sandbox HOME, its printed text read:
+  #      no line it prints says "automatic update(s)" (its updater section was headed that way), and
+  #      the section's real heading is there, so the scan reads the right output. A missing installer
+  #      tree is an absent subject (N/A). _NA_VERIFY overrides the file - the negative control.
+  local vf vo
+  vf="${_NA_VERIFY-$CHOME/governance-installer/verify.sh}"
+  CUR_SCRIPT="$vf"
+  if [ ! -f "$vf" ]; then
+    _na "verify.sh prints no automatic-update claim" "no installer tree at $vf"
+  else
+    local vr=(bash "$vf"); [ "$HAVE_TIMEOUT" = 1 ] && vr=(timeout 120 bash "$vf")
+    vo=$(cd "$SBX" 2>/dev/null && env HOME="$SBX_HOME" USERPROFILE="$SBX_HOME" PATH="$SBX_BIN:$PATH" \
+         GOVERNANCE_HOOKS=0 "${vr[@]}" </dev/null 2>&1)
+    if printf '%s\n' "$vo" | grep -qi 'automatic update'; then
+      _bad "verify.sh prints no automatic-update claim ($vf)" "printed: $(_snip "$(printf '%s\n' "$vo" | grep -i 'automatic update')")"
+    else _ok "verify.sh prints no automatic-update claim ($vf)"; fi
+    case "$vo" in
+      *"Manual updates and consent records:"*) _ok "  control: its updater section prints under 'Manual updates and consent records:' ($vf)" ;;
+      *) _bad "  control: its updater section prints under 'Manual updates and consent records:' ($vf)" "not in its output: $(_snip "$vo")" ;;
+    esac
+  fi
+  [ -n "${_NA_TPLS+x}${_NA_PS+x}${_NA_VERIFY+x}" ] && return 0   # negative-control runs stop at the static checks
+  CUR_SCRIPT="$GOV_DIR/gov-update.sh"
+  run_hook "$SBX" "sid-na-1" '' --apply-at-session-end
+  expect_rc 2 "gov-update.sh --apply-at-session-end is an unknown flag (removed in 2.0.0)"
+  expect_has "--apply [--force-live]" "  it prints the usage"
+  expect_not "--apply-at-session-end" "  the usage lists no such mode"
+  run_hook "$SBX" "sid-na-2" '' --status
+  expect_rc 0 "control: a real mode (--status) answers"
+  expect_has "automatic update: not available in this version" "  and says there is no automatic update"
 }
 
 # --- enumerate-before-claiming.sh ---------------------------------------------------------------
@@ -696,6 +957,40 @@ case_render_rules_read() {
   pay="{\"session_id\":\"sid-rrr-2\",\"cwd\":\"$proj\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$proj/CLAUDE.md\"}}"
   run_hook "$proj" "sid-rrr-2" "$pay"
   expect_nofile "$marker" "reading an unrelated file does NOT mint a token"
+}
+
+# --- consent-guard.sh (2026-09-30, legal conditions S1 / C3 / T4) ------------------------------
+case_consent_guard() {
+  # PreToolUse deny: a session cannot run a consent command (install.sh --accept-terms,
+  # close-push.sh --enable ...), strip the AI-agent markers, or write the consent records.
+  # Full matrix (both directions, ~100 checks): tests/test-consent-guard.sh. Here: blocks and
+  # allows through run_hook, so the NOOP and NOBLOCK mutants must die on printed text.
+  local proj="$SBX/cg-proj" pay
+  mkdir -p "$proj" 2>/dev/null
+  _RUN_ENV=(GOV_CONSENT_GUARD=1 GOVERNANCE_LOG="$SBX_HOME/.claude/logs/governance.log")
+  fx_state_reset
+  # 1. MUST BLOCK - a consent flag on the installer, wrapped in ssh
+  pay="{\"session_id\":\"sid-cg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ssh box 'bash install.sh --accept-terms'\"}}"
+  run_hook "$proj" "sid-cg-1" "$pay"
+  expect_rc 2 "install.sh --accept-terms from a session is BLOCKED"
+  expect_has "[GOVERNANCE CONSENT GUARD] BLOCKED: install.sh with --accept-terms" "the block names the script and the flag"
+  expect_has "typed in their own terminal" "the block is addressed to the human"
+  # 2. MUST BLOCK - a shell write to the close-push record
+  pay="{\"session_id\":\"sid-cg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"printf 'enabled=1' > ~/.claude/.governance-update/close-push\"}}"
+  run_hook "$proj" "sid-cg-1" "$pay"
+  expect_rc 2 "a shell write to the close-push record is BLOCKED"
+  expect_has "to the consent record close-push" "the block names the record"
+  # 3. MUST ALLOW - a close (close-push.sh -C <repo>) and a read of the record
+  pay="{\"session_id\":\"sid-cg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"bash ~/.claude/hooks/governance/close-push.sh -C /repo; cat ~/.claude/.governance-update/close-push\"}}"
+  run_hook "$proj" "sid-cg-1" "$pay"
+  expect_rc 0 "a close and a read of the record are ALLOWED"
+  expect_not "BLOCKED" "an allowed call prints no block"
+  # 4. MUST ALLOW - an Edit of an ordinary governance file
+  pay="{\"session_id\":\"sid-cg-1\",\"cwd\":\"$proj\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$proj/docs/context/HANDOFF.md\",\"old_string\":\"a\",\"new_string\":\"b\"}}"
+  run_hook "$proj" "sid-cg-1" "$pay"
+  expect_rc 0 "an Edit of HANDOFF.md is ALLOWED"
+  expect_not "CONSENT GUARD" "no guard text on an ordinary Edit"
+  _RUN_ENV=()
 }
 
 # --- bootstrap-gate.sh (registered 2026-09-29) ------------------------------------------------
@@ -1011,7 +1306,10 @@ case_pre_session() {
   if [ ! -f "$GOV_DIR/tests/test-sessionstart-budget.sh" ]; then
     _bad "tests/test-sessionstart-budget.sh exists" "missing at $GOV_DIR/tests/ - SessionStart speed would ship unmeasured"
   else
-    _o=$(bash "$GOV_DIR/tests/test-sessionstart-budget.sh" </dev/null 2>&1); _rc=$?
+    # The template beside the hooks under test (CHOME), never the real home's (round 3b): unset when
+    # CHOME has no staging copy, and the test then finds its own.
+    local _sst=""; [ -f "$CHOME/governance-installer/bundle/settings-hooks.json" ] && _sst="$CHOME/governance-installer/bundle/settings-hooks.json"
+    _o=$(env ${_sst:+GOV_SS_TEMPLATE="$_sst"} bash "$GOV_DIR/tests/test-sessionstart-budget.sh" </dev/null 2>&1); _rc=$?
     _p=$(printf '%s' "$_o" | sed -n 's/^pass=\([0-9]*\) fail=\([0-9]*\)$/\1/p' | tail -1)
     _f=$(printf '%s' "$_o" | sed -n 's/^pass=\([0-9]*\) fail=\([0-9]*\)$/\2/p' | tail -1)
     if [ "$_rc" = "0" ] && [ "${_p:-0}" -gt 0 ] && [ "${_f:-1}" = "0" ]; then
@@ -1577,6 +1875,171 @@ case_end_session() {
   run_hook "$grepo" "sid-es-5" "$(pl_plain "$grepo" sid-es-5 Stop)"
   expect_rc 2 "a stamp from another repo: falls back to the log and still blocks"
   expect_has "GIT NOT CONSULTED" "fallback: says the gate is running blind, instead of pretending"
+
+  # ── The publish set (r2 finding 10, 2026-10-01) ────────────────────────────────────────────
+  # GOV_PUBLISH=1 at a close copies staging into the public clone and pushes it. It copied bundle/,
+  # install.sh, verify.sh and README.md - never NOTICE-AUTO-UPDATE.md or LICENSE - so a publish
+  # shipped the new install.sh beside the OLD terms text it prints as the one the user accepts.
+  # Rehearsed end to end against throwaway repos (GOV_INSTALLER_REPO / GOV_REPO_PATH, a bare origin
+  # inside the sandbox that only the shim's GOV_SELFTEST_LOCAL_REMOTE exception lets pull/push reach),
+  # in both directions: clean texts reach the origin; a real value in the NOTICE is stopped by the
+  # same PII gate as every other staged file, and nothing reaches the origin.
+  # Not under a mutant (MUT=1): NOOP is killed by the cases above, NOBLOCK changes nothing on this
+  # path (it never exits 2), and the four runs here (two with git + the PII scanner) would triple a
+  # cost that buys no kill. Non-vacuity was shown directly instead: against the unfixed hook these
+  # assertions went 6 red, rehearsal control green (2026-10-01).
+  [ "$MUT" = 1 ] && return 0
+  local pproj="$SBX/pubproj" pst="$SBX/pubstage" pcl="$SBX/pubclone" prem="$SBX/pubremote.git" purl pf
+  rm -rf "$pproj" "$pst" "$pcl" "$prem" 2>/dev/null
+  fx_project "$pproj" SOURCE "$(_winform "$pproj")"
+  printf '{"version":"9.9.9"}\n' > "$pproj/version.json"
+  printf -- '---\nstatus: active\n---\n# HANDOFF v9.9.9\n' > "$pproj/MDs/HANDOFF-v9.9.9.md"
+  _es_pubtree() {   # $1 dir, $2 tag for the two texts
+    mkdir -p "$1/bundle" 2>/dev/null
+    printf '9.9.9\n' > "$1/bundle/VERSION"
+    printf '#!/usr/bin/env bash\necho install\n' > "$1/install.sh"
+    printf '#!/usr/bin/env bash\necho verify\n' > "$1/verify.sh"
+    printf '# README (selftest fixture)\n' > "$1/README.md"
+    printf '# Notice (selftest fixture) PUB-NOTICE-%s\n\nTerms version: 9\n' "$2" > "$1/NOTICE-AUTO-UPDATE.md"
+    printf 'MIT License (selftest fixture) PUB-LICENSE-%s\n' "$2" > "$1/LICENSE"
+  }
+  "$REAL_GIT" init -q --bare "$prem" >/dev/null 2>&1
+  sbx_git "$prem" symbolic-ref HEAD refs/heads/master
+  mkdir -p "$pcl" 2>/dev/null; sbx_git "$pcl" init
+  sbx_git "$pcl" symbolic-ref HEAD refs/heads/master
+  sbx_git "$pcl" config user.email "you@example.com"
+  sbx_git "$pcl" config user.name "Operator One"
+  _es_pubtree "$pcl" OLD
+  sbx_git "$pcl" add -A; sbx_git "$pcl" commit -m "the published state before this close"
+  sbx_git "$pcl" remote add origin "$prem"
+  purl="$("$REAL_GIT" -C "$pcl" remote get-url origin 2>/dev/null)"
+  sbx_git "$pcl" push -q origin master
+  _es_pubtree "$pst" NEW
+  printf '9.9.10\n' > "$pst/bundle/VERSION"
+  pf="$SBX_HOME/.claude/logs/.governance-push-pending"
+  _es_pubshow() { "$REAL_GIT" -C "$prem" show "master:$1" 2>/dev/null; }
+
+  fx_state_reset
+  printf '2026-10-01T00:00:00Z bundle/VERSION\n' > "$pf"
+  # The preview a human reads before GOV_PUBLISH=1 lists the top-level files too.
+  _RUN_ENV=(GOV_INSTALLER_REPO="$pst" GOV_REPO_PATH="$pcl")
+  run_hook "$pproj" "sid-es-pp1" '' --publish-preview
+  _RUN_ENV=()
+  expect_has "would update     NOTICE-AUTO-UPDATE.md" "publish preview: names the NOTICE that differs"
+  expect_has "would update     LICENSE" "publish preview: names the LICENSE that differs"
+  _RUN_ENV=(GOV_PUBLISH=1 GOV_INSTALLER_REPO="$pst" GOV_REPO_PATH="$pcl" GOV_SELFTEST_LOCAL_REMOTE="$purl")
+  _RUN_TIMEOUT=600 run_hook "$pproj" "sid-es-6" "$(pl_plain "$pproj" sid-es-6 Stop)"
+  _RUN_ENV=()
+  expect_rc 0 "GOV_PUBLISH=1 with clean texts: the close publishes"
+  expect_has "auto-pushed" "  and says it pushed"
+  case "$(_es_pubshow bundle/VERSION)" in
+    9.9.10*) _ok "  control: the queued bundle file reached the origin (the rehearsal really pushed)" ;;
+    *) _bad "  control: the queued bundle file reached the origin" "origin bundle/VERSION: $(_snip "$(_es_pubshow bundle/VERSION)"); output: $(_snip "$BOTH")" ;;
+  esac
+  case "$(_es_pubshow NOTICE-AUTO-UPDATE.md)" in
+    *PUB-NOTICE-NEW*) _ok "  NOTICE-AUTO-UPDATE.md is in the published set: the origin holds the staging text" ;;
+    *) _bad "  NOTICE-AUTO-UPDATE.md is in the published set" "origin NOTICE: $(_snip "$(_es_pubshow NOTICE-AUTO-UPDATE.md)") - the publish shipped install.sh beside the OLD terms text" ;;
+  esac
+  case "$(_es_pubshow LICENSE)" in
+    *PUB-LICENSE-NEW*) _ok "  LICENSE is in the published set: the origin holds the staging text" ;;
+    *) _bad "  LICENSE is in the published set" "origin LICENSE: $(_snip "$(_es_pubshow LICENSE)")" ;;
+  esac
+  expect_nofile "$pf" "  a pushed queue is cleared"
+  _RUN_ENV=(GOV_INSTALLER_REPO="$pst" GOV_REPO_PATH="$pcl")
+  run_hook "$pproj" "sid-es-pp2" '' --publish-preview
+  _RUN_ENV=()
+  expect_has "0 file(s) differ, 0 new in staging" "publish preview after the push: nothing differs"
+  expect_not "NOTICE-AUTO-UPDATE.md" "  and names no NOTICE"
+
+  # The shim's exception admits only the EXACT commands above (round 3, 2026-10-02). Probed in the
+  # same clone with the same exception armed: an option that redirects the push (--repo=) or runs a
+  # program at the other end (--receive-pack= / --upload-pack=) is refused before git runs. The
+  # violation lines the probes write are checked, then removed, so the suite-wide "no hook
+  # attempted a denied git operation" check stays about hooks.
+  local _vsave="$SBX/git-violations.save" _dec="$SBX/decoy.git" _rp="$SBX/rp-probe.sh" _vn0 _vn1 _prc
+  cp -f "$GIT_VIOL" "$_vsave" 2>/dev/null; _vn0=$(grep -c . "$GIT_VIOL" 2>/dev/null)
+  "$REAL_GIT" init -q --bare "$_dec" >/dev/null 2>&1
+  printf '#!/bin/sh\n: > "%s/rp-ran"\nexit 1\n' "$SBX" > "$_rp"; chmod +x "$_rp" 2>/dev/null; rm -f "$SBX/rp-ran"
+  _shimx() { ( cd "$pcl" && env GOV_SELFTEST_SBX="$SBX" GOV_SELFTEST_REAL_GIT="$REAL_GIT" GOV_SELFTEST_LOCAL_REMOTE="$purl" \
+               GIT_TERMINAL_PROMPT=0 "$SBX_BIN/git" "$@" ) >/dev/null 2>&1; }
+  _shimx push "--repo=$_dec" origin master; _prc=$?
+  if [ "$_prc" != 0 ] && ! "$REAL_GIT" -C "$_dec" rev-parse --verify -q refs/heads/master >/dev/null 2>&1; then
+    _ok "  git shim: 'push --repo=<other repo> origin master' refused under the exception (nothing reached it)"
+  else _bad "  git shim: push --repo= refused" "rc=$_prc; decoy master: $("$REAL_GIT" -C "$_dec" rev-parse -q refs/heads/master 2>/dev/null)"; fi
+  _shimx push "--receive-pack=$_rp" origin master; _prc=$?
+  if [ "$_prc" != 0 ] && [ ! -e "$SBX/rp-ran" ]; then _ok "  git shim: 'push --receive-pack=<cmd>' refused (the command never ran)"
+  else _bad "  git shim: push --receive-pack= refused" "rc=$_prc; probe ran: $([ -e "$SBX/rp-ran" ] && echo yes || echo no)"; fi
+  rm -f "$SBX/rp-ran"
+  _shimx pull "--upload-pack=$_rp" --rebase --autostash origin master; _prc=$?
+  if [ "$_prc" != 0 ] && [ ! -e "$SBX/rp-ran" ]; then _ok "  git shim: 'pull --upload-pack=<cmd> ...' refused (the command never ran)"
+  else _bad "  git shim: pull --upload-pack= refused" "rc=$_prc; probe ran: $([ -e "$SBX/rp-ran" ] && echo yes || echo no)"; fi
+  _vn1=$(grep -c . "$GIT_VIOL" 2>/dev/null)
+  [ "$(( ${_vn1:-0} - ${_vn0:-0} ))" = 3 ] && _ok "  git shim: each refusal is recorded as a violation (3)" \
+    || _bad "  git shim: each refusal is recorded" "violation lines before/after: ${_vn0:-0}/${_vn1:-0}"
+  _shimx push origin master; _prc=$?
+  [ "$_prc" = 0 ] && _ok "  control: the exact 'push origin master' still passes the shim (rc 0)" \
+    || _bad "  control: the exact push still passes" "rc=$_prc"
+  # Global options before the subcommand (round 3b, 2026-10-02). MEASURED on the old shim: it took
+  # the word after `-C` / `-c` as the subcommand, so `-C <outside> push <decoy> master` pushed and
+  # `-C <outside> commit` committed, with no violation line. A repo OUTSIDE the sandbox (a sibling
+  # under the sandbox parent, removed below) is the target; the read-only `remote get-url` and
+  # `config --get` forms must still pass (pr-watch-guard.sh / end-session.sh run them).
+  local _out="$SBX_PARENT/shimprobe-$$" _h0 _vn2 _vn3 _rout
+  rm -rf "$_out"; "$REAL_GIT" init -q "$_out" >/dev/null 2>&1
+  "$REAL_GIT" -C "$_out" -c user.name=s -c user.email=s@example.com commit -q --allow-empty -m base >/dev/null 2>&1
+  "$REAL_GIT" -C "$_out" remote add origin "$_dec" >/dev/null 2>&1; "$REAL_GIT" -C "$_out" config test.key v
+  _h0=$("$REAL_GIT" -C "$_out" rev-parse HEAD 2>/dev/null); _vn2=$(grep -c . "$GIT_VIOL" 2>/dev/null)
+  _shimx -C "$_out" push "$_dec" master; _prc=$?
+  if [ "$_prc" != 0 ] && ! "$REAL_GIT" -C "$_dec" rev-parse --verify -q refs/heads/master >/dev/null 2>&1; then
+    _ok "  git shim: '-C <outside> push <decoy> master' refused (nothing reached the decoy)"
+  else _bad "  git shim: -C <outside> push refused" "rc=$_prc; decoy master: $("$REAL_GIT" -C "$_dec" rev-parse -q refs/heads/master 2>/dev/null)"; fi
+  _shimx -C "$_out" -c user.name=s -c user.email=s@example.com commit -q --allow-empty -m x; _prc=$?
+  [ "$_prc" != 0 ] && [ "$("$REAL_GIT" -C "$_out" rev-parse HEAD 2>/dev/null)" = "$_h0" ] \
+    && _ok "  git shim: '-C <outside> -c k=v commit' refused (the outside repo is unchanged)" \
+    || _bad "  git shim: -C <outside> commit refused" "rc=$_prc; HEAD moved: $("$REAL_GIT" -C "$_out" log -1 --format=%s 2>/dev/null)"
+  ( cd "$_out" && env GOV_SELFTEST_SBX="$SBX" GOV_SELFTEST_REAL_GIT="$REAL_GIT" \
+      "$SBX_BIN/git" -c user.name=s -c user.email=s@example.com commit -q --allow-empty -m y ) >/dev/null 2>&1; _prc=$?
+  [ "$_prc" != 0 ] && [ "$("$REAL_GIT" -C "$_out" rev-parse HEAD 2>/dev/null)" = "$_h0" ] \
+    && _ok "  git shim: '-c k=v commit' run in an outside repo refused" \
+    || _bad "  git shim: -c k=v commit outside refused" "rc=$_prc"
+  _shimx --git-dir="$_out/.git" --work-tree="$_out" -c user.name=s -c user.email=s@example.com commit -q --allow-empty -m z; _prc=$?
+  [ "$_prc" != 0 ] && [ "$("$REAL_GIT" -C "$_out" rev-parse HEAD 2>/dev/null)" = "$_h0" ] \
+    && _ok "  git shim: '--git-dir=<outside> --work-tree=<outside> commit' refused" \
+    || _bad "  git shim: --git-dir=<outside> commit refused" "rc=$_prc"
+  _vn3=$(grep -c . "$GIT_VIOL" 2>/dev/null)
+  [ "$(( ${_vn3:-0} - ${_vn2:-0} ))" = 4 ] && _ok "  git shim: each of the four refusals is recorded as a violation" \
+    || _bad "  git shim: the four refusals are recorded" "violation lines before/after: ${_vn2:-0}/${_vn3:-0}"
+  _rout=$( cd "$pcl" && env GOV_SELFTEST_SBX="$SBX" GOV_SELFTEST_REAL_GIT="$REAL_GIT" "$SBX_BIN/git" -C "$_out" remote get-url origin 2>/dev/null ); _prc=$?
+  # (git may print the URL in its C:/ spelling on Windows, so the tail is compared)
+  case "$_rout" in */decoy.git) ;; *) _prc="$_prc/url" ;; esac
+  [ "$_prc" = 0 ] && [ "$(grep -c . "$GIT_VIOL" 2>/dev/null)" = "${_vn3:-0}" ] \
+    && _ok "  control: '-C <outside> remote get-url origin' still passes (read-only; pr-watch-guard.sh runs it)" \
+    || _bad "  control: -C <outside> remote get-url passes" "rc=$_prc out=[$_rout]"
+  _rout=$( cd "$pcl" && env GOV_SELFTEST_SBX="$SBX" GOV_SELFTEST_REAL_GIT="$REAL_GIT" "$SBX_BIN/git" -C "$_out" config --get test.key 2>/dev/null ); _prc=$?
+  [ "$_prc" = 0 ] && [ "$_rout" = v ] && [ "$(grep -c . "$GIT_VIOL" 2>/dev/null)" = "${_vn3:-0}" ] \
+    && _ok "  control: '-C <outside> config --get' still passes (read-only)" \
+    || _bad "  control: -C <outside> config --get passes" "rc=$_prc out=[$_rout]"
+  rm -rf "$_out"
+  cp -f "$_vsave" "$GIT_VIOL" 2>/dev/null; rm -f "$_vsave" "$_rp"; rm -rf "$_dec"
+
+  # The other direction: the same gate. A live-shaped phone number assembled at runtime (this file is
+  # published too - see case_pii_gate), placed only in the NOTICE.
+  local _pt='54' _p2='987' _p3='6543'
+  printf '# Notice (selftest fixture) PUB-NOTICE-DIRTY\nowner reachable on +972 %s %s %s\n\nTerms version: 9\n' \
+    "$_pt" "$_p2" "$_p3" > "$pst/NOTICE-AUTO-UPDATE.md"
+  printf '2026-10-01T00:00:01Z bundle/VERSION\n' > "$pf"
+  _RUN_ENV=(GOV_PUBLISH=1 GOV_INSTALLER_REPO="$pst" GOV_REPO_PATH="$pcl" GOV_SELFTEST_LOCAL_REMOTE="$purl")
+  _RUN_TIMEOUT=600 run_hook "$pproj" "sid-es-7" "$(pl_plain "$pproj" sid-es-7 Stop)"
+  _RUN_ENV=()
+  expect_rc 0 "  a held publish still ends the close normally (the hook's own exit is 0)"
+  expect_has "PUSH ABORTED - a staged file carries a real value" "a real value in the NOTICE: the PII gate aborts the publish"
+  expect_has "NOTICE-AUTO-UPDATE.md:" "  and names the NOTICE as the file that carries it"
+  case "$(_es_pubshow NOTICE-AUTO-UPDATE.md)" in
+    *PUB-NOTICE-DIRTY*) _bad "  nothing reached the origin" "the origin NOTICE holds the dirty text" ;;
+    *PUB-NOTICE-NEW*)   _ok "  nothing reached the origin: it still holds the clean NOTICE" ;;
+    *) _bad "  nothing reached the origin" "origin NOTICE: $(_snip "$(_es_pubshow NOTICE-AUTO-UPDATE.md)")" ;;
+  esac
+  expect_file "$pf" "  the queue is kept for the retry"
 }
 
 # --- pii-gate-pretooluse.sh -------------------------------------------------------------------
@@ -1812,9 +2275,22 @@ for ev,groups in (s.get("hooks") or {}).items():
   ' "$SETTINGS"
 }
 
-expand_cmd() {   # ~ -> $CHOME's parent; strip trailing args; echo "" when not a file
+expand_cmd() {   # ~/.claude -> $CHOME, other ~ -> $HOME; strip trailing args; echo "" when not a file
   local c="$1"
-  case "$c" in "~/"*) c="$HOME/${c#\~/}" ;; esac
+  # `<interpreter> <file> ...` (e.g. `python3 ~/.claude/hooks/x.py`, OPEN-PROBLEMS #33): the
+  # file is the hook. Without this the first word `python3` is not a file, the hook is run as an
+  # INLINE command in the sandbox HOME, where its file does not exist, and it fails rc=2 - which
+  # kept this machine's verdict RED for a user hook the framework does not own.
+  case "$c" in
+    python3\ *|python\ *|node\ *|bash\ *|sh\ *|pwsh\ *|powershell\ *) c="${c#* }" ;;
+  esac
+  # Round 3 (2026-10-02): `~/.claude/...` is the tree under test - $CHOME, which GOV_SELFTEST_HOME
+  # moves. Resolving it with $HOME ran (and mutated) the REAL ~/.claude hooks in that mode, outside
+  # HOOKS_ROOT. Default mode is unchanged: CHOME is $HOME/.claude there.
+  case "$c" in
+    "~/.claude/"*) c="${CHOME:-$HOME/.claude}/${c#\~/.claude/}" ;;
+    "~/"*)         c="$HOME/${c#\~/}" ;;
+  esac
   local first="${c%% *}"
   [ -f "$first" ] && printf '%s' "$first" || printf ''
 }
@@ -1848,16 +2324,29 @@ mutate_and_check() {   # $1 hook path (real), $2 case fn, $3 basename
   rel="${real#$HOOKS_ROOT/}"
   local mutant="$mutant_dir/$rel"
   local survivors=0
+  # Round 3 (2026-10-02): a mutant that was never written is an ERROR, never a kill. When the hook
+  # path is outside HOOKS_ROOT (the strip above removes nothing) or the write fails, the case runs
+  # against a file that does not exist, every assertion fails, and that used to read as "killed".
+  _mutant_written() {  # _mutant_written <operator>: 0 when $mutant exists, is non-empty, and differs from $real
+    if [ "$rel" = "$real" ] || [ ! -s "$mutant" ] || cmp -s "$real" "$mutant"; then
+      _bad "MUTATION[$base/$1] NOT RUN (ERROR: mutant not written)" "no mutant at $mutant (hook $real; HOOKS_ROOT $HOOKS_ROOT) - a case run against a missing file fails every assertion and would have been counted as a kill"
+      return 1
+    fi
+    return 0
+  }
 
   # M1 — NOOP: the hook does nothing at all. Any assertion set a dead hook still satisfies is
   # vacuous, so this is the coverage test, not just a mutation test.
-  { printf '%s\n' "$(head -1 "$real")"; printf 'exit 0  # selftest mutant: NOOP\n'; tail -n +2 "$real"; } > "$mutant"
+  { printf '%s\n' "$(head -1 "$real")"; printf 'exit 0  # selftest mutant: NOOP\n'; tail -n +2 "$real"; } > "$mutant" 2>/dev/null
+  if ! _mutant_written NOOP; then :
+  else
   MUT=1; CASE_FAILS=0; CUR_SCRIPT="$mutant"; "$fn" >/dev/null 2>&1; MUT=0
   if [ "$CASE_FAILS" -eq 0 ]; then
     survivors=$((survivors+1))
     _bad "MUTATION[$base/NOOP] survived" "a hook that does NOTHING passes every assertion for it — the assertions are vacuous"
   else
     _ok "MUTATION[$base/NOOP] killed by $CASE_FAILS assertion(s)"
+  fi
   fi
 
   # M2 — NOBLOCK: every `exit 2` becomes `exit 0`. Only meaningful for hooks that block.
@@ -1866,7 +2355,9 @@ mutate_and_check() {   # $1 hook path (real), $2 case fn, $3 basename
   # and accused a perfectly good assertion set of being vacuous. A mutation operator that fails
   # to mutate is a false alarm, not a finding.
   if grep -qE '^[[:space:]]*exit 2([[:space:]]|#|$)' "$real"; then
-    sed -E 's/^([[:space:]]*)exit 2([[:space:]]*(#.*)?)$/\1exit 0\2/' "$real" > "$mutant"
+    sed -E 's/^([[:space:]]*)exit 2([[:space:]]*(#.*)?)$/\1exit 0\2/' "$real" > "$mutant" 2>/dev/null
+    if ! _mutant_written NOBLOCK; then :
+    else
     MUT=1; CASE_FAILS=0; CUR_SCRIPT="$mutant"; "$fn" >/dev/null 2>&1; MUT=0
     if [ "$CASE_FAILS" -eq 0 ]; then
       survivors=$((survivors+1))
@@ -1874,9 +2365,11 @@ mutate_and_check() {   # $1 hook path (real), $2 case fn, $3 basename
     else
       _ok "MUTATION[$base/NOBLOCK] killed by $CASE_FAILS assertion(s)"
     fi
+    fi
   fi
 
-  cp -f "$real" "$mutant" 2>/dev/null
+  # Restore the copy only where it belongs: never write outside the sandbox mutation tree.
+  [ "$rel" = "$real" ] || cp -f "$real" "$mutant" 2>/dev/null
   return $survivors
 }
 
@@ -2002,6 +2495,7 @@ EOF
       close-push.sh)               echo "TOOL: the one place a session close pushes the current repo, called by the close skills (live-state-orchestrator, full-finish, plan-and-execute) - not a hook; case_close_push runs its --selftest against local bare origins (2026-09-29)" ;;
       gov-release.sh)              echo "TOOL: the maintainer's release tool, source machine only (2.0.0) - its preconditions and the manifest it signs are exercised by case_gov_update" ;;
       release-manifest.sh)         echo "library: the release-manifest builder/parser, sourced by gov-update.sh, gov-release.sh and install.sh (2.0.0)" ;;
+      consent-lib.sh)              echo "library: consent records — the one parser/predicate/writer, sourced by _common.sh, install.sh, gov-update.sh, close-push.sh (2026-09-30); case_consent_lib runs tests/test-consent-lib.sh" ;;
       settings-merge.js)           echo "invoked-by:gov-update.sh" ;;
       *.test.sh)                   echo "test: a suite, not a hook" ;;
       *) echo "" ;;
@@ -2173,12 +2667,40 @@ EOF
     CUR_ORIG="$GOV_DIR/close-push.sh"
     case_close_push
   fi
+  if command -v case_consent_lib >/dev/null 2>&1; then
+    printf '
+  [library] %s
+' "$GOV_DIR/consent-lib.sh"
+    CUR_ORIG="$GOV_DIR/consent-lib.sh"
+    case_consent_lib
+  fi
   if command -v case_gov_update >/dev/null 2>&1; then
     printf '
   [tool] %s
 ' "$GOV_DIR/gov-update.sh"
     CUR_ORIG="$GOV_DIR/gov-update.sh"
     case_gov_update
+  fi
+  if command -v case_no_auto_update >/dev/null 2>&1; then
+    printf '
+  [invariant] no automatic update in 2.0.0 (%s)
+' "$GOV_DIR/gov-update.sh"
+    CUR_ORIG="$GOV_DIR/gov-update.sh"
+    case_no_auto_update
+  fi
+  if command -v case_terms_text >/dev/null 2>&1; then
+    printf '
+  [text] NOTICE-AUTO-UPDATE.md + README.md (%s)
+' "$GOV_DIR/tests/test-terms-text.sh"
+    CUR_ORIG="$GOV_DIR/tests/test-terms-text.sh"
+    case_terms_text
+  fi
+  if command -v case_release_invariants >/dev/null 2>&1; then
+    printf '
+  [invariant] T2 one parser, T6 update subset (%s)
+' "$GOV_DIR/tests/test-release-invariants.sh"
+    CUR_ORIG="$GOV_DIR/tests/test-release-invariants.sh"
+    case_release_invariants
   fi
 
   # ── COPY PARITY ─────────────────────────────────────────────────────────────────────────────

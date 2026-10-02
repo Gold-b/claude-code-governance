@@ -14,25 +14,13 @@
             "type": "command",
             "command": "~/.claude/hooks/governance/pre-session.sh",
             "timeout": 10,
-            "_timeout_note": "10 s and NEVER more (owner, 2026-09-26). SessionStart hooks block Claude Code's start-up, and the VS Code extension fails the whole start-up at 60 s ('Subprocess initialization did not complete within 60000ms'); it ignores asyncRewake (anthropics/claude-code#96980). 2.0.0 raised this to 120 s to run the automatic-update apply here; that broke VS Code start-up, so the apply no longer runs in this hook - it runs at SessionEnd, detached (gov-update.sh --apply-at-session-end). settings-merge.js clamps it to 10 whatever a template says, and tests/test-sessionstart-budget.sh fails on any SessionStart hook that is slow or registered above its cap.",
+            "_timeout_note": "10 s and NEVER more (owner, 2026-09-26). SessionStart hooks block Claude Code's start-up, and the VS Code extension fails the whole start-up at 60 s ('Subprocess initialization did not complete within 60000ms'); it ignores asyncRewake (anthropics/claude-code#96980). 2.0.0 raised this to 120 s to run the automatic-update apply here; that broke VS Code start-up, so the apply no longer runs in this hook. Since 2026-09-30 nothing applies an update unattended (the SessionEnd trigger is unregistered and removed; 2.0.0 has no automatic update): the user runs gov-update.sh --apply by hand. settings-merge.js clamps it to 10 whatever a template says, and tests/test-sessionstart-budget.sh fails on any SessionStart hook that is slow or registered above its cap.",
             "statusMessage": "Context Governance: pre-session check..."
           },
           {
             "type": "command",
             "command": "~/.claude/hooks/governance/pr-watch-guard.sh",
             "timeout": 15
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/governance/gov-update.sh --apply-at-session-end",
-            "timeout": 10,
-            "_note": "The automatic-update trigger (2026-09-27). A launcher: a few file tests, one log line, and - only when a verified release is staged or an apply was interrupted - one detached spawn of gov-update.sh --apply-if-ready (nohup, stdin /dev/null, output to ~/.claude/.governance-update/REPORT, no session tokens, nice 19, a 600 s ceiling where `timeout` exists). Returns in about a second (0.5 s idle, up to ~1.5 s under load, MEASURED on Windows); the apply (18-40 s) runs after this session has ended and defers while any other session is live, so the last session to close installs it. pre-session.sh prints the result at the next start. Never at SessionStart: those hooks block start-up, and the VS Code extension fails a start that takes 60 s."
           }
         ]
       }
@@ -139,6 +127,17 @@
             "command": "~/.claude/hooks/governance/bootstrap-gate.sh",
             "timeout": 15,
             "_timeout_note": "Blocks Edit/Write and outward shell actions (WhatsApp send, git commit/push, scp/rsync, systemctl/docker) in a governed SOURCE project until the harness records a Skill(bootstrapper) run. Pure bash, no forks on the allow path: measured 82-99 ms median idle, 653 ms under load (bare bash 683 ms). Kill switch GOV_BOOTSTRAP_GATE=0."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/governance/consent-guard.sh",
+            "timeout": 10,
+            "_timeout_note": "Denies a session the consent acts (2026-09-30, legal S1/C3/T4): install.sh / gov-update.sh / close-push.sh with a consent flag, stripping the AI-agent markers, and writing the consent records in ~/.claude/.governance-update/. Since TG2 (S3c/C7c) also a Read or shell command on the GOV_RELEASE_KEY private key and any ssh-keygen -Y sign; Read is in the matcher for that, and a Read that misses the .ssh/ssh-keygen prefilter exits on one glob. Every project, every role. Pure bash, one glob prefilter on the allow path; bench in the script header. Owner-only kill switch GOV_CONSENT_GUARD=0."
           }
         ]
       }

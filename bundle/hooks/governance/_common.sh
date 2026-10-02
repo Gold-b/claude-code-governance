@@ -31,6 +31,19 @@ case "$GOVERNANCE_LOG" in
   *) GOVERNANCE_LOG="$HOME/.claude/logs/governance.log" ;;
 esac
 
+# Consent records (2026-09-30, T2): the ONE parser/predicate/writer lives in consent-lib.sh beside
+# this file, so every hook has gov_close_push_on / gov_auto_update_on / gov_human_consent_ok by
+# name. It is a pure library (defines functions, touches nothing), sourced here BEFORE the log-dir
+# side effect below; install.sh and close-push.sh source it directly instead of this file. Missing
+# library = the predicates are undefined, and `if gov_close_push_on` is then false (fails closed).
+case "${BASH_SOURCE[0]:-}" in
+  */*) _gov_consent_lib="${BASH_SOURCE[0]%/*}/consent-lib.sh" ;;
+  *)   _gov_consent_lib="" ;;   # never a cwd-relative source: the cwd is a project, not ours
+esac
+# shellcheck source=/dev/null
+[ -n "$_gov_consent_lib" ] && [ -f "$_gov_consent_lib" ] && . "$_gov_consent_lib"
+unset _gov_consent_lib
+
 # Ensure log dir exists. Failure here is non-fatal — we still try to run.
 mkdir -p "$(dirname "$GOVERNANCE_LOG")" 2>/dev/null || true
 
@@ -671,7 +684,8 @@ gov_is_semver() {
 # Fork-free, the same builtin loop pre-session.sh's advisory uses (added 2.0.0 for the updater,
 # which must refuse downgrades: 1.9.0 -> 1.10.0 is an upgrade a string compare gets wrong).
 # ADDITIVE-ONLY RULE: helpers here are only ever added or kept backward-compatible within a
-# release line, never removed or re-typed. The auto-updater swaps this file FIRST, so for a moment
+# release line, never removed or re-typed. gov-update.sh --apply (run by hand; 2.0.0 has no
+# automatic update) swaps this file FIRST, so for a moment
 # a new _common.sh serves old hooks; that is only safe while nothing an old hook calls disappears.
 gov_semver_cmp_var() {
   local __sc_n="$1" __sc_a="$2" __sc_b="$3" __sc_x __sc_y __sc_r="eq"
@@ -938,7 +952,6 @@ gov_memory_dir() {
 # flag used in a registered hook command must be added here. GOV_NO_STDIN=1 forces the skip.
 case "${1:-}" in
   --sync-if-drifted) _gov_cli_mode=0 ;;   # registered Stop hook (settings-hooks.json): has a payload
-  --apply-at-session-end) _gov_cli_mode=0 ;;   # gov-update.sh, registered SessionEnd hook: has a payload
   --*)               _gov_cli_mode=1 ;;
   *)                 _gov_cli_mode=0 ;;
 esac

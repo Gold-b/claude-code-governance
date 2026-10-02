@@ -28,9 +28,8 @@ echo "== 1. payload is still read where a payload exists"
 [ "$(sid)" = "sid-none" ] && ok "plain hook (no args): payload read" || bad "plain hook: payload read" "got '$(sid)'"
 [ "$(sid --sync-if-drifted)" = "sid---sync-if-drifted" ] && ok "registered flag --sync-if-drifted: payload read" \
   || bad "--sync-if-drifted: payload read" "got '$(sid --sync-if-drifted)'"
-# gov-update.sh's SessionEnd hook (2026-09-27): it must see the ENDING session's id to mark it closed.
-[ "$(sid --apply-at-session-end)" = "sid---apply-at-session-end" ] && ok "registered flag --apply-at-session-end: payload read" \
-  || bad "--apply-at-session-end: payload read" "got '$(sid --apply-at-session-end)'"
+# (gov-update.sh --apply-at-session-end, a registered SessionEnd hook until 2026-09-30, is gone:
+# 2.0.0 has no automatic update, so no gov-update.sh mode reads a payload.)
 [ -z "$(sid --apply-if-ready)" ] && ok "--apply-if-ready (the detached child, stdin /dev/null): priming skipped" \
   || bad "--apply-if-ready: priming skipped" "got '$(sid --apply-if-ready)'"
 

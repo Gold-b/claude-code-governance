@@ -8,22 +8,35 @@
 #
 # Usage:
 #   bash ~/.claude/governance-installer/install.sh [--core-only] [--force] [--dry-run] [--accept-terms]
+#        [--no-close-push]
 #
 # Options:
 #   --core-only   Install only core governance skills (skip extended toolkit)
 #   --force       Overwrite existing files without prompting
 #   --dry-run     Show what would be installed without making changes
 #   --no-claude-md  Skip CLAUDE.md installation (keep your existing one)
-#   --uninstall   Remove all governance files (with backup)
-#   --accept-terms  Accept NOTICE-AUTO-UPDATE.md without the typed prompt (non-interactive
-#                 installs; env equivalent GOV_ACCEPT_TERMS=1). Without it and without a
-#                 terminal, the install refuses before writing anything.
+#   --uninstall   Remove the governance files (backed up first; nothing is removed when the
+#                 backup fails). It removes the WHOLE ~/.claude/hooks/ directory, including hooks
+#                 of your own, and the ENTIRE "hooks" section of settings.json, including entries
+#                 you added. Kept: CLAUDE.md, terms-accepted, close-push.
+#   --accept-terms  Accept the terms in NOTICE-AUTO-UPDATE.md section 10.1 without the typed
+#                 prompt (non-interactive installs; env equivalent GOV_ACCEPT_TERMS=1). Passing
+#                 it means you have read and accept them. Refused when an AI-agent session is
+#                 detected (a safeguard, not a guarantee - anything that runs under your account
+#                 can act as you). It turns nothing outward on: push at session close stays OFF.
+#                 Without it and without a terminal, the install refuses before writing
+#                 anything. GOV_ACCEPT_TERMS is read from the process environment only, never
+#                 from ~/.claude/.governance-local.env.
+#   --no-close-push   Record push at session close OFF and do not ask. There is no flag that turns
+#                 it ON: that always needs your own y, typed in your own terminal - this installer
+#                 run on a terminal asks (y/N, default No), or later:
+#                 bash ~/.claude/hooks/governance/close-push.sh --enable (NOTICE sections 2a and 10.3).
 #   --trust-new-key Replace the pinned release-signing key with this clone's even though the
 #                 clone's manifest does not verify under the key pinned now (key rotation after a
 #                 compromise — compare the fingerprint with README.md first)
 #   --print-install-map  Print "src -> dest  tag" for every file this installer copies, and
-#                 exit. The release manifest embeds this output, so what the auto-updater
-#                 installs and what this script installs are one list by construction.
+#                 exit. The release manifest embeds this output, so what gov-update.sh --apply
+#                 (run by hand) installs and what this script installs are one list by construction.
 #   --deep-verify Also run governance-selftest.sh after installing (~2 min extra)
 #   --no-verify   Skip the post-install verification. The run still completes and
 #                 still exits 0 -- a kill switch that fails the build is a nag,
@@ -33,9 +46,11 @@
 #
 # What gets installed:
 #   ~/.claude/hooks/                 11 governance hook scripts
+#   ~/.claude/hooks/governance-terms/  the installed copy of the terms (TERMS-VERSION and
+#                                    NOTICE-AUTO-UPDATE.md): what push at session close is decided under
 #   ~/.claude/skills/                10 core + 5 extended skills
 #   ~/.claude/docs/                  3 governance documents (2 guides + handover protocol)
-#   ~/.claude/CLAUDE.md              User-level instructions (if missing or --force)
+#   ~/.claude/CLAUDE.md              User-level instructions (created only if missing; never overwritten, not even with --force)
 #   ~/.claude/settings.json          Hooks merged into existing settings
 #   ~/.claude/logs/                  Log directory created
 # ============================================================================
@@ -67,6 +82,11 @@ ACCEPT_TERMS=0
 if [ "${GOV_ACCEPT_TERMS:-0}" = "1" ]; then ACCEPT_TERMS=1; fi
 TRUST_NEW_KEY=0
 PRINT_MAP=0
+# Push at session close (2.0.0, C4): OFF unless the user turns it on. No flag and no env variable
+# turns it ON (D2, 2026-09-30): only a person at a real terminal answering y does (owner decision
+# 2026-10-01: a plain y/N, default No). The old --enable-close-push flag is gone and is now an
+# unknown option (exit 1, nothing written).
+NO_CLOSE_PUSH=0
 # Post-install verification. ON by default: an installer whose only evidence is
 # "the files are there" is the failure this framework already shipped once —
 # verify.sh reported 37/37 from `[ -f ]` tests while a --force run had reverted a
@@ -86,6 +106,7 @@ for arg in "$@"; do
     --accept-terms) ACCEPT_TERMS=1 ;;
     --trust-new-key) TRUST_NEW_KEY=1 ;;
     --print-install-map) PRINT_MAP=1 ;;
+    --no-close-push)     NO_CLOSE_PUSH=1 ;;
     --help|-h)
       sed -n '2,/^# ====/{ /^# ====/d; s/^# //; s/^#//; p; }' "$0"
       exit 0
@@ -214,7 +235,7 @@ fi
 
 # ── The install map (ONE enumeration — the copy loops below AND the release manifest read it) ──
 #
-# WHY (2.0.0). The auto-updater installs a signed release by walking the `[install-map]` section
+# WHY (2.0.0). gov-update.sh --apply (run by hand) installs a signed release by walking the `[install-map]` section
 # of its manifest, and that section is this function's output (`--print-install-map`). The copy
 # loops in sections 1-3 iterate the SAME output. So "what install.sh installs" and "what the
 # updater installs" cannot drift: there is one list, not two lists and a hope.
@@ -272,6 +293,21 @@ MAPHOOKS
     [ -f "$f" ] || continue
     printf 'bundle/docs/%s -> docs/%s  core\n' "${f##*/}" "${f##*/}"
   done
+  # The INSTALLED copy of the terms (verify round 4 #2, 2026-10-02): consent-lib.sh reads its second
+  # terms source from ~/.claude/hooks/governance-terms/TERMS-VERSION (gov_terms_copy_dir), and
+  # close-push.sh --enable shows and hashes the NOTICE from there. The old source was
+  # ~/.claude/governance-installer/bundle/TERMS-VERSION, which only a clone at exactly that path has:
+  # a client who installed from a clone anywhere else answered y and stayed OFF for ever. In the map,
+  # so every install (any clone directory, the maintainer's staging folder) writes it, gov-update.sh
+  # --apply rewrites it with installed.manifest, and --uninstall removes it with ~/.claude/hooks/.
+  # Not under hooks/governance/: that directory is mirrored into the publishable bundle, where a second
+  # TERMS-VERSION would drift from the one gov-release.sh raises.
+  if [ -f "$BUNDLE_DIR/TERMS-VERSION" ]; then
+    printf 'bundle/TERMS-VERSION -> hooks/governance-terms/TERMS-VERSION  core\n'
+    if [ -f "$INSTALLER_DIR/NOTICE-AUTO-UPDATE.md" ]; then
+      printf 'NOTICE-AUTO-UPDATE.md -> hooks/governance-terms/NOTICE-AUTO-UPDATE.md  core\n'
+    fi
+  fi
 }
 
 INSTALL_MAP="$(gov_install_map)"
@@ -294,18 +330,23 @@ map_select() {
     }'
 }
 
-# ── Never race an automatic update (2.0.0) ──────────────────────────────────
-# A live apply would keep renaming files over this install (or over an uninstall), and its rollback
+# ── Never race an update (2.0.0) ────────────────────────────────────────────
+# Automatic updates are not in this version (2.0.0); the lock holders are a gov-update.sh --fetch/--apply/
+# --rollback run by hand, or the detached restore of an --apply that was cut off. A live apply would keep renaming files over this install (or over an uninstall), and its rollback
 # would restore its own older backup over the result. So: refuse while one runs, and HOLD the
 # updater's own lock for the whole run, so none can start part-way through. Checked before
 # --uninstall too, which removes the very directory the apply journals in.
 UPD_DIR="$CLAUDE_HOME/.governance-update"
 INSTALL_LOCK_HELD=0
+# Whether the lock step below is the one creating these directories: a refusal before any real
+# write (the terms, C3) removes exactly what this run created, so "nothing was changed" is true.
+_CH_EXISTED=0; [ -d "$CLAUDE_HOME" ] && _CH_EXISTED=1
+_UPD_EXISTED=0; [ -d "$UPD_DIR" ] && _UPD_EXISTED=1
 if [ "$PRINT_MAP" = "0" ]; then
   for _pf in "$UPD_DIR/APPLYING" "$UPD_DIR/lock.d/info"; do
     _apid=$( { sed -n 's/^pid=\([0-9]*\).*/\1/p' "$_pf" 2>/dev/null || true; } | head -1)
     if [ -n "$_apid" ] && kill -0 "$_apid" 2>/dev/null; then
-      error "An automatic update is running right now (pid $_apid, $_pf)."
+      error "An update is running right now (gov-update.sh --fetch/--apply/--rollback, or the restore of an interrupted apply; pid $_apid, $_pf)."
       error "Wait for it to finish (about 30 s), then re-run. Nothing was changed."
       exit 1
     fi
@@ -331,7 +372,7 @@ if [ "$PRINT_MAP" = "0" ]; then
         _lage=$(( $(date +%s) - _lm ))
       fi
       if { [ -n "$_lpid" ] && kill -0 "$_lpid" 2>/dev/null; } || { [ -z "$_lpid" ] && [ "$_lage" -le 1800 ]; }; then
-        error "An automatic update holds the update lock right now (pid ${_lpid:-being written}). Re-run in a minute. Nothing was changed."
+        error "An update process holds the update lock right now (pid ${_lpid:-being written}). Re-run in a minute. Nothing was changed."
         exit 1
       fi
       if mkdir "$UPD_DIR/lock.break.d" 2>/dev/null; then
@@ -356,49 +397,68 @@ fi
 if [ "$UNINSTALL" = "1" ]; then
   header "Uninstalling Context Governance"
 
-  mkdir -p "$BACKUP_DIR"
+  # BACK UP EVERYTHING FIRST, remove only after every copy succeeded (review finding 12): a failed
+  # copy used to be `|| true` right before an `rm -rf`, so a full disk or a blocked path deleted the
+  # user's hooks with no copy left. Now any failed copy stops the uninstall before the first removal,
+  # and "nothing was removed" is literally true.
+  _unbak() {  # _unbak <src> <dest> <label>
+    cp -r "$1" "$2" 2>/dev/null && [ -e "$2" ] || {
+      error "Could not back up $3 to $BACKUP_DIR - nothing was removed."
+      exit 1
+    }
+  }
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || { error "Could not create the backup directory $BACKUP_DIR - nothing was removed."; exit 1; }
   info "Backup directory: $BACKUP_DIR"
-
-  # Backup and remove hooks
-  if [ -d "$CLAUDE_HOME/hooks" ]; then
-    cp -r "$CLAUDE_HOME/hooks" "$BACKUP_DIR/hooks" 2>/dev/null || true
-    rm -rf "$CLAUDE_HOME/hooks"
-    success "Removed ~/.claude/hooks/ (backed up)"
+  if [ -d "$CLAUDE_HOME/hooks" ]; then _unbak "$CLAUDE_HOME/hooks" "$BACKUP_DIR/hooks" "~/.claude/hooks/"; fi
+  if [ -d "$CLAUDE_HOME/docs" ]; then _unbak "$CLAUDE_HOME/docs" "$BACKUP_DIR/docs" "~/.claude/docs/"; fi
+  for skill in $CORE_SKILLS $EXTENDED_SKILLS; do
+    if [ -d "$CLAUDE_HOME/skills/$skill" ]; then _unbak "$CLAUDE_HOME/skills/$skill" "$BACKUP_DIR/skill-$skill" "skill $skill"; fi
+  done
+  _UN_SETTINGS=0
+  if [ -f "$CLAUDE_HOME/settings.json" ] && command -v node &>/dev/null; then
+    _unbak "$CLAUDE_HOME/settings.json" "$BACKUP_DIR/settings.json" "~/.claude/settings.json"; _UN_SETTINGS=1
+  fi
+  if [ -f "$CLAUDE_HOME/.governance-version" ]; then
+    _unbak "$CLAUDE_HOME/.governance-version" "$BACKUP_DIR/.governance-version" "the version marker"
+  fi
+  if [ -d "$CLAUDE_HOME/.governance-update" ]; then
+    _unbak "$CLAUDE_HOME/.governance-update" "$BACKUP_DIR/.governance-update" "~/.claude/.governance-update/"
   fi
 
-  # Backup and remove docs
+  # Remove hooks: the WHOLE directory, not only the framework's files.
+  if [ -d "$CLAUDE_HOME/hooks" ]; then
+    rm -rf "$CLAUDE_HOME/hooks"
+    success "Removed ~/.claude/hooks/ - the whole directory, including any hook of your own (backed up at $BACKUP_DIR/hooks)"
+  fi
+
+  # Remove docs
   if [ -d "$CLAUDE_HOME/docs" ]; then
-    cp -r "$CLAUDE_HOME/docs" "$BACKUP_DIR/docs" 2>/dev/null || true
     rm -rf "$CLAUDE_HOME/docs"
-    success "Removed ~/.claude/docs/ (backed up)"
+    success "Removed ~/.claude/docs/ - the whole directory (backed up at $BACKUP_DIR/docs)"
   fi
 
   # Remove governance skills only (inventory defined once, above)
   for skill in $CORE_SKILLS $EXTENDED_SKILLS; do
     if [ -d "$CLAUDE_HOME/skills/$skill" ]; then
-      cp -r "$CLAUDE_HOME/skills/$skill" "$BACKUP_DIR/skill-$skill" 2>/dev/null || true
       rm -rf "$CLAUDE_HOME/skills/$skill"
       success "Removed skill: $skill (backed up)"
     fi
   done
 
-  # Remove hooks from settings.json (keep everything else)
-  if [ -f "$CLAUDE_HOME/settings.json" ] && command -v node &>/dev/null; then
-    cp "$CLAUDE_HOME/settings.json" "$BACKUP_DIR/settings.json"
+  # Remove the ENTIRE hooks section from settings.json (keep every other key)
+  if [ "$_UN_SETTINGS" = "1" ]; then
     node -e "
       const fs = require('fs');
       const f = process.env.HOME + '/.claude/settings.json';
       const s = JSON.parse(fs.readFileSync(f, 'utf8'));
       delete s.hooks;
       fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
-      console.log('Hooks removed from settings.json (backed up)');
-    " 2>/dev/null && success "Cleaned settings.json" || warn "Could not clean settings.json — remove hooks section manually"
+    " 2>/dev/null && success "Hooks section removed from settings.json - every entry under \"hooks\", including ones you added (backed up at $BACKUP_DIR/settings.json)" || warn "Could not clean settings.json — remove its hooks section manually (backup at $BACKUP_DIR/settings.json)"
   fi
 
   # Remove the version marker. Leaving it behind makes an UNINSTALLED machine report
   # "installed v1.1.0" with a green version check sitting beside every other check failing.
   if [ -f "$CLAUDE_HOME/.governance-version" ]; then
-    cp "$CLAUDE_HOME/.governance-version" "$BACKUP_DIR/.governance-version" 2>/dev/null || true
     rm -f "$CLAUDE_HOME/.governance-version"
     success "Removed version marker (backed up)"
   fi
@@ -406,17 +466,17 @@ if [ "$UNINSTALL" = "1" ]; then
   # The glob catches `.governance-latest.<pid>` temp files left by fetches that were killed.
   rm -f "$CLAUDE_HOME/logs/.governance-latest" "$CLAUDE_HOME/logs/.governance-latest".* 2>/dev/null || true
 
-  # Auto-update state (2.0.0). Everything goes except `terms-accepted`: that file is a record of
-  # what this user agreed to and when, it is harmless, and deleting it would erase the one piece
-  # of evidence the terms exist to create.
+  # Update state (2.0.0). Everything goes except the two consent records: `terms-accepted` (what
+  # this user agreed to and when) and `close-push` (their push-at-session-close choice). Both are
+  # harmless, and deleting them would erase the evidence the terms exist to create; a re-install
+  # then keeps the choice instead of asking again (C4).
   if [ -d "$CLAUDE_HOME/.governance-update" ]; then
-    cp -r "$CLAUDE_HOME/.governance-update" "$BACKUP_DIR/.governance-update" 2>/dev/null || true
     for _uf in "$CLAUDE_HOME/.governance-update"/* "$CLAUDE_HOME/.governance-update"/.[!.]*; do
       [ -e "$_uf" ] || continue
-      case "${_uf##*/}" in terms-accepted) continue ;; esac
+      case "${_uf##*/}" in terms-accepted|close-push) continue ;; esac
       rm -rf "$_uf"
     done
-    success "Removed auto-update state (kept terms-accepted as the record of acceptance; backed up)"
+    success "Removed update state (kept terms-accepted and close-push, the records of your choices; backed up)"
   fi
 
   info "Backup saved at: $BACKUP_DIR"
@@ -454,10 +514,31 @@ CLONE_MANIFEST="$INSTALLER_DIR/RELEASE-MANIFEST"
 CLONE_SIG="$INSTALLER_DIR/RELEASE-MANIFEST.sig"
 PINNED_SIGNERS="$UPD_DIR/allowed_signers"
 NOTICE_FILE="$INSTALLER_DIR/NOTICE-AUTO-UPDATE.md"
+# The consent library (2026-09-30, C3/C5/S4): the AI-agent check, the summary extraction, the
+# CR-stripped hashes and the atomic 0600 writer. Pure: sourcing it writes and reads nothing.
+CONSENT_LIB="$BUNDLE_DIR/hooks/governance/consent-lib.sh"
+if [ -f "$CONSENT_LIB" ]; then
+  # shellcheck source=/dev/null
+  . "$CONSENT_LIB"
+fi
 
+# preflight_refuse_exit: leave before any real write, removing only what the lock step above created
+# (its lock, and the two directories when this run made them). Used by the terms refusals.
+preflight_refuse_exit() {
+  if [ "$INSTALL_LOCK_HELD" = "1" ]; then
+    rm -rf "$UPD_DIR/lock.d" 2>/dev/null || true
+    INSTALL_LOCK_HELD=0
+  fi
+  if [ "$_UPD_EXISTED" = "0" ]; then rmdir "$UPD_DIR" 2>/dev/null || true; fi
+  if [ "$_CH_EXISTED" = "0" ]; then rmdir "$CLAUDE_HOME" 2>/dev/null || true; fi
+  exit 1
+}
 
-# The release source machine installs over its own live tree only by deliberate --force.
-if [ -f "$CLAUDE_HOME/.governance-source" ] && [ "$FORCE" = "0" ]; then
+# The release source machine installs over its own live tree only by deliberate --force. The marker is
+# read through consent-lib.sh gov_maintainer_machine (a regular file, not a symlink), the one test of
+# it in this installer (round 4 minor, 2026-10-02); a pre-2.0 bundle without the library has no
+# marker rule to apply.
+if type gov_maintainer_machine >/dev/null 2>&1 && gov_maintainer_machine && [ "$FORCE" = "0" ]; then
   warn "This machine is marked as the RELEASE SOURCE (~/.claude/.governance-source)."
   warn "Its live tree is where releases are made; installing over it replaces work in progress."
   warn "Re-run with --force if that is what you mean."
@@ -473,23 +554,60 @@ if [ -n "$TERMS_V" ]; then
     error "Terms cannot be accepted without the text they refer to. Re-clone and re-run."
     exit 1
   fi
-  ACCEPTED_V=$( { grep -o 'terms_version=[0-9]*' "$UPD_DIR/terms-accepted" 2>/dev/null || true; } | head -1 | cut -d= -f2)
+  if ! type gov_human_consent_ok >/dev/null 2>&1; then
+    error "bundle/TERMS-VERSION exists but bundle/hooks/governance/consent-lib.sh is missing — incomplete bundle."
+    error "Terms cannot be accepted without it. Re-clone and re-run. Nothing was installed or changed."
+    preflight_refuse_exit
+  fi
+  # The one parser of a consent record (T2); a non-integer value fails the -ge below = not accepted.
+  ACCEPTED_V=$(gov_record_field "$UPD_DIR/terms-accepted" terms_version)
+  # TERMS_STAGE: done = nothing to ask (already accepted, or the agent refusal previewed under
+  # --dry-run) | shown = the block was printed and hashed, now record the method | none = no flag,
+  # no terminal: the refusal below.
+  TERMS_STAGE="none"; NOTICE_SHA=""; SHOWN_SHA=""
   if [ -n "$ACCEPTED_V" ] && [ "$ACCEPTED_V" -ge "$TERMS_V" ] 2>/dev/null; then
+    # A re-install whose terms are already accepted records nothing, so it is not refused (A.2).
     info "Terms v$TERMS_V already accepted on this machine."
-  elif [ "$ACCEPT_TERMS" = "1" ]; then
-    if [ "${GOV_ACCEPT_TERMS:-0}" = "1" ]; then TERMS_METHOD="env"; else TERMS_METHOD="--accept-terms"; fi
-    info "Terms v$TERMS_V accepted non-interactively ($TERMS_METHOD). Full text: $NOTICE_FILE"
-  elif [ -t 0 ]; then
+    TERMS_STAGE="done"
+  elif { [ "$ACCEPT_TERMS" = "1" ] || [ -t 0 ]; } && ! gov_human_consent_ok; then
+    # An acceptance would be RECORDED here (flag, GOV_ACCEPT_TERMS=1, or the prompt) and this runs
+    # inside an AI-agent session: only a person accepts (C3). Before any write.
+    if [ "$DRY_RUN" = "1" ]; then
+      warn "[DRY] Inside an AI-agent session the real run refuses here:"
+      gov_consent_refusal_line
+      INSTALL_DEGRADED=1   # the preview's exit code mirrors the real refusal
+      TERMS_STAGE="done"
+    else
+      gov_consent_refusal_line >&2
+      preflight_refuse_exit
+    fi
+  elif [ "$ACCEPT_TERMS" = "1" ] || [ -t 0 ]; then
+    # Every acceptance path prints the same block (C2(c)) and hashes what it printed (C5).
+    NOTICE_SHA=$(gov_sha256_lf "$NOTICE_FILE") || NOTICE_SHA=""
+    SHOWN_SHA=$(gov_terms_summary "$NOTICE_FILE" | gov_sha256_lf_stdin) || SHOWN_SHA=""
+    if [ -z "$NOTICE_SHA" ] || [ -z "$SHOWN_SHA" ]; then
+      error "Cannot compute the SHA-256 of the terms text (sha256sum or shasum is needed): an acceptance"
+      error "must record which text was accepted. Nothing was installed or changed."
+      preflight_refuse_exit
+    fi
     printf '\n%s\n' "Context Governance for Claude Code — terms version $TERMS_V"
     printf '%s\n' "Full text: $NOTICE_FILE   License: MIT, provided AS IS (see LICENSE)"
     printf '\n'
-    sed -n '/<!-- terms-summary:begin -->/,/<!-- terms-summary:end -->/{/<!--/d;p;}' "$NOTICE_FILE"
+    gov_terms_summary "$NOTICE_FILE"
     printf '\n'
+    TERMS_STAGE="shown"
+  fi
+  if [ "$TERMS_STAGE" = "done" ]; then
+    :
+  elif [ "$TERMS_STAGE" = "shown" ] && [ "$ACCEPT_TERMS" = "1" ]; then
+    if [ "${GOV_ACCEPT_TERMS:-0}" = "1" ]; then TERMS_METHOD="env"; else TERMS_METHOD="--accept-terms"; fi
+    info "Terms v$TERMS_V accepted non-interactively ($TERMS_METHOD). Full text: $NOTICE_FILE"
+  elif [ "$TERMS_STAGE" = "shown" ]; then
     _answer=""
     read -r -p "Type I ACCEPT to continue: " _answer || true
     if [ "$_answer" != "I ACCEPT" ]; then
       error "Terms not accepted — nothing was installed or changed."
-      exit 1
+      preflight_refuse_exit
     fi
     TERMS_METHOD="interactive"
   else
@@ -501,7 +619,118 @@ if [ -n "$TERMS_V" ]; then
       error "Terms v$TERMS_V not accepted, and there is no terminal to ask on."
       error "Read $NOTICE_FILE, then re-run with --accept-terms (or GOV_ACCEPT_TERMS=1)."
       error "Nothing was installed or changed."
-      exit 1
+      preflight_refuse_exit
+    fi
+  fi
+fi
+
+# ── Part C (2.0.0, C4): push at session close — the user's recorded choice ──────────────────
+# Decided HERE, before any file is installed; written only in the records block at the end, only
+# for a stamped install and never under --dry-run (S4).
+#   (0) the MAINTAINER's machine (consent-lib.sh gov_maintainer_machine: the regular file
+#       ~/.claude/.governance-source) -> always ON (owner decision 2026-10-01): no question and no
+#       record; --no-close-push still records OFF, and says that push stays on here.
+# Every other machine (C4): OFF unless a person turns it on:
+#   (1) a record under the current terms, no flag   -> kept, never re-asked
+#   (2) a record under OLDER terms, no terminal     -> OFF, method terms-changed
+#   (3) --no-close-push                             -> OFF (no flag turns it ON: D2)
+#   (4) no flag, no terminal                        -> OFF, method default-non-interactive
+#   (5) no flag, a terminal (stdin AND stdout)      -> the y/N question (DRAFTS A.6), default No;
+#       ON only for y / yes (consent-lib.sh gov_close_push_answer_yes), anything else -> OFF
+# "A terminal" is gov_interactive_terminal: [ -t 0 ] && [ -t 1 ]. A terminal inside a detected
+# AI-agent session is never asked (an agent could answer it): OFF, method default-agent-session.
+# The record is one line:
+#   enabled terms_version decided_at framework_version method notice_sha256 shown_sha256
+# shown_sha256 is the SHA-256 of exactly the block printed - this clone's NOTICE path and the [y/N]
+# prompt included (consent-lib.sh gov_close_push_ask; round-2 finding 13). The record carries the
+# hash, never the path (T3, S4). The empty-string hash when nothing was shown.
+PUSH_CHOICE=""; PUSH_METHOD=""; PUSH_WRITE=0; PUSH_SHOWN_SHA=""; PUSH_NOTICE_SHA=""; PUSH_AT=""
+PUSH_DATE=""
+CP_REC="$UPD_DIR/close-push"
+if [ -n "$TERMS_V" ]; then
+  PUSH_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); PUSH_DATE="${PUSH_AT%%T*}"
+  PUSH_NOTICE_SHA=$(gov_sha256_lf "$NOTICE_FILE") || PUSH_NOTICE_SHA=""
+  PUSH_SHOWN_SHA=$(printf '' | gov_sha256_lf_stdin) || PUSH_SHOWN_SHA=""
+  _cp_en=$(gov_record_field "$CP_REC" enabled)
+  _cp_tv=$(gov_record_field "$CP_REC" terms_version)
+  _cp_at=$(gov_record_field "$CP_REC" decided_at)
+  # A record counts only when it parses (the same fields gov_close_push_on reads); an unreadable
+  # one is treated as no record, so the choice is asked or defaults to OFF again.
+  _cp_state="none"
+  case "$_cp_en" in 0|1)
+    case "$_cp_tv" in ''|*[!0-9]*) ;; *)
+      if [ "$_cp_tv" -ge "$TERMS_V" ]; then _cp_state="current"; else _cp_state="stale"; fi ;;
+    esac ;;
+  esac
+  _cp_onoff() { if [ "$1" = "1" ]; then printf 'ON'; else printf 'OFF'; fi; }
+  # _inst_answer_enables ANSWER -> 0 only for y / yes: consent-lib.sh gov_close_push_answer_yes, the
+  # one rule close-push.sh --enable uses too. Enter (the default No) and anything else -> OFF.
+  _inst_answer_enables() {
+    gov_close_push_answer_yes "${1:-}"
+  }
+  PUSH_MAINTAINER=0
+  if type gov_maintainer_machine >/dev/null 2>&1 && gov_maintainer_machine; then PUSH_MAINTAINER=1; fi
+  if [ "$PUSH_MAINTAINER" = "1" ] && [ "$NO_CLOSE_PUSH" = "1" ]; then
+    PUSH_CHOICE=0; PUSH_METHOD="--no-close-push"; PUSH_WRITE=1
+    if type gov_close_push_on >/dev/null 2>&1 && ! gov_close_push_on >/dev/null 2>&1; then
+      warn "Push at session close: OFF recorded (--no-close-push); this is the maintainer's machine (~/.claude/.governance-source) where push is otherwise always ON, and it is PAUSED now by GOV_CLOSE_PUSH=0 (remove it to resume)."
+    else
+      warn "Push at session close: OFF recorded (--no-close-push), but this is the maintainer's machine (~/.claude/.governance-source): push at session close stays ON here. Pause it with GOV_CLOSE_PUSH=0."
+    fi
+  elif [ "$PUSH_MAINTAINER" = "1" ]; then
+    PUSH_CHOICE=1; PUSH_METHOD="maintainer"; PUSH_WRITE=0
+    if type gov_close_push_on >/dev/null 2>&1 && ! gov_close_push_on >/dev/null 2>&1; then
+      info "Push at session close: PAUSED by GOV_CLOSE_PUSH=0 (in the environment or in ~/.claude/.governance-local.env). Without the pause it is always ON on the maintainer's machine (~/.claude/.governance-source); nothing is asked or recorded. Remove GOV_CLOSE_PUSH=0 to resume."
+    else
+      info "Push at session close: ON - always, on the maintainer's machine (~/.claude/.governance-source); nothing is asked or recorded. Pause it with GOV_CLOSE_PUSH=0."
+    fi
+  elif [ "$NO_CLOSE_PUSH" = "1" ]; then
+    PUSH_CHOICE=0; PUSH_METHOD="--no-close-push"; PUSH_WRITE=1
+    info "Push at session close: OFF. Sessions still commit their own work locally; nothing is pushed."
+  elif [ "$_cp_state" = "current" ]; then
+    PUSH_CHOICE="$_cp_en"; PUSH_METHOD="kept"; PUSH_WRITE=0
+    _cp_d="${_cp_at%%T*}"; [ -n "$_cp_d" ] || _cp_d="on an unknown date"
+    # An OFF this installer wrote by default (no terminal, an agent session) or on a terms change
+    # was not the user's choice, and the kept line must not call it one - the same reading as
+    # gov-update.sh --status. declined / close-push-disable / --no-close-push were chosen.
+    # The wording of an OFF comes from consent-lib.sh gov_close_push_off_kind - the one list
+    # gov_close_push_on and gov-update.sh --status read too (round 4 minor: an OFF with no method= or
+    # an unknown one was "your choice" here and "recorded off" there).
+    _cp_kind="on"; [ "$_cp_en" = "1" ] || _cp_kind=$(gov_close_push_off_kind "$(gov_record_field "$CP_REC" method)")
+    case "$_cp_kind" in
+      default)
+        info "Push at session close: OFF (the default - you were not asked, recorded $_cp_d). To turn it on, run this yourself in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable" ;;
+      terms)
+        info "Push at session close: OFF (turned off when the terms changed, recorded $_cp_d). To turn it on, run this yourself in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable" ;;
+      recorded)
+        info "Push at session close: OFF (recorded off on $_cp_d). Change it at any time: close-push.sh --enable / --disable" ;;
+      *)
+        info "Push at session close: $(_cp_onoff "$_cp_en") (your choice, recorded $_cp_d). Change it at any time: close-push.sh --enable / --disable" ;;
+    esac
+  elif [ "$_cp_state" = "stale" ] && ! gov_interactive_terminal; then
+    PUSH_CHOICE=0; PUSH_METHOD="terms-changed"; PUSH_WRITE=1
+    if [ "$_cp_en" = "1" ]; then
+      warn "Push at session close was ON under terms v$_cp_tv; the terms changed (v$TERMS_V), so it is OFF until you turn it on again yourself, in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable"
+    else
+      info "Push at session close: OFF (your choice under terms v$_cp_tv; the terms changed to v$TERMS_V). To turn it on, run this yourself in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable"
+    fi
+  elif ! gov_interactive_terminal; then
+    PUSH_CHOICE=0; PUSH_METHOD="default-non-interactive"; PUSH_WRITE=1
+    info "Push at session close: OFF (the default without a terminal). To turn it on, run this yourself in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable"
+  elif ! gov_human_consent_ok; then
+    PUSH_CHOICE=0; PUSH_METHOD="default-agent-session"; PUSH_WRITE=1
+    info "Push at session close: OFF (the default inside an AI-agent session). To turn it on, run this yourself in your own terminal: bash ~/.claude/hooks/governance/close-push.sh --enable"
+  else
+    # Printed once; shown_sha256 is the hash of exactly those bytes (finding 13).
+    GOV_SHOWN_SHA256=""; gov_close_push_ask "$NOTICE_FILE"; PUSH_SHOWN_SHA="$GOV_SHOWN_SHA256"
+    _cp_ans=""; IFS= read -r _cp_ans || true
+    PUSH_WRITE=1
+    if _inst_answer_enables "$_cp_ans"; then
+      PUSH_CHOICE=1; PUSH_METHOD="interactive"
+      info "Push at session close: ON ($PUSH_DATE). Turn it off at any time: bash ~/.claude/hooks/governance/close-push.sh --disable"
+    else
+      PUSH_CHOICE=0; PUSH_METHOD="declined"
+      info "Push at session close: OFF. Sessions still commit their own work locally; nothing is pushed."
     fi
   fi
 fi
@@ -523,7 +752,7 @@ if [ -s "$CLONE_SIGNERS" ]; then
   if [ -s "$CLONE_MANIFEST" ] && [ -s "$CLONE_SIG" ]; then
     if [ "$HAVE_SSHSIG" = "0" ]; then
       warn "ssh-keygen -Y is not available (OpenSSH >= 8.2 needed): this clone's release signature cannot be checked."
-      warn "The install proceeds (a manual install is your own deliberate act), but automatic updates will refuse to run until it is."
+      warn "The install proceeds (a manual install is your own deliberate act), but the signed path (gov-update.sh --fetch) will refuse until it is."
       RELEASE_STATE="unverified"
     elif relman_verify_sig "$CLONE_MANIFEST" "$CLONE_SIG" "$CLONE_SIGNERS"; then
       CLONE_SIG_OK=1
@@ -556,7 +785,7 @@ CLONEFILES
       else
         RELEASE_STATE="snapshot"
         warn "Installing an UNRELEASED master snapshot: the files differ from the signed manifest of v$(relman_get "$CLONE_MANIFEST" version)."
-        warn "That is normal between releases. Automatic updates will replace it with the next signed release."
+        warn "That is normal between releases. The next release you install by hand (gov-update.sh --fetch/--apply, or git pull + install.sh --force) replaces it."
       fi
     else
       error "This clone's RELEASE-MANIFEST does not verify under its OWN bundle/release/allowed_signers."
@@ -714,6 +943,19 @@ HOOKCHECK
 
   # A registered hook is only a control if the files it CANNOT RUN WITHOUT are beside it. The
   # dependency is declared here rather than discovered, because a wrong guess is silent.
+  # The installed terms copy (verify round 4 #2): without it push at session close stays OFF on this
+  # machine whatever the user answers (consent-lib.sh fails closed), so a missing or wrong copy is a
+  # failed install, not a quiet one.
+  if [ -n "${TERMS_V:-}" ]; then
+    _tcd="$CLAUDE_HOME/hooks/governance-terms"
+    _tcv=$( { cat "$_tcd/TERMS-VERSION" 2>/dev/null || true; } | tr -d '[:space:]')
+    if [ "$_tcv" != "$TERMS_V" ] || [ ! -s "$_tcd/NOTICE-AUTO-UPDATE.md" ]; then
+      error "The installed copy of the terms is missing or wrong in ~/.claude/hooks/governance-terms/ (TERMS-VERSION says '${_tcv:-nothing}', this install is v$TERMS_V)."
+      error "Push at session close cannot be turned on until it is there. Re-run install.sh."
+      INSTALL_DEGRADED=1
+    fi
+  fi
+
   for pair in \
       "pii-gate-pretooluse.sh:pii-gate-parse.py" \
       "pii-gate-pretooluse.sh:check-no-pii.sh" \
@@ -862,7 +1104,7 @@ else
     cp "$SETTINGS_FILE" "$BACKUP_DIR/settings.json"
   fi
 
-  # (2.0.0) A GOVERNANCE-ONLY merge, shared with the auto-updater: settings-merge.js replaces the
+  # (2.0.0) A GOVERNANCE-ONLY merge, shared with gov-update.sh --apply: settings-merge.js replaces the
   # framework's own entries and keeps every hook, matcher group and key the user added. The old
   # inline merge here replaced `settings.hooks` wholesale — every manual install silently dropped
   # the user's own hooks — and started from `{}` on a settings.json that failed to parse, which
@@ -1127,7 +1369,7 @@ else
   STAMPED=1
 fi
 
-# ── 7b. Auto-update state (2.0.0) — only for a stamped install ──────────────
+# ── 7b. Update state (2.0.0) — only for a stamped install ───────────────────
 # What the updater needs to decide safely later, all under ~/.claude/.governance-update/:
 #   install-mode                  which tags of the map this machine takes (full | core-only)
 #   installed.hashes              sha256 of every destination AS WRITTEN — the baseline for "was this
@@ -1141,13 +1383,14 @@ fi
 #   terms-accepted                written below when this run obtained the acceptance
 if [ "${STAMPED:-0}" = "1" ]; then
   mkdir -p "$UPD_DIR"
-  # A manual install supersedes any automatic one in flight: an interrupted apply's journal would
+  # A manual install supersedes any update in flight (fetched by hand, or an --apply cut off): an interrupted apply's journal would
   # otherwise make the next session start "recover" by restoring the OLD backup over this install,
   # and a staged release may now be older than what was just installed.
-  if [ -f "$UPD_DIR/APPLYING" ] || [ -f "$UPD_DIR/READY" ]; then
-    rm -f "$UPD_DIR/APPLYING" "$UPD_DIR/READY"
+  # A release HELD for its terms (HELD-TERMS-<ver>, no READY) is cleared the same way.
+  if [ -f "$UPD_DIR/APPLYING" ] || [ -f "$UPD_DIR/READY" ] || compgen -G "$UPD_DIR/HELD-TERMS-*" >/dev/null 2>&1; then
+    rm -f "$UPD_DIR/APPLYING" "$UPD_DIR/READY" "$UPD_DIR"/HELD-TERMS-*
     rm -rf "$UPD_DIR/staged" "$UPD_DIR"/prep.* "$UPD_DIR"/gi-prep.*
-    info "Cleared an interrupted or staged automatic update (this manual install supersedes it)."
+    info "Cleared a staged or interrupted update (a release you fetched, or an --apply that was cut off): this manual install supersedes it."
   fi
   printf '%s\n' "$INSTALL_MODE" > "$UPD_DIR/install-mode"
   _hash_tmp="$UPD_DIR/installed.hashes.tmp.$$"
@@ -1158,7 +1401,7 @@ if [ "${STAMPED:-0}" = "1" ]; then
     mv -f "$_hash_tmp" "$UPD_DIR/installed.hashes"
   else
     rm -f "$_hash_tmp"
-    warn "Could not record installed.hashes — automatic updates will not be able to detect local changes."
+    warn "Could not record installed.hashes - gov-update.sh --apply cannot detect your local changes on this machine (it applies without that check once and says so)."
   fi
   if [ "$RELEASE_STATE" = "tagged" ]; then
     cp "$CLONE_MANIFEST" "$UPD_DIR/installed.manifest"
@@ -1166,6 +1409,8 @@ if [ "${STAMPED:-0}" = "1" ]; then
     {
       printf '# claude-code-governance release manifest v1\n'
       printf 'version=%s\nunsigned=1\nsource=%s\n' "$BUNDLE_VERSION" "$RELEASE_STATE"
+      # gov_installed_terms_version reads this: an unsigned install still states its terms version.
+      [ -n "$TERMS_V" ] && printf 'terms_version=%s\n' "$TERMS_V"
       printf '[files]\n[install-map]\n'
       printf '%s\n' "$INSTALL_MAP"
     } > "$UPD_DIR/installed.manifest"
@@ -1189,11 +1434,34 @@ if [ "${STAMPED:-0}" = "1" ]; then
     keep) info "Release signing key unchanged (already pinned)." ;;
   esac
 fi
-if [ -n "$TERMS_METHOD" ] && [ "$DRY_RUN" = "0" ]; then
-  mkdir -p "$UPD_DIR"
-  printf 'terms_version=%s accepted_at=%s framework_version=%s method=%s\n' \
-    "$TERMS_V" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$BUNDLE_VERSION" "$TERMS_METHOD" > "$UPD_DIR/terms-accepted"
-  success "Terms v$TERMS_V acceptance recorded ($TERMS_METHOD) in ~/.claude/.governance-update/terms-accepted"
+if [ -n "$TERMS_METHOD" ] && [ "$DRY_RUN" = "1" ]; then
+  info "[DRY] would record terms v$TERMS_V ($TERMS_METHOD)"
+elif [ -n "$TERMS_METHOD" ]; then
+  # One line, 0600, tmp + rename (S4); the two checksums say which text was accepted (C5). The field
+  # order is kept: terms_version first, for older copies that grep/sed it (this tree parses it only
+  # with gov_record_field, T2).
+  if gov_consent_write "$UPD_DIR/terms-accepted" \
+       "terms_version=$TERMS_V accepted_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') framework_version=$BUNDLE_VERSION method=$TERMS_METHOD notice_sha256=$NOTICE_SHA shown_sha256=$SHOWN_SHA"; then
+    success "Terms v$TERMS_V acceptance recorded ($TERMS_METHOD) in ~/.claude/.governance-update/terms-accepted"
+  else
+    error "Could not record the terms acceptance in ~/.claude/.governance-update/terms-accepted."
+    INSTALL_DEGRADED=1
+  fi
+fi
+# The push-at-session-close choice (C4), decided before the install. Written after terms-accepted
+# (gov_close_push_on needs both), only for a stamped install, never under --dry-run.
+if [ "$PUSH_WRITE" = "1" ] && [ "$DRY_RUN" = "1" ]; then
+  info "[DRY] would record push at session close: $(_cp_onoff "$PUSH_CHOICE") ($PUSH_METHOD)"
+elif [ "$PUSH_WRITE" = "1" ] && [ "${STAMPED:-0}" = "1" ]; then
+  if gov_consent_write "$CP_REC" \
+       "enabled=$PUSH_CHOICE terms_version=$TERMS_V decided_at=$PUSH_AT framework_version=$BUNDLE_VERSION method=$PUSH_METHOD${PUSH_NOTICE_SHA:+ notice_sha256=$PUSH_NOTICE_SHA}${PUSH_SHOWN_SHA:+ shown_sha256=$PUSH_SHOWN_SHA}"; then
+    success "Push at session close: $(_cp_onoff "$PUSH_CHOICE") recorded ($PUSH_METHOD) in ~/.claude/.governance-update/close-push"
+  else
+    error "Could not record the push-at-session-close choice in ~/.claude/.governance-update/close-push (nothing is pushed)."
+    INSTALL_DEGRADED=1
+  fi
+elif [ "$PUSH_WRITE" = "1" ]; then
+  warn "Push at session close: choice NOT recorded - the install did not complete. Nothing is pushed."
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -1213,6 +1481,29 @@ else
   printf "  ${GREEN}✓${NC} Settings:  Hooks registered in settings.json\n"
 fi
 printf "  ${GREEN}✓${NC} Logs:      ~/.claude/logs/ directory ready\n"
+# DRAFTS A.8, the updates line per adaptation A1 (automatic updates: not in this version). The push line
+# reads the record just written (a preview reads the decision): what is printed is what holds.
+if [ -n "$TERMS_V" ]; then
+  printf '  Automatic updates:      not in this version (you update by hand)\n'
+  _cp_sum="OFF - turn on: bash ~/.claude/hooks/governance/close-push.sh --enable"
+  if [ "${PUSH_MAINTAINER:-0}" = "1" ]; then
+    # The maintainer's machine: on with no record (owner decision 2026-10-01); the pause still holds.
+    if gov_close_push_on; then _cp_sum="ON (always, on the maintainer's machine)"
+    else _cp_sum="OFF ($(gov_reason_text "${GOV_CONSENT_REASON:-paused}"))"; fi
+  elif [ "$DRY_RUN" = "1" ]; then
+    if [ "$PUSH_CHOICE" = "1" ]; then
+      _cp_since="$PUSH_DATE"
+      if [ "$PUSH_METHOD" = "kept" ]; then _cp_since="${_cp_at%%T*}"; fi
+      _cp_sum="ON (since $_cp_since)"
+    fi
+  elif gov_close_push_on; then
+    _cp_sum="ON (since $(_cp_d=$(gov_record_field "$CP_REC" decided_at); printf '%s' "${_cp_d%%T*}"))"
+  elif [ "$(gov_record_field "$CP_REC" enabled)" = "1" ]; then
+    # gov_reason_text drops the reason's own "off (...)" (round 4 minor: this printed "OFF (off (...))").
+    _cp_sum="OFF ($(gov_reason_text "$GOV_CONSENT_REASON"))"
+  fi
+  printf '  Push at session close:  %s\n' "$_cp_sum"
+fi
 if [ "$PII_NAMES_N" -gt 0 ] 2>/dev/null; then
   success "Name list: $PII_NAMES_N proper noun(s) in ~/.claude/.pii-names - NAME_DENY is ARMED"
 else

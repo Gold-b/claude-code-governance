@@ -73,7 +73,7 @@ if [ -f "$GOTCHAS_FILE" ]; then
   #   markdown heading: "### 245. **...", "## 300. **..."
   # The old pattern '^[0-9]\+\.' only saw the bare form and under-counted by the
   # entire heading-era range (measured 2026-08-31: 244 counted vs 346 real).
-  GOTCHAS_COUNT=$(grep -cE '^(#{1,6} )?[0-9]+\.' "$GOTCHAS_FILE" 2>/dev/null || echo "0")
+  GOTCHAS_COUNT=$(gov_count_entries "$GOTCHAS_FILE")
   gov_log "$HOOK_NAME" "SSOT gotchas count: $GOTCHAS_COUNT"
 fi
 
@@ -106,7 +106,7 @@ update_file() {
   before=$(md5sum "$file" 2>/dev/null || cat "$file" | wc -c)
 
   # Apply sed in-place
-  sed -i "$sed_expr" "$file"
+  gov_sed_inplace_if_changed "$file" "$sed_expr"   # rewrites the file only when the expression changes it (#40)
 
   # Check if changed
   local after

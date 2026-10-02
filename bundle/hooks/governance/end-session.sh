@@ -493,6 +493,10 @@ if [ $HANDOFF_EXISTS -eq 0 ] && [ -d "$PROJECT_ROOT/MDs" ]; then
     fi
   done
 fi
+# 2026-10-02 (OPEN-PROBLEMS #40): docs/context/HANDOFF.md may itself BE the active handoff (content, no pointer).
+if [ $HANDOFF_EXISTS -eq 0 ] && type gov_handoff_current >/dev/null 2>&1 && gov_handoff_current "$PROJECT_ROOT" "$VJ_VER"; then
+  HANDOFF_EXISTS=1
+fi
 if [ $HANDOFF_EXISTS -eq 0 ]; then
   ISSUES="${ISSUES}\n  - No handoff found for v${VJ_VER} (docs/context/HANDOFF.md points to v${HANDOFF_POINTS:-unknown})"
   DIRECTIVES="${DIRECTIVES}\n  (c) Create a new handoff at MDs/HANDOFF-v${VJ_VER}.md with: session summary, current state, open work, exact next action, and read-these-first list. Then update docs/context/HANDOFF.md pointer to reference it. Archive the previous handoff to MDs/archive/ with status: consumed."

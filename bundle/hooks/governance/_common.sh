@@ -962,3 +962,37 @@ else
 fi
 unset _gov_cli_mode
 _GOV_HOOK_INPUT_READ=1
+
+
+# ---------------------------------------------------------------------------------------------
+# OPEN-PROBLEMS #40 helpers (2026-10-02; every one has a case in tests/test-hook-fixes-40.sh)
+# ---------------------------------------------------------------------------------------------
+# One entry-heading shape for GOTCHAS-like files: `12. x`, `### 12. x`, `## #12 - x`, `## #12 - x` (an en/em dash too).
+GOV_ENTRY_RE='^(#{1,6}[[:space:]]*)?#?[0-9]+([.)]|[[:space:]]+(-|—|–))'
+# gov_count_entries <file> -> the number of entry headings, ALWAYS one number. (`grep -c ... || echo 0`
+# printed "0" twice on no match - grep -c already prints 0 and only exits 1.)
+gov_count_entries() { local n; n=$(grep -cE "$GOV_ENTRY_RE" "$1" 2>/dev/null); printf '%s' "${n:-0}"; }
+# gov_indent_lines: stdin lines -> "\n        line" each (pure bash; `sed 's|^|<newline>   |'` with a literal
+# newline in the replacement is "unterminated `s' command").
+gov_indent_lines() { local l; while IFS= read -r l; do [ -n "$l" ] && printf '\n        %s' "$l"; done; return 0; }
+# gov_sed_inplace_if_changed <file> <sed-expr> -> rewrites the file ONLY when the expression changes it
+# (0 = changed, 1 = unchanged or failed). `sed -i` rewrites even with no match: the mtime moved and a
+# later check read it as "changed WITHOUT governance-guard".
+gov_sed_inplace_if_changed() {
+  local f="$1" e="$2" t
+  t=$(mktemp 2>/dev/null) || return 1
+  sed "$e" "$f" > "$t" 2>/dev/null || { rm -f "$t"; return 1; }
+  if cmp -s "$t" "$f"; then rm -f "$t"; return 1; fi
+  cat "$t" > "$f"; rm -f "$t"; return 0
+}
+# gov_handoff_current <project_root> <version> -> 0 when docs/context/HANDOFF.md IS the active handoff:
+# `status: active` in its first 12 lines, no `type: pointer` / `points_to:`, and its text names v<version>.
+# (end-session.sh Check 3 knew only a pointer to HANDOFF-v<ver> or an MDs/HANDOFF-* file, so a project whose
+# HANDOFF.md holds the content was blocked at every close: "No handoff found".)
+gov_handoff_current() {
+  local f="$1/docs/context/HANDOFF.md" v="$2"
+  [ -f "$f" ] && [ -n "$v" ] || return 1
+  head -n 12 "$f" 2>/dev/null | grep -qE '^status:[[:space:]]*active' || return 1
+  head -n 12 "$f" 2>/dev/null | grep -qE '^(type:[[:space:]]*pointer|points_to:)' && return 1
+  grep -qE "v${v//./\\.}(\\.([^0-9]|\$)|[^0-9.]|\$)" "$f" 2>/dev/null
+}

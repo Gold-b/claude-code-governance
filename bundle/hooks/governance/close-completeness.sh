@@ -94,7 +94,7 @@ if [ -n "${PROJECT_ROOT:-}" ] && [ -d "$PROJECT_ROOT" ]; then
     [ -f "$_cc_f" ] || continue
     _cc_decl="$(grep -m1 -E '^total_entries:[[:space:]]*[0-9]+' "$_cc_f" 2>/dev/null | grep -oE '[0-9]+' || true)"
     [ -n "$_cc_decl" ] || continue
-    _cc_real="$(grep -cE '^(#{1,6} )?[0-9]+\.' "$_cc_f" 2>/dev/null || echo 0)"
+    _cc_real="$(gov_count_entries "$_cc_f")"
     if [ "$_cc_decl" != "$_cc_real" ]; then
       _cc_warn "$(basename "$_cc_f") declares total_entries: $_cc_decl but $_cc_real entries are present.
         A file that states its own size and is wrong about it teaches every reader to trust a
@@ -231,8 +231,7 @@ $(gov_protected_patterns)
 EOF
   if [ -n "$_cc_unguarded" ]; then
     _cc_warn "protected document(s) changed this session WITHOUT passing governance-guard:$(printf '%s' "$_cc_unguarded" | tr ' ' '
-' | sed '/^$/d' | sort -u | sed 's|^|
-        |')
+' | sed '/^$/d' | sort -u | gov_indent_lines)
         The guard only sees Edit/Write, so a shell-written edit bypasses it. This is a NOTE, not a
         finding: a git pull, a rebase or a parallel session produces the same signal. If the change
         was yours and intended, nothing needs doing. (Open-Problem #130.)"
@@ -276,8 +275,7 @@ if [ -d "$_cc_live" ] && [ -d "$_cc_bundle" ]; then
         not agreement. Verify \$HOME and the installer bundle path."
   elif [ -n "$_cc_div" ]; then
     _cc_warn "the live hooks and the installer bundle DIVERGE on:$(printf '%s' "$_cc_div" | tr ' ' '
-' | sed '/^$/d' | sed 's|^|
-        |')
+' | sed '/^$/d' | gov_indent_lines)
         Sync is live -> installer -> repo, and a Bash-written edit triggers NO sync at all, so this
         is most likely an edit that will be LOST at the next 'install.sh --force'. Diff them, decide
         which side is right, and copy deliberately. (Open-Problem #130, gotchas #350 / #360.)"

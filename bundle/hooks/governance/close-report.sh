@@ -413,7 +413,7 @@ GOT="$ROOT/docs/context/GOTCHAS.md"
 if [ -f "$GOT" ]; then
   reads
   # Same entry regex as governance-selftest.sh part B. Two copies, kept identical on purpose.
-  ENTRY_RE='^(#{1,6}[[:space:]]*)?#?[0-9]+[.)]'
+  ENTRY_RE='^(#{1,6}[[:space:]]*)?#?[0-9]+([.)]|[[:space:]]+(-|—|–))'   # same shape as GOV_ENTRY_RE in _common.sh (#40)
   decl="$(grep -m1 -oE '^total_entries:[[:space:]]*[0-9]+' "$GOT" | grep -oE '[0-9]+')"
   meas="$(grep -cE "$ENTRY_RE" "$GOT")"
   if [ -n "$decl" ]; then

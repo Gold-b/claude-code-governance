@@ -289,6 +289,30 @@ else
   _verify_v "$VM"
   has "control: a commented-out pause -> ON - always again" "$O" "✓   push at close: ON - always, on the maintainer's machine"
   rm -f "$VM/.claude/.governance-local.env"
+  # (verify round 5 R5-1, 2026-10-02) the install.sh decision line while GOV_CLOSE_PUSH=0 pauses push on a
+  # maintainer machine: "PAUSED", never "ON - always" / "stays ON here" (the same defect verify.sh had).
+  _inst_p() {  # _inst_p <home> <pause: 0|none> [install.sh args...]: a real install, outside the agent markers
+    local h="$1" p="$2"; shift 2
+    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u AI_AGENT -u GOV_REPO_PATH -u GOV_RELEASE_KEY -u GOV_CONSENT_SELFTEST -u GOV_CLOSE_PUSH \
+        HOME="$h" USERPROFILE="$h" ${p:+$( [ "$p" = 0 ] && echo GOV_CLOSE_PUSH=0 || echo X=1 )} \
+        bash "$ROOT/install.sh" --accept-terms --force --no-verify "$@" </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > "$h.inst-p.out"
+  }
+  O=$(sed 's/\x1b\[[0-9;]*m//g' "$VM.install.out")
+  has "install.sh, maintainer, no pause: the decision line says ON - always" "$O" "Push at session close: ON - always, on the maintainer's machine (~/.claude/.governance-source); nothing is asked or recorded. Pause it with GOV_CLOSE_PUSH=0."
+  hasnt "  and does not say paused" "$O" "PAUSED by GOV_CLOSE_PUSH=0"
+  VP1="$TMP/home-maint-pause"; mkdir -p "$VP1/.claude"; touch "$VP1/.claude/.governance-source"
+  _inst_p "$VP1" 0; O=$(cat "$VP1.inst-p.out")
+  has "install.sh, maintainer + GOV_CLOSE_PUSH=0: the decision line says PAUSED" "$O" "Push at session close: PAUSED by GOV_CLOSE_PUSH=0"
+  hasnt "  and never 'ON - always, on the maintainer's machine (~/.claude/.governance-source); nothing is asked'" "$O" "ON - always, on the maintainer's machine (~/.claude/.governance-source); nothing is asked"
+  has "  the summary of the same run agrees" "$O" "Push at session close:  OFF (paused by GOV_CLOSE_PUSH=0)"
+  VP2="$TMP/home-maint-pause-nc"; mkdir -p "$VP2/.claude"; touch "$VP2/.claude/.governance-source"
+  _inst_p "$VP2" 0 --no-close-push; O=$(cat "$VP2.inst-p.out")
+  has "install.sh, maintainer + --no-close-push + pause: says PAUSED now" "$O" "it is PAUSED now by GOV_CLOSE_PUSH=0 (remove it to resume)."
+  hasnt "  and never 'stays ON here'" "$O" "stays ON here"
+  VP3="$TMP/home-maint-nc"; mkdir -p "$VP3/.claude"; touch "$VP3/.claude/.governance-source"
+  _inst_p "$VP3" none --no-close-push; O=$(cat "$VP3.inst-p.out")
+  has "install.sh, maintainer + --no-close-push, no pause: stays ON here" "$O" "push at session close stays ON here."
+  hasnt "  and does not say paused" "$O" "PAUSED"
   # (verify round 4 #2) the maintainer branch is unchanged: it reads no terms source at all, so ON
   # holds with the installed terms copy deleted, and nothing was recorded.
   is "maintainer: the predicate says ON (the maintainer reason)" "$(_pred "$VM")" "ON|on (maintainer machine: ~/.claude/.governance-source)"
@@ -436,6 +460,43 @@ else
   is "(d) staging layout + y: rc 0, the terms copy installed, ON" "$rc/$([ -s "$VS/.claude/hooks/governance-terms/TERMS-VERSION" ] && echo copy || echo nocopy)/$(_pred "$VS")" "0/copy/$_ON5"
   has "  the summary agrees: ON" "$(sed 's/\x1b\[[0-9;]*m//g' "$VS.install.out")" "  Push at session close:  ON (since "
 fi
+fi
+
+echo "[6] gov-update.sh --accept-terms finds the INSTALLED terms copy (client from a clone elsewhere, nothing staged) - round 4 G4-3"
+# Before G4-3 it said "no staged release and no installer copy carry terms - nothing to accept." for this client,
+# while close-push.sh --enable sent exactly this client to the command.
+VG="$TMP/home-accept-terms"; mkdir -p "$VG"
+_inst_seam "$VG" "$TS" 'n\n'; rc=$?
+if [ "$rc" != 0 ]; then bad "(g) install for --accept-terms: rc=$rc ($(tail -3 "$VG.install.out" | tr '\n' ' '))"
+else
+  _acc() {  # _acc <home> [VAR=val...]: the INSTALLED gov-update.sh --accept-terms, no terminal -> rc, $A (colours stripped)
+    local h="$1"; shift
+    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u AI_AGENT -u GOV_CONSENT_SELFTEST -u GOV_CLOSE_PUSH -u GOV_ACCEPT_TERMS HOME="$h" USERPROFILE="$h" "$@" \
+        bash "$h/.claude/hooks/governance/gov-update.sh" --accept-terms </dev/null >"$h.acc.out" 2>&1; rc=$?
+    A=$(sed 's/\x1b\[[0-9;]*m//g' "$h.acc.out")
+  }
+  is "  precondition: no <HOME>/.claude/governance-installer, nothing staged" "$([ -e "$VG/.claude/governance-installer" ] || [ -e "$VG/.claude/.governance-update/READY" ] && echo present || echo absent)" "absent"
+  _TC="$VG/.claude/hooks/governance-terms"
+  _acc "$VG"
+  is "(g1) the command finds the installed terms and stops at the missing terminal: rc 1" "$rc" "1"
+  has "  ... it shows the installed NOTICE path" "$A" "Full text: $_TC/NOTICE-AUTO-UPDATE.md"
+  has "  ... and says there is no terminal to ask on" "$A" "no terminal to ask on"
+  hasnt "  ... and never 'nothing to accept'" "$A" "nothing to accept"
+  # (g2) an unclear version (the copy's TERMS-VERSION is garbage) refuses and says why
+  cp "$_TC/TERMS-VERSION" "$_TC/TERMS-VERSION.keep"; printf 'x\n' > "$_TC/TERMS-VERSION"
+  _acc "$VG"
+  is "(g2) an unclear installed terms version: rc 1" "$rc" "1"
+  has "  ... it says the version is unclear" "$A" "the installed terms version is unclear"
+  hasnt "  ... and does not show the terms" "$A" "Full text:"
+  mv "$_TC/TERMS-VERSION.keep" "$_TC/TERMS-VERSION"
+  # (g3) inside an agent session with the acceptance variable: refused, nothing recorded
+  _ta="$VG/.claude/.governance-update/terms-accepted"; _b=$(sha256sum "$_ta" 2>/dev/null | cut -c1-16)
+  env -u GOV_CONSENT_SELFTEST -u GOV_CLOSE_PUSH HOME="$VG" USERPROFILE="$VG" CLAUDECODE=1 GOV_ACCEPT_TERMS=1 \
+        bash "$VG/.claude/hooks/governance/gov-update.sh" --accept-terms </dev/null >"$VG.acc3.out" 2>&1; rc=$?
+  A=$(sed 's/\x1b\[[0-9;]*m//g' "$VG.acc3.out")
+  is "(g3) an agent session with GOV_ACCEPT_TERMS=1: rc 1" "$rc" "1"
+  is "  ... the acceptance record is unchanged" "$(sha256sum "$_ta" 2>/dev/null | cut -c1-16)" "$_b"
+  hasnt "  ... and no 'accepted' line" "$A" "terms accepted"
 fi
 
 echo "release-invariants selftest: pass=$PASS fail=$FAIL"

@@ -103,6 +103,13 @@ All paths resolved dynamically from CONTEXT-MANIFEST.md.
 
 **Do NOT add to MEMORY.md:** Bug lists (they go in OPEN-PROBLEMS), transient session state (it goes in PLAN.md), one-off observations (they go in the next handoff).
 
+### Step 4b — Promote pending lessons (close mode; 2026-10-10)
+If `tasks/lessons.md` exists and "Pending" is not `<none>`, promote each entry to where it will be read, then delete it from "Pending" (CLAUDE.md § Corrections & Rule Review):
+- a rule that would recur across sessions → one line in the project's `CLAUDE.md` or the relevant skill, and one line in "Active Rules" (keep that block under 15 lines; when it is full, retire the weakest rule instead of growing it);
+- a failure with a reproducible cause → GOTCHAS; a pattern → MEMORY "Lessons Learned" / "Repeated Pitfalls" (Step 4);
+- an entry whose rule has since become unnecessary → move it to "Retired" with the date and the measurement (Agent Guide §26).
+Prefer editing an existing rule over adding one. A "Pending" entry that survives a close is an open finding: say so in the summary (Step 9), in the past tense.
+
 ### Step 5 — Update OPEN-PROBLEMS.md
 - Bug resolved → add resolution, mark with `~~strikethrough~~` and `**Status:** RESOLVED (v<version>, <date>)`
 - New bug discovered → append to the right priority section (P1/P2/P3)

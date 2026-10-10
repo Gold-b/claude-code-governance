@@ -95,7 +95,7 @@ table when its SessionEnd entry was removed, `consent-guard.sh` joined it).
 | SessionStart | `pre-session.sh` | Detects governance, triggers the briefing, reports a published framework update and names the two ways to update by hand. Since v2.0.0 it also says when a release you fetched yourself (`gov-update.sh --fetch`) is verified and waiting for your `--apply`, or is held until you accept its terms, prints the result of the last background restore (from `REPORT`: updater lines only, at most 20), and — if an install was cut off part-way — starts its rollback detached. It never downloads a release and never runs an install: 2.0.0 has no automatic update, and SessionStart hooks block Claude Code's start-up (the VS Code extension fails a start-up that takes 60 s). Budget **10 s, never more** — `settings-merge.js` enforces it, and `tests/test-sessionstart-budget.sh` times every SessionStart hook with 80-200 other session dirs |
 | SessionStart | `pr-watch-guard.sh` | If the repo has open PRs of yours and no live watcher: one context line with the exact `pr-watch.sh` command to arm (v1.4.0) |
 | UserPromptSubmit | `pre-task.sh` | Governance lite check per message |
-| UserPromptSubmit | `plan-gate.sh` | Requires an approved plan before implementation work |
+| UserPromptSubmit | `plan-gate.sh` | **Off by default since 2026-10-10.** With `GOV_PLAN_GATE=1` it detects a large implementation prompt and tells the session to ask whether to run `/plan-and-execute` (advisory, never blocks). Without it the hook exits at once and prints nothing; `/plan-and-execute` stays available on request |
 | UserPromptSubmit | `parallel-import.sh` | Detects pasted output from another session |
 | PreToolUse (Edit/Write) | `governance-guard.sh` | Blocks direct edits into a publish target's `bundle/` and governance edits on DEPLOYMENT/FROZEN nodes. The success-token gate on protected docs is **opt-in** since v1.7.1 (`GOV_REQUIRE_SUCCESS_TOKEN=1`) |
 | PreToolUse (Edit/Write) | `pre-write.sh` | Impact map before file changes |
@@ -840,6 +840,26 @@ verifies clean. Freshness is the version marker's job, not this gate's.
 
 ## Changelog
 
+- **2026-10-10 (v2.0.0, unreleased) — leaner always-loaded policy; planning on request; corrections written
+  down at once.** Five changes from a review of the framework against the "less scaffolding, more model"
+  advice, each one chosen so it removes or replaces a rule instead of stacking a new one on top.
+  (1) `plan-gate.sh` no longer asks a planning question on large tasks; opt back in with
+  `GOV_PLAN_GATE=1`. Selftest: the same prompt is silent by default and recommends `/plan-and-execute`
+  with the opt-in. (2) `CLAUDE.md.template` went from 369 to about 250 lines: the "Senior Agentic Systems
+  Architect" persona, the security-hardening checklist and the full "Measure a Fix" text moved into
+  `GOVERNANCE-AGENT-GUIDE.md` §23 to §25 (read on demand), and CLAUDE.md keeps a short core under the same
+  headings, so every pointer to a heading still resolves. (3) The "Compact Session Protocol" (at least 2
+  new hooks or skills per `/compact`) is replaced by "Corrections & Rule Review": a correction is written
+  to `tasks/lessons.md` in the same turn and promoted at close (`/live-state-orchestrator` Step 4b; the
+  bootstrapper reads its "Active Rules"), and `GOVERNANCE-AGENT-GUIDE.md` §26 describes retiring
+  scaffolding when the model generation changes. (4) "Server-Only Automation" now names a cloud routine
+  as a mechanism of record next to the project's server (it already was one for `pr-follow-through`);
+  session `/loop` stays a convenience; `GOVERNANCE-AGENT-GUIDE.md` §18.3. (5) Nothing that guards an
+  action changed: Verification Gate, Human-in-the-Loop, the bootstrap, consent and collision guards are as
+  they were. **Applying it:** these are `bundle/` edits, and the live `~/.claude` copies are the edit
+  surface ("bundle/ is a publish target"), so copy the changed files into `~/.claude` and put the new
+  `CLAUDE.md.template` body into your live `CLAUDE.md` above the local-only marker; otherwise the next
+  render overwrites the template.
 - **2026-09-30 (v2.0.0) — no automatic update in this version; push at session close is the user's
   choice; only a person accepts.** The `SessionEnd` trigger (`gov-update.sh
   --apply-at-session-end`) is unregistered and its mode removed; `pre-session.sh` never downloads a

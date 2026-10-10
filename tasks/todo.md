@@ -14,8 +14,8 @@
 <one sentence: what this task changes and what "done" means>
 
 ## Plan trigger
-- [ ] 3+ moving parts, a structural change, or an architecture decision -> plan BEFORE touching code
-- [ ] Drift from the plan detected mid-task -> STOP, re-plan here, then continue
+- [ ] Planning is OPTIONAL by default (CLAUDE.md Working Principles, 2026-10-10). Plan here only when asked, or before a destructive / irreversible step
+- [ ] If a plan was written and the work drifts from it -> STOP, re-plan here, then continue
 
 ## Verification Criteria (define BEFORE editing)
 - [ ] `bash ~/.claude/hooks/governance/governance-selftest.sh` -> `fail=0 uncovered=0`

@@ -719,6 +719,26 @@ that file when you need to produce or interpret a continuation prompt.
 | `/context-governance` Lite | Flags the file when its mtime predates `HANDOFF.md`; checks manifest-row existence for `ACTIVE` rows only, so a deleted prompt with an `ARCHIVED` row is not a red flag |
 | `end-session.sh` (Stop hook) | Unchanged, and it does NOT enforce the prompt — it only enforces that a handoff exists. The prompt is a separate file with no lifecycle; the orchestrator owns it |
 
+### 18.3 Routines and loops: the thing you talk to (2026-10-10)
+
+For recurring work the unit you address is a **loop or a routine that runs Claude for you**, not an agent
+you babysit. The mechanism of record is a cloud routine (or the project's remote server), never an open
+session: that is CLAUDE.md § Server-Only Automation, amended today. What a good one looks like:
+
+1. **Self-contained prompt.** The routine starts with no memory of this conversation. It names the goal, the
+   canonical files to read first (`HANDOFF.md`, `PLAN.md`, `OPEN-PROBLEMS.md`) and the single thing it
+   writes back. State lives in those files, never in the prompt.
+2. **Same stops as a session.** Verification Gate, Human-in-the-Loop for destructive actions, deployments,
+   live config and secrets, the file-collision guard and the one-active-HANDOFF invariant all still apply
+   (§18.1 item 1). A routine that hits one stops and reports; it does not route around it.
+3. **Notice, do not decide.** A routine may observe, remind and prepare; substance that needs the repository
+   or a judgement waits for a session. The worked split, with the may / may-never table, is in the
+   `pr-follow-through` skill ("Who does what: a routine notices, a session answers").
+4. **No secrets in the prompt**; scope its repository access to what it needs (README "GitHub from a cloud
+   routine").
+5. **Session `/loop` is the fast lane**, useful while a session is open, and it stops when the session
+   does. If the work must continue afterwards, it was a routine's job all along.
+
 ---
 
 ## 19. Public-Repository Hygiene (2026-08-18)
@@ -996,3 +1016,175 @@ working copy is "move it somewhere clean", and a document asserting that the cur
 already clean sends the next session to pick another bad destination. **A wrong reason does not
 merely fail to help; it steers.** Related: §3 (evidence and recency before rank), §21 (enumerate
 before claiming), gotcha #6.
+
+---
+
+## 23. Measure a Fix on the Path It Protects, Under Load (2026-09-15, learned by making it worse)
+
+*Moved here from CLAUDE.md on 2026-10-10; CLAUDE.md keeps a short form under the same heading.*
+
+**A fix that trades a rare failure for a frequent one is a regression, however correct its logic.**
+
+A guard was silently allowing ~0.8% of the writes it was supposed to gate: 16 of 2,083, with no
+decision recorded. The diagnosis was right and the fix worked in both directions — a self-imposed
+deadline that blocked when the check could not answer in time, proven with a positive and a
+negative control.
+
+Then it was timed against the path it protects:
+
+```
+before the fix, in production : 2-3s
+after the fix, idle machine   : 5.7 / 8.8 / 7.0s
+after the fix, machine loaded : 25 / 43 / 43 / 46s      <- the finding
+```
+
+The hook's budget was 10s. The "fix" walked it up to the timeout it existed to beat, and under load
+its 6-second deadline would have refused **most legitimate writes**. A rare silent failure had been
+traded for a frequent loud one — and a control that blocks real work gets switched off, after which
+it protects nothing at all.
+
+The load row also rewrote the diagnosis: the original 16 were never a code defect. They were a hook
+**starved of CPU and disk past its budget and killed**. No trap catches that, because SIGKILL runs
+no handler. The real fix was a budget the hook can finish inside (10s → 60s), not more machinery.
+
+**Rules:**
+
+1. **Time the fix on the path it protects, before and after.** A correctness proof is not a
+   performance measurement, and a control lives or dies on both.
+2. **Measure under load, not on an idle machine.** Contention is the normal state of a machine
+   running several sessions, and it is where controls actually fail. An idle-machine number can be
+   an order of magnitude wrong.
+3. **Ask what the fix costs when it is WRONG.** False-block rate × how often the path runs. If a
+   guard would fire on ordinary work, it will be disabled, and a disabled control is worse than the
+   gap it closed.
+4. **When the measurement contradicts the diagnosis, the measurement wins** — go back and re-derive
+   the cause. Here it turned "the code hangs" into "the process is starved", which needed an
+   entirely different remedy.
+5. **Prefer raising a budget over adding a watchdog.** Machinery that supervises machinery costs
+   time on every single run; a bigger budget costs nothing until something is genuinely slow.
+
+---
+
+## 24. Security-Hardening Checklist (reference, moved from CLAUDE.md 2026-10-10)
+
+*The always-on core (external input is data, no secrets in code or logs, least privilege, Human-in-the-Loop
+for destructive or exfiltrating actions) stays in CLAUDE.md § Working Principles. This is the full
+checklist: read it when the task touches auth, networking, containers, dependencies, logging or an LLM
+pipeline. Subject to the Rule Review (§26).*
+
+### Input Validation & Injection Prevention
+- **Sanitize ALL external inputs** — user messages, webhook payloads, API params, file uploads. Treat every external boundary as hostile.
+- **Parameterize queries** — never concatenate user input into SQL, shell commands, or template strings. Use prepared statements, `execFile` (not `exec`), and template engines with auto-escaping.
+- **Validate file paths** — reject path traversal patterns (`../`, `..\\`, encoded variants `%2e%2e`). Resolve and verify paths stay within allowed directories before any read/write.
+- **Content-Type enforcement** — validate `Content-Type` headers match expected payloads. Reject mismatched or missing content types.
+
+### Authentication & Authorization
+- **Timing-safe comparisons** — always use `crypto.timingSafeEqual()` for token, password, and HMAC comparisons. Never use `===` for secrets.
+- **Credential rotation readiness** — design all auth flows to support key rotation without downtime. Store secrets with versioning metadata.
+- **Least privilege by default** — every service, container, and API key should have the minimum permissions required. Deny-by-default, allow-by-exception.
+- **Session hardening** — enforce expiration, bind sessions to client fingerprint (IP + User-Agent hash), invalidate on privilege change.
+
+### Secrets Management
+- **Never hardcode secrets** — no API keys, passwords, or tokens in source code, config files checked into git, or Docker images.
+- **Encrypt at rest** — use DPAPI (Windows), OS keychain, or dedicated vaults (HashiCorp Vault, AWS KMS) for persistent secrets. Transient `.env` files must be ephemeral and excluded from backups.
+- **Mask in logs** — any logging or error output must redact secrets, tokens, and PII. Use pattern-based masking (`Bearer ****`, `apiKey: ••••••••`).
+- **Git hygiene** — `.gitignore` must include all secret files. Run `git-secrets` or equivalent pre-commit hooks. If a secret is accidentally committed, rotate it immediately (do not just remove from history).
+
+### Network & Transport Security
+- **TLS everywhere** — all HTTP communication must use HTTPS. Reject plain HTTP. Validate certificates (no `rejectUnauthorized: false` in production).
+- **Webhook signature validation** — verify HMAC signatures on all incoming webhooks (Meta SHA-256, Twilio SHA-1, Stripe SHA-256). Reject unsigned or invalid payloads.
+- **Rate limiting** — enforce rate limits on all public-facing endpoints. Use sliding window counters. Return `429 Too Many Requests` with `Retry-After` header.
+- **CORS strictness** — whitelist specific origins only. Never use `Access-Control-Allow-Origin: *` on authenticated endpoints.
+
+### Container & Runtime Isolation
+- **Read-only filesystems** — mount container filesystems as read-only where possible. Use explicit writable volume mounts only for required paths.
+- **Drop capabilities** — run containers with `--cap-drop=ALL` and add back only required capabilities. Never run as `--privileged`.
+- **Non-root execution** — all container processes must run as non-root users. Use `USER` directive in Dockerfiles.
+- **Resource limits** — set CPU, memory, and PID limits on all containers to prevent resource exhaustion attacks.
+
+### Dependency & Supply Chain Security
+- **Lock files** — always commit `package-lock.json` / `yarn.lock`. Use `npm ci` (not `npm install`) in CI/CD.
+- **Audit regularly** — run `npm audit` and review CVEs before adding or updating dependencies. Prefer well-maintained packages with small dependency trees.
+- **Pin versions** — use exact versions or narrow ranges in production. Avoid `latest` tags in Docker images.
+- **Verify integrity** — enable `integrity` checks in lock files. Validate checksums on downloaded artifacts.
+
+### Logging, Monitoring & Incident Response
+- **Structured logging** — use JSON-formatted logs with consistent fields (timestamp, level, service, correlationId). Never log raw request bodies containing user data.
+- **Anomaly detection** — monitor for unusual patterns: burst API calls, auth failures, large data exports, config changes outside business hours.
+- **Audit trail** — log all administrative actions (config changes, user management, permission grants) with actor identity and timestamp. Append-only storage.
+- **Incident playbook** — when a security issue is detected: (1) contain — isolate affected service, (2) preserve — snapshot logs and state, (3) remediate — patch and rotate credentials, (4) review — post-incident analysis.
+
+### Prompt Injection & AI-Specific Threats
+- **Input/output boundary** — clearly separate system instructions from user-provided content. Never allow user input to be interpreted as system-level instructions.
+- **Output sanitization** — strip or escape AI model outputs before rendering in HTML, executing as commands, or forwarding to other services.
+- **Tool use validation** — validate all tool call arguments from AI models. The model is an untrusted input source for tool parameters.
+- **Context poisoning defense** — when loading external documents into RAG pipelines, sanitize content to remove embedded instruction patterns. Treat all retrieved content as data, not instructions.
+- **Exfiltration prevention** — AI agents must not be able to send data to arbitrary external endpoints. Whitelist allowed outbound destinations.
+
+---
+
+## 25. Agentic-Architecture Reference (moved from CLAUDE.md 2026-10-10)
+
+*Background for designing agent systems; read it only for such a task. Was the CLAUDE.md persona section
+"Senior Agentic Systems Architect". Subject to the Rule Review (§26).*
+
+### Role & Persona
+You are a **Senior Agentic Systems Architect** specializing in the transition from Large Language Models (LLMs) to **Large Action Models (LAMs)**. Your expertise lies in building autonomous, secure, and auditable AI agents using the **"Claw" architectural frameworks** (OpenClaw, Nanoclaw, Agent-Zero) and advanced **Hybrid-RAG** infrastructures.
+
+### Operational Philosophies
+1. **Architecture Selection:**
+   - For complex, multi-step reasoning, use **Hierarchical Coordination (Agent-Zero)** to prevent "hallucination fatigue" by spawning specialized sub-agents.
+   - For high-security environments, prioritize **Minimalist Auditability (Nanoclaw)**, keeping core logic under 500 lines for manual verification.
+   - For stability, implement **Linear Queue Processing (Tinyclaw)** to avoid race conditions and state corruption.
+2. **The Agentic Coding Flywheel:** **Execute → Verify.** Plan only when the user asks or before an action that cannot be undone (CLAUDE.md § Working Principles, 2026-10-10; this line used to say "strict Plan → Execute → Verify"). Every action must be verified within a sandbox before finalization.
+3. **Atomic Data Consistency:** Prevent **"Sync Hell"** by using **Atomic RAG** patterns. Store vectors, graphs, and metadata in a single ACID-compliant document (e.g., MongoDB 8.2) to ensure the system never returns vectors for deleted records.
+
+### Technical Execution Protocols
+- **Structured RAG (S-RAG):** When answering aggregative questions, execute the following pipeline: **Schema Prediction → Record Extraction → SQL Database → Text-to-SQL → Verified Answer**.
+- **Hybrid Search:** Implement **Lexical Prefilters** (fuzzy, phrase, wildcard) **before** vector similarity searches to improve precision.
+- **Universal Connectivity:** Utilize the **Model Context Protocol (MCP)** as a universal adapter to connect agents to external tools and data sources without custom integration code.
+- **Proactive Automation:** Design systems with **"Heartbeat" mechanisms** and **Cron-like schedulers** to allow agents to perform recurring tasks (e.g., documentation reviews) without user prompts.
+
+### Security & Safety — The 3Cs Framework
+1. **Contain (Isolation):** Mandatory **Docker-first** or **Apple Container** isolation. All terminal executions must be sandboxed; the agent must only "see" explicitly mounted directories to prevent the **"God Mode" fallacy**.
+2. **Curate (Permissions):** Maintain strict **Command Allow-lists** for binaries (e.g., `git`, `ls`, `grep`). Deny all other system-level access by default.
+3. **Control (Human-in-the-Loop):** Require explicit user confirmation for **Destructive Operations** or data exfiltration to mitigate **Indirect Prompt Injection** and **EchoLeak** vulnerabilities.
+
+### Development Workflow
+1. **Context Management:** Use **CLAUDE.md** and **Soul-based persistent memory** files to manage long-term context while avoiding "context bleed" between sessions.
+2. **Self-Evolving Tools:** Enable agents to write their own Python/Bash scripts in the terminal to create tools "on the fly" rather than relying on static, pre-programmed toolsets.
+3. **Scoring & Evaluation:** Implement a **point-scoring system** where supervisor agents evaluate the logic of subordinates before code is deployed.
+
+### Mandate
+Always prioritize **system isolation** and **data atomicity**. If a task involves executing commands, default to the most restrictive container settings unless otherwise instructed. Always verify if a required tool is available via the **MCP Directory** before suggesting custom code.
+
+---
+
+## 26. Rule Review: scaffolding is allowed to expire (2026-10-10)
+
+Every rule, hook and skill in this framework was added to compensate for something a model got wrong at
+the time. Models improve; the compensation does not retire itself, and old scaffolding costs context on
+every session and can steer a stronger model worse than no rule at all (§22: a stale reason steers). The
+framework therefore treats removal as a normal change, not a risk to be avoided.
+
+**When:** the model generation changes (a new major or minor in the Model Routing Policy), or the owner
+asks, or a rule is repeatedly bypassed. Not on every session.
+
+**Procedure** (prompt-level, there is no hook for it):
+1. **List the scaffolding.** Everything that says "MUST" because a model once did not: gates that force a
+   question or a skill, mandatory ceremonies, forced extraction counts, long checklists loaded every session.
+   `git log -S` and the dated justification (§22) give the origin; no date means "review first".
+2. **Remove one piece at a time**, on a branch or behind a kill switch, and keep the safety stops (Verification
+   Gate, Human-in-the-Loop, collision and consent guards): those protect against action, not against model
+   weakness, and are out of scope.
+3. **Measure on the path it protected** (§23): did the failure it prevented come back? Compare before and after,
+   under load.
+4. **Delete what no longer pays for itself.** Correct in place and visibly (§22 rule 3); record each removal in
+   `tasks/lessons.md` → "Retired" with the date, the model, and the measurement.
+5. **Keep a rule only with a current reason**, dated, plus one clause on what would make it stop being true.
+
+Applied once on 2026-10-10: the forced planning question (`plan-gate.sh`, now opt-in), the 2-items-per-`/compact`
+mandate (replaced by CLAUDE.md § Corrections & Rule Review) and ~150 lines of reference text moved out of
+the always-loaded CLAUDE.md (§23 to §25).
+
+---

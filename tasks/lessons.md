@@ -15,6 +15,11 @@
 > applied, the bootstrapper reads this block by instruction, not by hook - that is a prompt-level
 > control and should be described as one.
 >
+> 2026-10-10: the wiring promised below now exists at prompt level. `/bootstrapper` Step 1 item 7 reads
+> "Active Rules" + "Pending"; `/live-state-orchestrator` Step 4b promotes and retires entries;
+> CLAUDE.md § Corrections & Rule Review says WHEN to write one (at once, the same turn) and replaces the
+> old "2 hooks/skills per /compact" mandate. Still no hook enforces any of it.
+>
 > Created 2026-09-15 by the Boris Cherny harness audit (`docs/context/BORIS-HARNESS-PROPOSAL.md`).
 > NOT gitignored yet (proposal change C): placeholders only until that lands.
 
@@ -23,7 +28,8 @@
 - **Correction:** what the user or the verifier said, quoted
 - **Enforced Constraint:** the rule that makes the repeat impossible - and WHO enforces it
   (a hook, a selftest case, a skill step), or an honest "prompt-level only"
-- **Promoted to:** GOTCHAS #N / MEMORY section / hook + selftest case - filled at close
+- **Compensates for:** the model weakness this rule exists to cover (so the Rule Review can retire it, Agent Guide §26)
+- **Promoted to:** project CLAUDE.md rule / skill / GOTCHAS #N / MEMORY section / hook + selftest case - filled at close
 
 ---
 
@@ -38,3 +44,7 @@
 
 ## Pending (promote at close, then delete)
 <none>
+
+## Retired (rules removed by the Rule Review - Agent Guide section 26)
+- 2026-10-10 | `plan-gate.sh` forced planning question | Compensated for: models starting large tasks without a plan | now opt-in (`GOV_PLAN_GATE=1`) | measured: NOT CHECKED against a real session yet - if large tasks start going wrong, re-enable and record it here
+- 2026-10-10 | "at least 2 hooks/skills per /compact" | Compensated for: sessions losing their learnings | replaced by CLAUDE.md section Corrections & Rule Review | measured: NOT CHECKED

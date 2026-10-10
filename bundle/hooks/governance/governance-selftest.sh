@@ -1347,9 +1347,18 @@ case_plan_gate() {
   local big="Please implement and refactor the retrieval architecture in admin/lib/server.js and config.js. Step 1: extract the pipeline into a module. Step 2: rewrite the endpoint schema so the container can serve it. Step 3: migrate the database and add a module for the API service middleware. This is a multi phase change and it touches many files across the whole codebase, so plan it properly before writing any code at all please. It should also redesign the middleware layer, migrate the remaining endpoints, and rewrite the container build so the whole service comes up from one command."
   if [ "${#big}" -ge 500 ]; then _ok "plan-gate fixture is over the 500-char threshold (${#big})"
   else _bad "plan-gate fixture is over the 500-char threshold" "fixture is only ${#big} chars, so this case exercises the wrong branch"; fi
+  # Off by default since 2026-10-10: the large task that used to trigger the question is now silent.
+  run_hook "$good" "sid-pg-0" "$(pl_prompt "$good" sid-pg-0 "$big")"
+  expect_rc 0 "large task, default (gate off): allowed"
+  expect_quiet "large task, default (gate off): no planning question"
+
+  # Positive control: the SAME prompt with the opt-in on still recommends /plan-and-execute, so the
+  # silence above is the switch and not a broken detector.
+  _RUN_ENV=(GOV_PLAN_GATE=1)
   run_hook "$good" "sid-pg-1" "$(pl_prompt "$good" sid-pg-1 "$big")"
-  expect_rc 0 "large task: UserPromptSubmit MUST NOT exit 2"
-  expect_has "GOVERNANCE RECOMMENDATION" "large task: recommends /plan-and-execute"
+  expect_rc 0 "large task, opt-in: UserPromptSubmit MUST NOT exit 2"
+  expect_has "GOVERNANCE RECOMMENDATION" "large task, opt-in: recommends /plan-and-execute"
+  _RUN_ENV=()
 
   run_hook "$good" "sid-pg-2" "$(pl_prompt "$good" sid-pg-2 "what time is it")"
   expect_rc 0 "small talk: allowed"

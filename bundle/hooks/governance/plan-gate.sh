@@ -9,9 +9,18 @@
 # The instruction is advisory — Claude follows it because it's a system-level
 # message, but the user can override by saying "don't plan, just do it".
 #
+# OFF BY DEFAULT since 2026-10-10 (owner decision, "skip the plan step"): the current models do not
+# need a forced planning question, and a gate that asks before every large task costs a turn each
+# time. /plan-and-execute stays available on request. Opt back in with GOV_PLAN_GATE=1 (settings.json
+# `env`); the hook stays registered so the opt-in needs no re-install and the rollback is one line.
+# Safety stops for destructive or irreversible actions are NOT this hook: Human-in-the-Loop and the
+# Verification Gate still apply (CLAUDE.md § Working Principles).
+#
 # Kill switch: GOVERNANCE_HOOKS=0
 
 set +e
+# Opt-in only. First statement on purpose: the default path must cost one process start, no more.
+[ "${GOV_PLAN_GATE:-0}" = "1" ] || exit 0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR="."
 . "$SCRIPT_DIR/_common.sh" 2>/dev/null || { exit 0; }
 

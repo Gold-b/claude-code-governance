@@ -56,6 +56,8 @@ If `goal` is empty, the skill assumes "general awareness" mode and produces a ba
    - **Check its mtime against `HANDOFF.md` before trusting it.** Older than the handoff → treat as STALE: report it, do not adopt its goal, and say so in the briefing. The file has no `status` field and nothing marking it out of date, so it reads as current whether or not it is.
    - It holds pointers, not state. Where it disagrees with `HANDOFF.md` / `PLAN.md` / `OPEN-PROBLEMS.md`, **they win** — it is not in the source-of-truth hierarchy.
 
+7. `tasks/lessons.md` **if it exists** — read ONLY its "Active Rules" block (kept under 15 lines) and any non-empty "Pending" entries. These are the corrections the owner already made once; the body of each rule lives in its source entry, so do not follow the pointers unless the task touches that area (2026-10-10; a prompt-level read, no hook enforces it). Absent = nothing recorded yet, not a gap.
+
 **Ungoverned project fallback:** If `docs/context/CONTEXT-MANIFEST.md` does NOT exist:
 - The project is NOT governed. Suggest `/init-governance` to the user.
 - Produce a minimal briefing from `CLAUDE.md` alone (skip Steps 2-3).

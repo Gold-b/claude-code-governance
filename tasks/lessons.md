@@ -5,8 +5,9 @@
 > `docs/context/MEMORY.md` ("Lessons Learned", "Repeated Pitfalls"). Both are write-protected by
 > `governance-guard.sh` and need a success token - which is exactly why a correction made mid-task
 > tends to be lost: the write is gated, the moment passes. Write it HERE at once, in the format
-> below. At close, `/live-state-orchestrator` promotes each entry into GOTCHAS (a failure with a
-> reproducible cause) or MEMORY (a pattern) and deletes it from "Pending". A pending entry that
+> below. At close, `/live-state-orchestrator` promotes each entry (a failure with a reproducible
+> cause -> GOTCHAS; a pattern -> MEMORY; a rule that recurs -> a line in the project CLAUDE.md or a skill,
+> plus one in "Active Rules") and deletes it from "Pending". A pending entry that
 > survives a close is an open finding, not a lesson.
 >
 > "Active Rules" is the ONLY block meant to be read in full at every session start. Keep it under
@@ -15,7 +16,7 @@
 > applied, the bootstrapper reads this block by instruction, not by hook - that is a prompt-level
 > control and should be described as one.
 >
-> 2026-10-10: the wiring promised below now exists at prompt level. `/bootstrapper` Step 1 item 7 reads
+> 2026-10-10: the wiring promised above ("Loader wiring is proposal change F") now exists at prompt level. `/bootstrapper` Step 1 item 7 reads
 > "Active Rules" + "Pending"; `/live-state-orchestrator` Step 4b promotes and retires entries;
 > CLAUDE.md § Corrections & Rule Review says WHEN to write one (at once, the same turn) and replaces the
 > old "2 hooks/skills per /compact" mandate. Still no hook enforces any of it.
@@ -46,5 +47,5 @@
 <none>
 
 ## Retired (rules removed by the Rule Review - Agent Guide section 26)
-- 2026-10-10 | `plan-gate.sh` forced planning question | Compensated for: models starting large tasks without a plan | now opt-in (`GOV_PLAN_GATE=1`) | measured: NOT CHECKED against a real session yet - if large tasks start going wrong, re-enable and record it here
-- 2026-10-10 | "at least 2 hooks/skills per /compact" | Compensated for: sessions losing their learnings | replaced by CLAUDE.md section Corrections & Rule Review | measured: NOT CHECKED
+- 2026-10-10 | `plan-gate.sh` forced planning question | Compensated for: models starting large tasks without a plan | model: Sonnet 5.5 session | now opt-in (`GOV_PLAN_GATE=1`) | measured: NOT CHECKED against a real session yet - if large tasks start going wrong, re-enable and record it here
+- 2026-10-10 | "at least 2 hooks/skills per /compact" | Compensated for: sessions losing their learnings | model: Sonnet 5.5 session | replaced by CLAUDE.md section Corrections & Rule Review | measured: NOT CHECKED

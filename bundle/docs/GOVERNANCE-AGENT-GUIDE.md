@@ -723,7 +723,7 @@ that file when you need to produce or interpret a continuation prompt.
 
 For recurring work the unit you address is a **loop or a routine that runs Claude for you**, not an agent
 you babysit. The mechanism of record is a cloud routine (or the project's remote server), never an open
-session: that is CLAUDE.md § Server-Only Automation, amended today. What a good one looks like:
+session: that is CLAUDE.md § Server-Only Automation, amended 2026-10-10. What a good one looks like:
 
 1. **Self-contained prompt.** The routine starts with no memory of this conversation. It names the goal, the
    canonical files to read first (`HANDOFF.md`, `PLAN.md`, `OPEN-PROBLEMS.md`) and the single thing it
@@ -1183,8 +1183,10 @@ asks, or a rule is repeatedly bypassed. Not on every session.
    `tasks/lessons.md` → "Retired" with the date, the model, and the measurement.
 5. **Keep a rule only with a current reason**, dated, plus one clause on what would make it stop being true.
 
-Applied once on 2026-10-10: the forced planning question (`plan-gate.sh`, now opt-in), the 2-items-per-`/compact`
-mandate (replaced by CLAUDE.md § Corrections & Rule Review) and ~150 lines of reference text moved out of
-the always-loaded CLAUDE.md (§23 to §25).
+First application, 2026-10-10, and an exception to steps 2 and 3: on the owner's instruction three things were
+changed together (the forced planning question in `plan-gate.sh`, now opt-in; the 2-items-per-`/compact`
+mandate, replaced by CLAUDE.md § Corrections & Rule Review; about 120 lines of reference text moved out of
+the always-loaded CLAUDE.md into §23 to §25). None was measured before or after: that is NOT CHECKED, and
+`tasks/lessons.md` → "Retired" says so. The next review should do it one piece at a time.
 
 ---

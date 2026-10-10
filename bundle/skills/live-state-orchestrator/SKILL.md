@@ -105,9 +105,9 @@ All paths resolved dynamically from CONTEXT-MANIFEST.md.
 
 ### Step 4b — Promote pending lessons (close mode; 2026-10-10)
 If `tasks/lessons.md` exists and "Pending" is not `<none>`, promote each entry to where it will be read, then delete it from "Pending" (CLAUDE.md § Corrections & Rule Review):
-- a rule that would recur across sessions → one line in the project's `CLAUDE.md` or the relevant skill, and one line in "Active Rules" (keep that block under 15 lines; when it is full, retire the weakest rule instead of growing it);
+- a rule that would recur across sessions → one line in the project's `CLAUDE.md` or the relevant skill, and one line in "Active Rules" (keep that block under 15 lines; when it is full, merge entries or drop one whose rule now lives in a CLAUDE.md or skill line of its own; never retire a rule here without the Rule Review's before/after measurement, Agent Guide §26);
 - a failure with a reproducible cause → GOTCHAS; a pattern → MEMORY "Lessons Learned" / "Repeated Pitfalls" (Step 4);
-- an entry whose rule has since become unnecessary → move it to "Retired" with the date and the measurement (Agent Guide §26).
+- an entry whose rule has since become unnecessary → move it to "Retired" with the date, the model and the measurement (Agent Guide §26).
 Prefer editing an existing rule over adding one. A "Pending" entry that survives a close is an open finding: say so in the summary (Step 9), in the past tense.
 
 ### Step 5 — Update OPEN-PROBLEMS.md
@@ -246,6 +246,7 @@ Updated:
 - HANDOFF.md: <lifecycle change or "no change">
 - Continuation prompt: <NEXT-SESSION-PROMPT.md rewritten (persist) | chat only (render-only) | deleted — goal complete | skipped — session not ending | skipped — no goal scoped>
 - CONTEXT-MANIFEST.md: <rows updated or "no change">
+Lessons: <tasks/lessons.md entries promoted / retired, or "none"; a "Pending" entry that survived the close is named here>
 Auto-resolved: <Change Log lines written by pre-close-check / this run, or "none">
 
 Next action: <from updated PLAN.md>

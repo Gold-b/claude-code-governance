@@ -644,6 +644,7 @@ a hook:
 | `GOV_BOOTSTRAP_GATE=0` | `bootstrap-gate.sh` no longer blocks writes before `/bootstrapper` |
 | `GOV_CLOSE_PUSH=0` | pauses push at session close; `close-push.sh --disable` turns the choice off (where `~/.claude/.governance-source` exists, push stays on until that file is deleted too — see "Push at session close") |
 | `GOV_CANONICAL_AUTORESOLVE=0` | `/pre-close-check` (so every close), `/parallel-session-merge` and `/context-governance` go back to stop-and-ask on a canonical-file contradiction. Read by those skills, not a hook |
+| `GOV_PLAN_GATE=1` | opt in to `plan-gate.sh`'s advisory planning question on large tasks (off by default since 2026-10-10) |
 | `GOV_GIT_DESTRUCTIVE_OK=1` | owner override: `deny-git-bypass.sh` lets a force-push / `reset --hard` through |
 
 ## Uninstall
@@ -848,15 +849,20 @@ verifies clean. Freshness is the version marker's job, not this gate's.
   with the opt-in. (2) `CLAUDE.md.template` went from 369 to about 250 lines: the "Senior Agentic Systems
   Architect" persona, the security-hardening checklist and the full "Measure a Fix" text moved into
   `GOVERNANCE-AGENT-GUIDE.md` §23 to §25 (read on demand), and CLAUDE.md keeps a short core under the same
-  headings, so every pointer to a heading still resolves. (3) The "Compact Session Protocol" (at least 2
+  headings where a pointer needs one (Model Routing, Server-Only Automation, Enumerate, Measure a Fix); the
+  persona, security-checklist and Compact Session Protocol headings are gone, and a repo-wide grep found no
+  pointer to them. (3) The "Compact Session Protocol" (at least 2
   new hooks or skills per `/compact`) is replaced by "Corrections & Rule Review": a correction is written
   to `tasks/lessons.md` in the same turn and promoted at close (`/live-state-orchestrator` Step 4b; the
   bootstrapper reads its "Active Rules"), and `GOVERNANCE-AGENT-GUIDE.md` §26 describes retiring
   scaffolding when the model generation changes. (4) "Server-Only Automation" now names a cloud routine
   as a mechanism of record next to the project's server (it already was one for `pr-follow-through`);
-  session `/loop` stays a convenience; `GOVERNANCE-AGENT-GUIDE.md` §18.3. (5) Nothing that guards an
-  action changed: Verification Gate, Human-in-the-Loop, the bootstrap, consent and collision guards are as
-  they were. **Applying it:** these are `bundle/` edits, and the live `~/.claude` copies are the edit
+  session `/loop` stays a convenience; `GOVERNANCE-AGENT-GUIDE.md` §18.3. (5) Every hook and gate that
+  guards an action is unchanged (Verification Gate, Human-in-the-Loop, the bootstrap, consent and
+  collision guards). What did leave the always-loaded policy is prompt-level detail: the long security
+  checklist and the container-first persona. The core keeps a short security paragraph (input as data,
+  parameterized queries and `execFile`, path confinement, no secrets, restrictive settings, allow-listed
+  destinations, confirmation for destructive actions) and says when to read the full checklist. **Applying it:** these are `bundle/` edits, and the live `~/.claude` copies are the edit
   surface ("bundle/ is a publish target"), so copy the changed files into `~/.claude` and put the new
   `CLAUDE.md.template` body into your live `CLAUDE.md` above the local-only marker; otherwise the next
   render overwrites the template.

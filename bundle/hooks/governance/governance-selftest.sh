@@ -1348,9 +1348,14 @@ case_plan_gate() {
   if [ "${#big}" -ge 500 ]; then _ok "plan-gate fixture is over the 500-char threshold (${#big})"
   else _bad "plan-gate fixture is over the 500-char threshold" "fixture is only ${#big} chars, so this case exercises the wrong branch"; fi
   # Off by default since 2026-10-10: the large task that used to trigger the question is now silent.
+  # GOV_PLAN_GATE=0 is pinned, not left to the caller's environment: the hook is opted into through
+  # settings.json `env`, and `_run` passes the calling environment through, so an unpinned run would
+  # go red on exactly the machines that opted in.
+  _RUN_ENV=(GOV_PLAN_GATE=0)
   run_hook "$good" "sid-pg-0" "$(pl_prompt "$good" sid-pg-0 "$big")"
   expect_rc 0 "large task, default (gate off): allowed"
   expect_quiet "large task, default (gate off): no planning question"
+  _RUN_ENV=()
 
   # Positive control: the SAME prompt with the opt-in on still recommends /plan-and-execute, so the
   # silence above is the switch and not a broken detector.
@@ -1358,11 +1363,13 @@ case_plan_gate() {
   run_hook "$good" "sid-pg-1" "$(pl_prompt "$good" sid-pg-1 "$big")"
   expect_rc 0 "large task, opt-in: UserPromptSubmit MUST NOT exit 2"
   expect_has "GOVERNANCE RECOMMENDATION" "large task, opt-in: recommends /plan-and-execute"
-  _RUN_ENV=()
 
+  # Must-not-fire WITH the gate on: the detector itself has to stay quiet on small talk, otherwise a
+  # detector broken to fire on every prompt would pass.
   run_hook "$good" "sid-pg-2" "$(pl_prompt "$good" sid-pg-2 "what time is it")"
-  expect_rc 0 "small talk: allowed"
-  expect_quiet "small talk: no planning nag"
+  expect_rc 0 "small talk, opt-in: allowed"
+  expect_quiet "small talk, opt-in: no planning nag"
+  _RUN_ENV=()
 }
 
 # --- parallel-import.sh -----------------------------------------------------------------------
